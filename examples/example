@@ -1,0 +1,59 @@
+// Hello, Comment!
+
+foobt: bool = true;
+foobf: bool = false;
+fooc: char = 'a;
+fooi: int = 2;
+fooarrb: [2] bool = [true || false, false];
+fooarrc: [] char = "Hello, World";
+fooarrcn: [4] char;
+if_: int;
+truea: bool = true && false || fooi == 2;
+
+foo: (left: bool, right: bool) char
+{
+  return left && right ? 0 : 1;
+}
+
+bar: () void
+{
+  return 1 + 2 * 3 == 7 && 1 == 1 || 2 == 2;
+}
+
+main: ()
+{
+  print(foobt);
+  print(foobf);
+  print(fooc);
+  print(fooi);
+  print(fooarrb);
+  print(fooarrc);
+  print(fooarrc);
+
+  foo: [2] int;
+  bar: int;
+
+  foo[0] := bar + 1;
+
+  if foobt then
+    {
+      if foobt then
+        fooi := 2;
+    }
+  else
+    {
+    }
+
+  if foobt then
+    while foobt do
+      break;
+
+  while foobt do
+    {
+      continue;
+    }
+
+  return;
+}
+
+// Hello, Comment!
