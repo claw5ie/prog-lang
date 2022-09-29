@@ -1,125 +1,170 @@
-#include "utils.c"
-#include "types.h"
-
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdbool.h>
+#include <stddef.h>
 #include <ctype.h>
 #include <limits.h>
+#include <assert.h>
 
-enum TokenType
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/stat.h>
+
+#include "compiler.h"
+
+void *
+malloc_or_exit(size_t size)
+{
+  void *data = malloc(size);
+
+  if (data == NULL)
+    assert(false);
+
+  return data;
+}
+
+void *
+realloc_or_exit(void *data, size_t size)
+{
+  void *new_data = realloc(data, size);
+
+  if (new_data == NULL)
+    assert(false);
+
+  return new_data;
+}
+
+const char *
+is_prefix(const char *prefix, const char *string)
+{
+  char p, s;
+
+  do
+    {
+      p = *prefix++;
+      s = *string++;
+    }
+  while (p != '\0' && p == s);
+
+  return p != '\0' ? NULL : string - 1;
+}
+
+char *
+read_entire_file(const char *filepath)
+{
+  enum
+    {
+      Ok,
+      Failed_To_Open_File,
+      Failed_To_Stat_File,
+      Failed_To_Read_File,
+      Failed_To_Close_File
+    } status = Ok;
+
+  int fd = open(filepath, O_RDONLY);
+
+  if (fd == -1)
+    {
+      status = Failed_To_Open_File;
+      goto skip_body;
+    }
+
+  off_t file_size = 0;
+
   {
-    Token_Binop_Start,
-    Token_Or,
-    Token_And,
-    Token_Double_Equals,
-    Token_Plus,
-    Token_Minus,
-    Token_Times,
-    Token_Divide,
-    Token_Binop_End,
+    struct stat stats;
 
-    Token_Open_Paren,
-    Token_Open_Bracket,
-    Token_Open_Curly,
+    if (fstat(fd, &stats) == -1)
+      {
+        status = Failed_To_Stat_File;
+        goto skip_body;
+      }
 
-    Token_Close_Paren,
-    Token_Close_Bracket,
-    Token_Close_Curly,
+    file_size = stats.st_size;
+  }
 
-    Token_Colon_Equal,
-    Token_Colon,
-    Token_Comma,
-    Token_Equal,
-    Token_Question_Mark,
-    Token_Semicolon,
+  char *file_data = malloc_or_exit(file_size + 1);
 
-    Token_Type_Start,
-    Token_Type_Void,
-    Token_Type_Char,
-    Token_Type_Bool,
-    Token_Type_Int,
-    Token_Type_End,
+  if (read(fd, file_data, file_size) != file_size)
+    {
+      status = Failed_To_Read_File;
+      goto skip_body;
+    }
 
-    Token_Print,
-    Token_If,
-    Token_Then,
-    Token_Else,
-    Token_While,
-    Token_Do,
-    Token_Break,
-    Token_Continue,
-    Token_Return,
+  file_data[file_size] = '\0';
 
-    Token_Integer_Literal,
-    Token_False_Literal,
-    Token_True_Literal,
-    Token_Char_Literal,
-    Token_String_Literal,
-    Token_Identifier,
+  if (close(fd) == -1)
+    {
+      status = Failed_To_Close_File;
+      goto skip_body;
+    }
 
-    Token_End_Of_File
-  };
-typedef enum TokenType TokenType;
+ skip_body: { }
+  const char *action = NULL;
 
-typedef struct Token Token;
-struct Token
+  switch (status)
+    {
+    case Ok:
+      return file_data;
+    case Failed_To_Open_File:
+      action = "open";
+      break;
+    case Failed_To_Stat_File:
+      action = "stat";
+      break;
+    case Failed_To_Read_File:
+      action = "read";
+      break;
+    case Failed_To_Close_File:
+      action = "close";
+      break;
+    }
+
+  fprintf(stderr,
+          "ERROR: failed to %s file \'%s\'.\n",
+          action,
+          filepath);
+  assert(false);
+}
+
+String
+copy_view_to_string(StringView view)
 {
-  TokenType type;
-  StringView view;
-};
+  String str;
+  str.data = malloc_or_exit(view.size + 1);
+  str.size = view.size;
 
-typedef struct Tokenizer Tokenizer;
-struct Tokenizer
+  memcpy(str.data, view.data, view.size);
+  str.data[view.size] = '\0';
+
+  return str;
+}
+
+StringView
+string2view(String str)
 {
-  const char *at;
-  Token token;
-  StringView last_id;
-};
+  return (StringView){ str.data, str.size };
+}
+
+bool
+are_views_equal(StringView v0, StringView v1)
+{
+  if (v0.size != v1.size)
+    return false;
+
+  while (v0.size-- > 0)
+    if (v0.data[v0.size] != v1.data[v0.size])
+      return false;
+
+  return true;
+}
 
 #define LOWEST_PREC (-127)
-#define HIGHEST_PREC (127)
+#define HIGHEST_PREC 127
+#define MAX_FRAME_COUNT 64
 
-enum AstSymbolType
-  {
-    Ast_Symbol_Var,
-    Ast_Symbol_Array,
-    Ast_Symbol_Func
-  };
-typedef enum AstSymbolType AstSymbolType;
-
-typedef struct AstSymbol AstSymbol;
-struct AstSymbol
-{
-  AstSymbolType type;
-  String id;
-  u32 frame;
-};
-
-typedef struct AstSymbolNode AstSymbolNode;
-struct AstSymbolNode
-{
-  AstSymbol data;
-  AstSymbolNode *next;
-};
-
-typedef struct AstSymbolTable AstSymbolTable;
-struct AstSymbolTable
-{
-  AstSymbolNode **data;
-  size_t count;
-  size_t capacity;
-};
-
-typedef struct Compiler Compiler;
-struct Compiler
-{
-  Tokenizer tokz;
-
-  u32 *frames;
-  u32 frame_count;
-  u32 frame_capacity;
-  u32 last_unused_frame;
-
-  AstSymbolTable symbols;
-};
+static Compiler compiler;
 
 void advance(Compiler *c);
 void assert_token_is(Compiler *c, TokenType type);
@@ -132,8 +177,6 @@ void parse_function_declaration(Compiler *c);
 void parse_arg_list(Compiler *c);
 void parse_stmt_block(Compiler *c, bool should_create_frame);
 
-static Compiler compiler;
-
 void
 compile(const char *filepath)
 {
@@ -141,7 +184,6 @@ compile(const char *filepath)
 
   compiler.tokz.at = file_data;
 
-#define MAX_FRAME_COUNT 64
   static u32 frames[MAX_FRAME_COUNT];
 
   compiler.frames = frames;
