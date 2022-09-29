@@ -158,3 +158,16 @@ string2view(String str)
 {
   return (StringView){ str.data, str.size };
 }
+
+bool
+are_views_equal(StringView v0, StringView v1)
+{
+  if (v0.size != v1.size)
+    return false;
+
+  while (v0.size-- > 0)
+    if (v0.data[v0.size] != v1.data[v0.size])
+      return false;
+
+  return true;
+}

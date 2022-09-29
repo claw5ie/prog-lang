@@ -1,4 +1,5 @@
 #include "utils.c"
+#include "types.h"
 
 #include <ctype.h>
 #include <limits.h>
@@ -70,15 +71,54 @@ struct Tokenizer
 {
   const char *at;
   Token token;
+  StringView last_id;
 };
 
 #define LOWEST_PREC (-127)
 #define HIGHEST_PREC (127)
 
+enum AstSymbolType
+  {
+    Ast_Symbol_Var,
+    Ast_Symbol_Array,
+    Ast_Symbol_Func
+  };
+typedef enum AstSymbolType AstSymbolType;
+
+typedef struct AstSymbol AstSymbol;
+struct AstSymbol
+{
+  AstSymbolType type;
+  String id;
+  u32 frame;
+};
+
+typedef struct AstSymbolNode AstSymbolNode;
+struct AstSymbolNode
+{
+  AstSymbol data;
+  AstSymbolNode *next;
+};
+
+typedef struct AstSymbolTable AstSymbolTable;
+struct AstSymbolTable
+{
+  AstSymbolNode **data;
+  size_t count;
+  size_t capacity;
+};
+
 typedef struct Compiler Compiler;
 struct Compiler
 {
   Tokenizer tokz;
+
+  u32 *frames;
+  u32 frame_count;
+  u32 frame_capacity;
+  u32 last_unused_frame;
+
+  AstSymbolTable symbols;
 };
 
 void advance(Compiler *c);
@@ -90,7 +130,7 @@ void parse_variable_declaration(Compiler *c);
 void parse_array_declaration(Compiler *c);
 void parse_function_declaration(Compiler *c);
 void parse_arg_list(Compiler *c);
-void parse_stmt_block(Compiler *c);
+void parse_stmt_block(Compiler *c, bool should_create_frame);
 
 static Compiler compiler;
 
@@ -101,14 +141,150 @@ compile(const char *filepath)
 
   compiler.tokz.at = file_data;
 
+#define MAX_FRAME_COUNT 64
+  static u32 frames[MAX_FRAME_COUNT];
+
+  compiler.frames = frames;
+  compiler.frame_count = 0;
+  compiler.frame_capacity = MAX_FRAME_COUNT;
+  compiler.last_unused_frame = 0;
+
+  compiler.symbols.count = 0;
+  compiler.symbols.capacity = 32;
+  compiler.symbols.data
+    = malloc_or_exit(compiler.symbols.capacity
+                     * sizeof(*compiler.symbols.data));
+
   parse_top_level(&compiler);
 
   free(file_data);
 }
 
 void
+push_frame(Compiler *c)
+{
+  assert(c->frame_count < c->frame_capacity);
+
+  c->frames[c->frame_count++] = c->last_unused_frame++;
+}
+
+void
+pop_frame(Compiler *c)
+{
+  assert(c->frame_count > 0);
+
+  --c->frame_count;
+}
+
+u32
+get_current_frame(Compiler *c)
+{
+  assert(c->frame_count > 0);
+
+  return c->frames[c->frame_count - 1];
+}
+
+u32
+compute_hash(StringView view, u32 frame)
+{
+  u32 hash = 5381;
+
+  while (view.size-- > 0)
+    hash = 33 * hash + view.data[view.size];
+
+  hash = 33 * hash + frame;
+
+  return hash;
+}
+
+AstSymbol *
+insert_ast_symbol(Compiler *c, StringView id)
+{
+  if (c->symbols.capacity == 0
+      || (double)c->symbols.count / c->symbols.capacity > 0.75)
+    {
+      size_t new_cap = 2 * c->symbols.capacity + 1;
+      AstSymbolNode **new_data
+        = malloc_or_exit(new_cap * sizeof(*new_data));
+
+      for (size_t i = new_cap; i-- > 0; )
+        new_data[i] = NULL;
+
+      for (size_t i = c->symbols.capacity; i-- > 0; )
+        {
+          AstSymbolNode *node = c->symbols.data[i];
+
+          while (node != NULL)
+            {
+              size_t ind = compute_hash(string2view(node->data.id),
+                                        node->data.frame) % new_cap;
+
+              AstSymbolNode *const next = node->next;
+
+              node->next = new_data[ind];
+              new_data[ind] = node;
+
+              node = next;
+            }
+        }
+
+      free(c->symbols.data);
+      c->symbols.data = new_data;
+      c->symbols.capacity = new_cap;
+    }
+
+  u32 frame = get_current_frame(c);
+  size_t ind = compute_hash(id, frame) % c->symbols.capacity;
+
+  AstSymbolNode *node = c->symbols.data[ind];
+
+  while (node != NULL)
+    {
+      if (frame == node->data.frame
+          && are_views_equal(id, string2view(node->data.id)))
+        assert(false && "redefinition");
+
+      node = node->next;
+    }
+
+  node = malloc_or_exit(sizeof(*node));
+  node->data.id = copy_view_to_string(id);
+  node->data.frame = frame;
+
+  node->next = c->symbols.data[ind];
+  c->symbols.data[ind] = node;
+
+  return &node->data;
+}
+
+AstSymbol *
+find_symbol_in_frames(Compiler *c, StringView view)
+{
+  for (u32 i = c->frame_count; i-- > 0; )
+    {
+      u32 frame = c->frames[i];
+
+      AstSymbolNode *node = c->symbols.data[compute_hash(view, frame)
+                                            % c->symbols.capacity];
+
+      while (node != NULL)
+        {
+          if (frame == node->data.frame
+              && are_views_equal(view, string2view(node->data.id)))
+            return &node->data;
+
+          node = node->next;
+        }
+    }
+
+  assert(false && "undeclared identifier");
+}
+
+void
 parse_top_level(Compiler *c)
 {
+  push_frame(c);
+
   advance(c);
 
   do
@@ -116,27 +292,35 @@ parse_top_level(Compiler *c)
       assert_token_is(c, Token_Identifier);
       advance(c);
       assert_token_is(c, Token_Colon);
+
+      AstSymbol *symbol = insert_ast_symbol(c, c->tokz.last_id);
+
       advance(c);
 
       switch (c->tokz.token.type)
         {
         case Token_Open_Paren:
           advance(c);
+          symbol->type = Ast_Symbol_Func;
           parse_function_declaration(c);
           break;
         case Token_Open_Bracket:
           advance(c);
+          symbol->type = Ast_Symbol_Array;
           parse_array_declaration(c);
           assert_token_is(c, Token_Semicolon);
           advance(c);
           break;
         default:
+          symbol->type = Ast_Symbol_Var;
           parse_variable_declaration(c);
           assert_token_is(c, Token_Semicolon);
           advance(c);
         }
     }
   while (c->tokz.token.type != Token_End_Of_File);
+
+  pop_frame(c);
 }
 
 bool
@@ -284,6 +468,7 @@ advance(Compiler *c)
 
       c->tokz.token.type = Token_Identifier;
       c->tokz.token.view.size = c->tokz.at - c->tokz.token.view.data;
+      c->tokz.last_id = c->tokz.token.view;
 
       return;
     }
@@ -354,6 +539,8 @@ parse_base(Compiler *c)
       advance(c);
       break;
     case Token_Identifier:
+      find_symbol_in_frames(c, c->tokz.last_id);
+
       advance(c);
 
       switch (c->tokz.token.type)
@@ -468,10 +655,12 @@ parse_single_statement(Compiler *c)
           break;
         case Token_Open_Curly:
           advance(c);
-          parse_stmt_block(c);
+          parse_stmt_block(c, true);
           break;
         default:
+          push_frame(c);
           parse_single_statement(c);
+          pop_frame(c);
         }
 
       if (c->tokz.token.type == Token_Else)
@@ -485,10 +674,12 @@ parse_single_statement(Compiler *c)
               break;
             case Token_Open_Curly:
               advance(c);
-              parse_stmt_block(c);
+              parse_stmt_block(c, true);
               break;
             default:
+              push_frame(c);
               parse_single_statement(c);
+              pop_frame(c);
             }
         }
 
@@ -506,10 +697,12 @@ parse_single_statement(Compiler *c)
           break;
         case Token_Open_Curly:
           advance(c);
-          parse_stmt_block(c);
+          parse_stmt_block(c, true);
           break;
         default:
+          push_frame(c);
           parse_single_statement(c);
+          pop_frame(c);
         }
 
       break;
@@ -541,10 +734,14 @@ parse_single_statement(Compiler *c)
       switch (c->tokz.token.type)
         {
         case Token_Open_Paren:
+          find_symbol_in_frames(c, c->tokz.last_id);
+
           advance(c);
           parse_arg_list(c);
           break;
         case Token_Open_Bracket:
+          find_symbol_in_frames(c, c->tokz.last_id);
+
           advance(c);
           parse_expr(c);
           assert_token_is(c, Token_Close_Bracket);
@@ -554,21 +751,30 @@ parse_single_statement(Compiler *c)
           parse_expr(c);
           break;
         case Token_Colon_Equal:
+          find_symbol_in_frames(c, c->tokz.last_id);
+
           advance(c);
           parse_expr(c);
           break;
         case Token_Colon:
-          advance(c);
+          {
+            AstSymbol *symbol
+              = insert_ast_symbol(c, c->tokz.last_id);
 
-          switch (c->tokz.token.type)
-            {
-            case Token_Open_Bracket:
-              advance(c);
-              parse_array_declaration(c);
-              break;
-            default:
-              parse_variable_declaration(c);
-            }
+            advance(c);
+
+            switch (c->tokz.token.type)
+              {
+              case Token_Open_Bracket:
+                advance(c);
+                symbol->type = Ast_Symbol_Array;
+                parse_array_declaration(c);
+                break;
+              default:
+                symbol->type = Ast_Symbol_Var;
+                parse_variable_declaration(c);
+              }
+          }
 
           break;
         default:
@@ -585,8 +791,11 @@ parse_single_statement(Compiler *c)
 }
 
 void
-parse_stmt_block(Compiler *c)
+parse_stmt_block(Compiler *c, bool should_create_frame)
 {
+  if (should_create_frame)
+    push_frame(c);
+
   while (c->tokz.token.type != Token_Close_Curly
          && c->tokz.token.type != Token_End_Of_File)
     {
@@ -595,6 +804,9 @@ parse_stmt_block(Compiler *c)
 
   assert_token_is(c, Token_Close_Curly);
   advance(c);
+
+  if (should_create_frame)
+    pop_frame(c);
 }
 
 void
@@ -682,6 +894,8 @@ parse_array_declaration(Compiler *c)
 void
 parse_function_declaration(Compiler *c)
 {
+  push_frame(c);
+
   if (c->tokz.token.type == Token_Close_Paren)
     ;
   else
@@ -693,6 +907,12 @@ parse_function_declaration(Compiler *c)
           assert_token_is(c, Token_Colon);
           advance(c);
           assert_token_is_non_void_type(c);
+
+          {
+            AstSymbol *symbol = insert_ast_symbol(c, c->tokz.last_id);
+            symbol->type = Ast_Symbol_Var;
+          }
+
           advance(c);
 
           if (c->tokz.token.type == Token_Close_Paren)
@@ -716,5 +936,7 @@ parse_function_declaration(Compiler *c)
 
   advance(c);
 
-  parse_stmt_block(c);
+  parse_stmt_block(c, false);
+
+  pop_frame(c);
 }
