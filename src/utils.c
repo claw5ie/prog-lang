@@ -9,6 +9,20 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
+typedef struct String String;
+struct String
+{
+  char *data;
+  size_t size;
+};
+
+typedef struct StringView StringView;
+struct StringView
+{
+  const char *data;
+  size_t size;
+};
+
 const char *
 is_prefix(const char *prefix, const char *string)
 {
@@ -124,4 +138,23 @@ read_entire_file(const char *filepath)
           action,
           filepath);
   assert(false);
+}
+
+String
+copy_view_to_string(StringView view)
+{
+  String str;
+  str.data = malloc_or_exit(view.size + 1);
+  str.size = view.size;
+
+  memcpy(str.data, view.data, view.size);
+  str.data[view.size] = '\0';
+
+  return str;
+}
+
+StringView
+string2view(String str)
+{
+  return (StringView){ str.data, str.size };
 }

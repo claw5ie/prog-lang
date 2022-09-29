@@ -62,8 +62,7 @@ typedef struct Token Token;
 struct Token
 {
   TokenType type;
-  const char *text;
-  size_t size;
+  StringView view;
 };
 
 typedef struct Tokenizer Tokenizer;
@@ -167,19 +166,19 @@ advance(Compiler *c)
     c->tokz.at = at;
   }
 
-  c->tokz.token.text = c->tokz.at;
+  c->tokz.token.view.data = c->tokz.at;
 
   switch (*c->tokz.at)
     {
     case '\0':
       c->tokz.token.type = Token_End_Of_File;
-      c->tokz.token.size = 0;
+      c->tokz.token.view.size = 0;
       return;
     case '\'':
       assert(c->tokz.at[1] != '\0');
       c->tokz.at += 2;
       c->tokz.token.type = Token_Char_Literal;
-      c->tokz.token.size = 2;
+      c->tokz.token.view.size = 2;
       return;
     case '\"':
       ++c->tokz.at;
@@ -191,7 +190,7 @@ advance(Compiler *c)
       ++c->tokz.at;
 
       c->tokz.token.type = Token_String_Literal;
-      c->tokz.token.size = c->tokz.at - c->tokz.token.text;
+      c->tokz.token.view.size = c->tokz.at - c->tokz.token.view.data;
 
       return;
     default:
@@ -201,7 +200,7 @@ advance(Compiler *c)
             ;
 
           c->tokz.token.type = Token_Integer_Literal;
-          c->tokz.token.size = c->tokz.at - c->tokz.token.text;
+          c->tokz.token.view.size = c->tokz.at - c->tokz.token.view.data;
 
           return;
         }
@@ -271,7 +270,8 @@ advance(Compiler *c)
         {
           c->tokz.at = after_prefix;
           c->tokz.token.type = keywords[i].type;
-          c->tokz.token.size = c->tokz.at - c->tokz.token.text;
+          c->tokz.token.view.size
+            = c->tokz.at - c->tokz.token.view.data;
 
           return;
         }
@@ -283,7 +283,7 @@ advance(Compiler *c)
         ;
 
       c->tokz.token.type = Token_Identifier;
-      c->tokz.token.size = c->tokz.at - c->tokz.token.text;
+      c->tokz.token.view.size = c->tokz.at - c->tokz.token.view.data;
 
       return;
     }
