@@ -128,6 +128,28 @@ read_entire_file(const char *filepath)
   assert(false);
 }
 
+void *
+_stack_push(void *stack, void *elem, size_t elem_size)
+{
+  StackHeader *header = stack_header(stack);
+
+  if (header->count >= header->capacity)
+    {
+      header->capacity = 2 * header->capacity + 1;
+      header = realloc_or_exit(header,
+                               sizeof(StackHeader)
+                               + header->capacity * elem_size);
+      stack = header + 1;
+    }
+
+  memcpy((char *)stack + header->count * elem_size,
+         elem,
+         elem_size);
+  ++header->count;
+
+  return stack;
+}
+
 String
 copy_view_to_string(StringView view)
 {
