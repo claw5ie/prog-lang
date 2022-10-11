@@ -45,6 +45,14 @@ main: ()
     }
 
   if foobt then
+    {
+
+    }
+
+  if foobt then
+    ;
+
+  if foobt then
     while foobt do
       break;
 
