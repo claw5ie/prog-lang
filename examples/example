@@ -17,7 +17,7 @@ foo: (left: bool, right: bool) char
 
 bar: () void
 {
-  return 1 + 2 * 3 == 7 && 1 == 1 || 2 == 2;
+  return (1 + 2) * 3 == 7 && 1 == 1 || 2 == 2;
 }
 
 main: ()
@@ -33,7 +33,7 @@ main: ()
   foo: [2] int;
   bar: int;
 
-  foo[0] := bar + 1;
+  foo[0] := foo[0] + bar + bar();
 
   if foobt then
     {
