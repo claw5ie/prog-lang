@@ -979,6 +979,7 @@ parse_single_statement(Compiler *c)
         }
 
       stmt.as.iff.if_true = parse_body(c);
+      stmt.as.iff.if_false = (AstStmtBlock){ NULL, 0 };
 
       if (c->tokz.token.type == Token_Else)
         {
