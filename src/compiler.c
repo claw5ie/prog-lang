@@ -475,6 +475,16 @@ token_type2binop_type(TokenType type)
     }
 }
 
+void
+expect_symbol(AstSymbol *symbol, AstSymbolType type)
+{
+  if (symbol->type != type)
+    {
+      fputs("ERROR: unexpected type of symbol.\n", stderr);
+      exit(EXIT_FAILURE);
+    }
+}
+
 bool
 can_char_be_in_identifier(char ch)
 {
@@ -789,6 +799,7 @@ parse_base(Compiler *c)
             advance(c);
             expr = malloc_or_exit(sizeof(AstExpr));
             expr->type = Ast_Expr_Func_Call;
+            expect_symbol(symbol, Ast_Symbol_Func);
             expr->as.func_call.symbol = &symbol->as.func;
             expr->as.func_call.expr_list
               = parse_arg_list(c, &expr->as.func_call.expr_count);
@@ -797,6 +808,7 @@ parse_base(Compiler *c)
             advance(c);
             expr = malloc_or_exit(sizeof(AstExpr));
             expr->type = Ast_Expr_Array_Access;
+            expect_symbol(symbol, Ast_Symbol_Array);
             expr->as.array_access.symbol = &symbol->as.array;
             expr->as.array_access.index = parse_expr(c);
             assert_token_is(c, Token_Close_Bracket);
@@ -1023,6 +1035,7 @@ parse_single_statement(Compiler *c)
 
             advance(c);
 
+            expect_symbol(symbol, Ast_Symbol_Func);
             stmt.as.func_call.symbol = &symbol->as.func;
             stmt.as.func_call.expr_list
               = parse_arg_list(c, &stmt.as.func_call.expr_count);
@@ -1034,6 +1047,7 @@ parse_single_statement(Compiler *c)
             stmt.type = Ast_Stmt_Array_Assign;
             AstSymbol *symbol
               = find_symbol_in_frames(c, c->tokz.last_id);
+            expect_symbol(symbol, Ast_Symbol_Array);
             stmt.as.array_assign.symbol = &symbol->as.array;
 
             advance(c);
@@ -1051,6 +1065,7 @@ parse_single_statement(Compiler *c)
             stmt.type = Ast_Stmt_Var_Assign;
             AstSymbol *symbol
               = find_symbol_in_frames(c, c->tokz.last_id);
+            expect_symbol(symbol, Ast_Symbol_Var);
             stmt.as.var_assign.symbol = &symbol->as.var;
 
             advance(c);
