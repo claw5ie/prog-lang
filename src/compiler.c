@@ -1141,9 +1141,7 @@ parse_list_initilizer(Compiler *c)
 void
 parse_array_declaration(Compiler *c, AstArrayDecl *decl)
 {
-  if (c->tokz.token.type == Token_Close_Bracket)
-    ;
-  else
+  if (c->tokz.token.type != Token_Close_Bracket)
     {
       decl->size = parse_expr(c);
       assert_token_is(c, Token_Close_Bracket);
@@ -1196,9 +1194,7 @@ parse_function_declaration(Compiler *c, AstFuncDecl *decl)
   decl->param_list_idx = stack_count(c->ast.func_param_list);
   decl->param_count = 0;
 
-  if (c->tokz.token.type == Token_Close_Paren)
-    ;
-  else
+  if (c->tokz.token.type != Token_Close_Paren)
     {
       do
         {
