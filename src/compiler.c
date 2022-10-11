@@ -1178,7 +1178,7 @@ parse_variable_declaration(Compiler *c, AstVarDecl *decl)
 }
 
 AstListInit
-parse_list_initilizer(Compiler *c)
+parse_list_initializer(Compiler *c)
 {
   AstListInit list_init;
   list_init.type = Ast_List_Init_Expr_List;
@@ -1241,7 +1241,7 @@ parse_array_declaration(Compiler *c, AstArrayDecl *decl)
         {
         case Token_Open_Bracket:
           advance(c);
-          decl->list_init = parse_list_initilizer(c);
+          decl->list_init = parse_list_initializer(c);
           break;
         case Token_String_Literal:
           decl->list_init.type = Ast_List_Init_String_Literal;
