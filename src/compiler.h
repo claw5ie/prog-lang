@@ -393,7 +393,7 @@ struct AstStmt
 typedef struct Ast Ast;
 struct Ast
 {
-  Stack(AstDecl) decl_list;
+  Stack(AstDecl) global_decl_list;
   Stack(AstFuncParam) func_param_list;
   Stack(AstExpr *) expr_list;
   Stack(AstStmt) stmt_list;

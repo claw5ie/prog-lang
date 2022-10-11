@@ -261,7 +261,7 @@ compile(const char *filepath)
 
   compiler.tokz.at = file_data;
 
-  stack_init(compiler.ast.decl_list, 32);
+  stack_init(compiler.ast.global_decl_list, 32);
   stack_init(compiler.ast.func_param_list, 32);
   stack_init(compiler.ast.expr_list, 32);
   stack_init(compiler.ast.stmt_list, 32);
@@ -481,7 +481,7 @@ parse_top_level(Compiler *c)
           advance(c);
         }
 
-      stack_push(c->ast.decl_list, decl);
+      stack_push(c->ast.global_decl_list, decl);
     }
   while (c->tokz.token.type != Token_End_Of_File);
 
