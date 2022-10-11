@@ -19,7 +19,12 @@ malloc_or_exit(size_t size)
   void *data = malloc(size);
 
   if (data == NULL)
-    assert(false);
+    {
+      fprintf(stderr,
+              "ERROR: failed to allocate %zu bytes.\n",
+              size);
+      abort();
+    }
 
   return data;
 }
@@ -30,7 +35,12 @@ realloc_or_exit(void *data, size_t size)
   void *new_data = realloc(data, size);
 
   if (new_data == NULL)
-    assert(false);
+    {
+      fprintf(stderr,
+              "ERROR: failed to reallocate to %zu bytes.\n",
+              size);
+      abort();
+    }
 
   return new_data;
 }
@@ -125,7 +135,7 @@ read_entire_file(const char *filepath)
           "ERROR: failed to %s file \'%s\'.\n",
           action,
           filepath);
-  assert(false);
+  abort();
 }
 
 void *
@@ -242,8 +252,6 @@ are_views_equal(StringView v0, StringView v1)
 
 static Compiler compiler;
 
-void advance(Compiler *c);
-void assert_token_is(Compiler *c, TokenType type);
 void parse_top_level(Compiler *c);
 AstExpr *parse_prec(Compiler *c, int limit);
 AstExpr *parse_expr(Compiler *c);
@@ -372,7 +380,13 @@ insert_ast_symbol(Compiler *c, StringView id)
     {
       if (frame == node->data.frame
           && are_views_equal(id, string2view(node->data.id)))
-        assert(false && "redefinition");
+        {
+          fprintf(stderr,
+                  "ERROR: redefinition of identifier \'%.*s\'.\n",
+                  (int)id.size,
+                  id.data);
+          exit(EXIT_FAILURE);
+        }
 
       node = node->next;
     }
@@ -388,26 +402,51 @@ insert_ast_symbol(Compiler *c, StringView id)
 }
 
 AstSymbol *
-find_symbol_in_frames(Compiler *c, StringView view)
+find_symbol_in_frames(Compiler *c, StringView id)
 {
   for (u32 i = c->frame_count; i-- > 0; )
     {
       u32 frame = c->frames[i];
 
-      AstSymbolNode *node = c->symbols.data[compute_hash(view, frame)
+      AstSymbolNode *node = c->symbols.data[compute_hash(id, frame)
                                             % c->symbols.capacity];
 
       while (node != NULL)
         {
           if (frame == node->data.frame
-              && are_views_equal(view, string2view(node->data.id)))
+              && are_views_equal(id, string2view(node->data.id)))
             return &node->data;
 
           node = node->next;
         }
     }
 
-  assert(false && "undeclared identifier");
+  fprintf(stderr,
+          "ERROR: use of undeclared identifier \'%.*s\'.\n",
+          (int)id.size,
+          id.data);
+  exit(EXIT_FAILURE);
+}
+
+void
+assert_token_is(Compiler *c, TokenType expected)
+{
+  if (c->tokz.token.type != expected)
+    {
+      fputs("ERROR: unexpected token.\n", stderr);
+      exit(EXIT_FAILURE);
+    }
+}
+
+void
+assert_token_is_type(Compiler *c)
+{
+  if (!(Token_Type_Start < c->tokz.token.type
+        && c->tokz.token.type < Token_Type_End))
+    {
+      fputs("ERROR: token is not a type.\n", stderr);
+      exit(EXIT_FAILURE);
+    }
 }
 
 AstType
@@ -415,77 +454,25 @@ token_type2ast_type(Compiler *c)
 {
   TokenType type = c->tokz.token.type;
 
-  assert(Token_Type_Start < type && type < Token_Type_End);
-
-  return (AstType)(type - Token_Type_Start - 1);
+  if (Token_Type_Start < type && type < Token_Type_End)
+    return (AstType)(type - Token_Type_Start - 1);
+  else
+    {
+      fputs("ERROR: token is not a type.\n", stderr);
+      exit(EXIT_FAILURE);
+    }
 }
 
 AstBinopType
 token_type2binop_type(TokenType type)
 {
-  assert(Token_Binop_Start < type && type < Token_Binop_End);
-
-  return (AstBinopType)(type - Token_Binop_Start - 1);
-}
-
-void
-parse_top_level(Compiler *c)
-{
-  push_frame(c);
-
-  advance(c);
-
-  do
+  if (Token_Binop_Start < type && type < Token_Binop_End)
+    return (AstBinopType)(type - Token_Binop_Start - 1);
+  else
     {
-      assert_token_is(c, Token_Identifier);
-      advance(c);
-      assert_token_is(c, Token_Colon);
-
-      AstDecl decl;
-      AstSymbol *symbol = insert_ast_symbol(c, c->tokz.last_id);
-
-      advance(c);
-
-      switch (c->tokz.token.type)
-        {
-        case Token_Open_Paren:
-          advance(c);
-
-          decl.type = Ast_Decl_Func;
-          decl.as.func.symbol = &symbol->as.func;
-          symbol->type = Ast_Symbol_Func;
-          symbol->as.func.return_type = decl.as.func.return_type;
-
-          parse_function_declaration(c, &decl.as.func);
-          break;
-        case Token_Open_Bracket:
-          advance(c);
-
-          decl.type = Ast_Decl_Array;
-          decl.as.array.symbol = &symbol->as.array;
-          symbol->type = Ast_Symbol_Array;
-          symbol->as.array.type = decl.as.array.type;
-
-          parse_array_declaration(c, &decl.as.array);
-          assert_token_is(c, Token_Semicolon);
-          advance(c);
-          break;
-        default:
-          decl.type = Ast_Decl_Var;
-          decl.as.var.symbol = &symbol->as.var;
-          symbol->type = Ast_Symbol_Var;
-          symbol->as.var.type = decl.as.var.type;
-
-          parse_variable_declaration(c, &decl.as.var);
-          assert_token_is(c, Token_Semicolon);
-          advance(c);
-        }
-
-      stack_push(c->ast.global_decl_list, decl);
+      fputs("ERROR: token is not a binary operator.\n", stderr);
+      exit(EXIT_FAILURE);
     }
-  while (c->tokz.token.type != Token_End_Of_File);
-
-  pop_frame(c);
 }
 
 bool
@@ -524,7 +511,12 @@ advance(Compiler *c)
       c->tokz.token.view.size = 0;
       return;
     case '\'':
-      assert(c->tokz.at[1] != '\0');
+      if (c->tokz.at[1] == '\0')
+        {
+          fputs("ERROR: missing character literal.\n", stderr);
+          exit(EXIT_FAILURE);
+        }
+
       c->tokz.at += 2;
       c->tokz.token.type = Token_Char_Literal;
       c->tokz.token.view.size = 2;
@@ -535,7 +527,12 @@ advance(Compiler *c)
       while (*c->tokz.at != '\"' && *c->tokz.at != '\0')
         ++c->tokz.at;
 
-      assert(*c->tokz.at == '\"');
+      if (*c->tokz.at != '\"')
+        {
+          fputs("ERROR: not terminated string literal.\n", stderr);
+          exit(EXIT_FAILURE);
+        }
+
       ++c->tokz.at;
 
       c->tokz.token.type = Token_String_Literal;
@@ -638,27 +635,70 @@ advance(Compiler *c)
       return;
     }
   else
-    assert(false);
+    {
+      fputs("ERROR: unexpected token.\n", stderr);
+      exit(EXIT_FAILURE);
+    }
 }
 
 void
-assert_token_is(Compiler *c, TokenType expected)
+parse_top_level(Compiler *c)
 {
-  assert(c->tokz.token.type == expected);
-}
+  push_frame(c);
 
-void
-assert_token_is_type(Compiler *c)
-{
-  assert(Token_Type_Start < c->tokz.token.type
-         && c->tokz.token.type < Token_Type_End);
-}
+  advance(c);
 
-void
-assert_token_is_non_void_type(Compiler *c)
-{
-  assert_token_is_type(c);
-  assert(c->tokz.token.type != Token_Type_Void);
+  do
+    {
+      assert_token_is(c, Token_Identifier);
+      advance(c);
+      assert_token_is(c, Token_Colon);
+
+      AstDecl decl;
+      AstSymbol *symbol = insert_ast_symbol(c, c->tokz.last_id);
+
+      advance(c);
+
+      switch (c->tokz.token.type)
+        {
+        case Token_Open_Paren:
+          advance(c);
+
+          decl.type = Ast_Decl_Func;
+          decl.as.func.symbol = &symbol->as.func;
+          symbol->type = Ast_Symbol_Func;
+          symbol->as.func.return_type = decl.as.func.return_type;
+
+          parse_function_declaration(c, &decl.as.func);
+          break;
+        case Token_Open_Bracket:
+          advance(c);
+
+          decl.type = Ast_Decl_Array;
+          decl.as.array.symbol = &symbol->as.array;
+          symbol->type = Ast_Symbol_Array;
+          symbol->as.array.type = decl.as.array.type;
+
+          parse_array_declaration(c, &decl.as.array);
+          assert_token_is(c, Token_Semicolon);
+          advance(c);
+          break;
+        default:
+          decl.type = Ast_Decl_Var;
+          decl.as.var.symbol = &symbol->as.var;
+          symbol->type = Ast_Symbol_Var;
+          symbol->as.var.type = decl.as.var.type;
+
+          parse_variable_declaration(c, &decl.as.var);
+          assert_token_is(c, Token_Semicolon);
+          advance(c);
+        }
+
+      stack_push(c->ast.global_decl_list, decl);
+    }
+  while (c->tokz.token.type != Token_End_Of_File);
+
+  pop_frame(c);
 }
 
 int
@@ -769,7 +809,8 @@ parse_base(Compiler *c)
 
       break;
     default:
-      assert(false);
+      fputs("ERROR: unexpected token.\n", stderr);
+      exit(EXIT_FAILURE);
     }
 
   return expr;
@@ -917,7 +958,13 @@ parse_single_statement(Compiler *c)
       assert_token_is(c, Token_Then);
       advance(c);
 
-      assert(c->tokz.token.type != Token_Else);
+      if (c->tokz.token.type == Token_Else)
+        {
+          fputs("ERROR: body of an if statement cannot be empty"
+                " (at least semicolon is required).\n",
+                stderr);
+          exit(EXIT_FAILURE);
+        }
 
       stmt.as.iff.if_true = parse_body(c);
 
@@ -1043,7 +1090,8 @@ parse_single_statement(Compiler *c)
 
           break;
         default:
-          assert(false);
+          fputs("ERROR: unexpected token.\n", stderr);
+          exit(EXIT_FAILURE);
         }
 
       assert_token_is(c, Token_Semicolon);
@@ -1051,7 +1099,8 @@ parse_single_statement(Compiler *c)
 
       break;
     default:
-      assert(false);
+      fputs("ERROR: unexpected token.\n", stderr);
+      exit(EXIT_FAILURE);
     }
 
   return stmt;
@@ -1089,7 +1138,12 @@ void
 parse_variable_declaration(Compiler *c, AstVarDecl *decl)
 {
   decl->type = token_type2ast_type(c);
-  assert(decl->type != Ast_Type_Void);
+
+  if (decl->type == Ast_Type_Void)
+    {
+      fputs("ERROR: type cannot be void.\n", stderr);
+      exit(EXIT_FAILURE);
+    }
 
   advance(c);
 
@@ -1103,7 +1157,8 @@ parse_variable_declaration(Compiler *c, AstVarDecl *decl)
       decl->expr = parse_expr(c);
       break;
     default:
-      assert(false);
+      fputs("ERROR: unexpected token.\n", stderr);
+      exit(EXIT_FAILURE);
     }
 }
 
@@ -1150,7 +1205,12 @@ parse_array_declaration(Compiler *c, AstArrayDecl *decl)
   advance(c);
 
   decl->type = token_type2ast_type(c);
-  assert(decl->type != Ast_Type_Void);
+
+  if (decl->type == Ast_Type_Void)
+    {
+      fputs("ERROR: type cannot be void.\n", stderr);
+      exit(EXIT_FAILURE);
+    }
 
   advance(c);
 
@@ -1177,12 +1237,14 @@ parse_array_declaration(Compiler *c, AstArrayDecl *decl)
           advance(c);
           break;
         default:
-          assert(false);
+          fputs("ERROR: unexpected token.\n", stderr);
+          exit(EXIT_FAILURE);
         }
 
       break;
     default:
-      assert(false);
+      fputs("ERROR: unexpected token.\n", stderr);
+      exit(EXIT_FAILURE);
     }
 }
 
@@ -1209,7 +1271,11 @@ parse_function_declaration(Compiler *c, AstFuncDecl *decl)
           param.symbol = &symbol->as.var;
           param.type = token_type2ast_type(c);
 
-          assert(param.type != Ast_Type_Void);
+          if (param.type == Ast_Type_Void)
+            {
+              fputs("ERROR: type cannot be void.\n", stderr);
+              exit(EXIT_FAILURE);
+            }
 
           symbol->type = Ast_Symbol_Var;
           symbol->as.var.type = param.type;
