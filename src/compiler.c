@@ -1,3 +1,5 @@
+#include "compiler.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,8 +12,6 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
-
-#include "compiler.h"
 
 void *
 malloc_or_exit(size_t size)
@@ -129,6 +129,29 @@ read_entire_file(const char *filepath)
 }
 
 void *
+_stack_init(size_t capacity, size_t elem_size)
+{
+  StackHeader *data = malloc_or_exit(sizeof(StackHeader)
+                                     + capacity * elem_size);
+  data->count = 0;
+  data->capacity = capacity;
+
+  return data + 1;
+}
+
+void
+stack_destroy(void *stack)
+{
+  free(stack_header(stack));
+}
+
+size_t
+stack_count(void *stack)
+{
+  return stack_header(stack)->count;
+}
+
+void *
 _stack_push(void *stack, void *elem, size_t elem_size)
 {
   StackHeader *header = stack_header(stack);
@@ -150,6 +173,26 @@ _stack_push(void *stack, void *elem, size_t elem_size)
   return stack;
 }
 
+void *
+_stack_pop(void *stack, size_t count, size_t elem_size)
+{
+  if (count == 0)
+    return NULL;
+
+  StackHeader *header = stack_header(stack);
+
+  assert(count <= header->count);
+
+  void *data = malloc_or_exit(count * elem_size);
+
+  header->count -= count;
+  memcpy(data,
+         (char *)stack + header->count * elem_size,
+         count * elem_size);
+
+  return data;
+}
+
 String
 copy_view_to_string(StringView view)
 {
@@ -161,6 +204,17 @@ copy_view_to_string(StringView view)
   str.data[view.size] = '\0';
 
   return str;
+}
+
+char *
+copy_view_to_cstring(StringView view)
+{
+  char *data = malloc_or_exit(view.size + 1);
+
+  memcpy(data, view.data, view.size);
+  data[view.size] = '\0';
+
+  return data;
 }
 
 StringView
@@ -191,13 +245,14 @@ static Compiler compiler;
 void advance(Compiler *c);
 void assert_token_is(Compiler *c, TokenType type);
 void parse_top_level(Compiler *c);
-void parse_prec(Compiler *c, int limit);
-void parse_expr(Compiler *c);
-void parse_variable_declaration(Compiler *c);
-void parse_array_declaration(Compiler *c);
-void parse_function_declaration(Compiler *c);
-void parse_arg_list(Compiler *c);
-void parse_stmt_block(Compiler *c, bool should_create_frame);
+AstExpr *parse_prec(Compiler *c, int limit);
+AstExpr *parse_expr(Compiler *c);
+AstStmt parse_single_statement(Compiler *c);
+void parse_variable_declaration(Compiler *c, AstVarDecl *decl);
+void parse_array_declaration(Compiler *c, AstArrayDecl *decl);
+void parse_function_declaration(Compiler *c, AstFuncDecl *decl);
+AstExpr **parse_arg_list(Compiler *c, size_t *arg_count);
+AstStmtBlock parse_stmt_block(Compiler *c, bool should_create_frame);
 
 void
 compile(const char *filepath)
@@ -205,6 +260,11 @@ compile(const char *filepath)
   char *file_data = read_entire_file(filepath);
 
   compiler.tokz.at = file_data;
+
+  stack_init(compiler.ast.decl_list, 32);
+  stack_init(compiler.ast.func_param_list, 32);
+  stack_init(compiler.ast.expr_list, 32);
+  stack_init(compiler.ast.stmt_list, 32);
 
   static u32 frames[MAX_FRAME_COUNT];
 
@@ -220,6 +280,12 @@ compile(const char *filepath)
                      * sizeof(*compiler.symbols.data));
 
   parse_top_level(&compiler);
+
+  assert(stack_count(compiler.ast.expr_list) == 0);
+  assert(stack_count(compiler.ast.stmt_list) == 0);
+
+  stack_destroy(compiler.ast.expr_list);
+  stack_destroy(compiler.ast.stmt_list);
 
   free(file_data);
 }
@@ -344,6 +410,24 @@ find_symbol_in_frames(Compiler *c, StringView view)
   assert(false && "undeclared identifier");
 }
 
+AstType
+token_type2ast_type(Compiler *c)
+{
+  TokenType type = c->tokz.token.type;
+
+  assert(Token_Type_Start < type && type < Token_Type_End);
+
+  return (AstType)(type - Token_Type_Start - 1);
+}
+
+AstBinopType
+token_type2binop_type(TokenType type)
+{
+  assert(Token_Binop_Start < type && type < Token_Binop_End);
+
+  return (AstBinopType)(type - Token_Binop_Start - 1);
+}
+
 void
 parse_top_level(Compiler *c)
 {
@@ -357,6 +441,7 @@ parse_top_level(Compiler *c)
       advance(c);
       assert_token_is(c, Token_Colon);
 
+      AstDecl decl;
       AstSymbol *symbol = insert_ast_symbol(c, c->tokz.last_id);
 
       advance(c);
@@ -365,22 +450,38 @@ parse_top_level(Compiler *c)
         {
         case Token_Open_Paren:
           advance(c);
+
+          decl.type = Ast_Decl_Func;
+          decl.as.func.symbol = &symbol->as.func;
           symbol->type = Ast_Symbol_Func;
-          parse_function_declaration(c);
+          symbol->as.func.return_type = decl.as.func.return_type;
+
+          parse_function_declaration(c, &decl.as.func);
           break;
         case Token_Open_Bracket:
           advance(c);
+
+          decl.type = Ast_Decl_Array;
+          decl.as.array.symbol = &symbol->as.array;
           symbol->type = Ast_Symbol_Array;
-          parse_array_declaration(c);
+          symbol->as.array.type = decl.as.array.type;
+
+          parse_array_declaration(c, &decl.as.array);
           assert_token_is(c, Token_Semicolon);
           advance(c);
           break;
         default:
+          decl.type = Ast_Decl_Var;
+          decl.as.var.symbol = &symbol->as.var;
           symbol->type = Ast_Symbol_Var;
-          parse_variable_declaration(c);
+          symbol->as.var.type = decl.as.var.type;
+
+          parse_variable_declaration(c, &decl.as.var);
           assert_token_is(c, Token_Semicolon);
           advance(c);
         }
+
+      stack_push(c->ast.decl_list, decl);
     }
   while (c->tokz.token.type != Token_End_Of_File);
 
@@ -582,58 +683,114 @@ prec_of(TokenType type)
     }
 }
 
-void
+AstExpr *
 parse_base(Compiler *c)
 {
+  AstExpr *expr;
+
   switch (c->tokz.token.type)
     {
     case Token_Minus:
       advance(c);
-      parse_prec(c, HIGHEST_PREC);
+      expr = malloc_or_exit(sizeof(AstExpr));
+      expr->type = Ast_Expr_Unop_Minus;
+      expr->as.unop = parse_prec(c, HIGHEST_PREC);
       break;
     case Token_Open_Paren:
       advance(c);
-      parse_expr(c);
+      expr = parse_expr(c);
       assert_token_is(c, Token_Close_Paren);
       advance(c);
       break;
     case Token_Integer_Literal:
+      expr = malloc_or_exit(sizeof(AstExpr));
+      expr->type = Ast_Expr_Int64;
+
+      {
+        i64 value = 0;
+
+        for (size_t i = 0; i < c->tokz.token.view.size; i++)
+          value = 10 * value + (c->tokz.token.view.data[i] - '0');
+
+        expr->as.int64 = value;
+      }
+
+      advance(c);
+
+      break;
     case Token_False_Literal:
+      expr = malloc_or_exit(sizeof(AstExpr));
+      expr->type = Ast_Expr_Bool;
+      expr->as.boolean = 0;
+      advance(c);
+      break;
     case Token_True_Literal:
+      expr = malloc_or_exit(sizeof(AstExpr));
+      expr->type = Ast_Expr_Bool;
+      expr->as.boolean = 1;
+      advance(c);
+      break;
     case Token_Char_Literal:
+      expr = malloc_or_exit(sizeof(AstExpr));
+      expr->type = Ast_Expr_Char;
+      expr->as.character = c->tokz.token.view.data[1];
       advance(c);
       break;
     case Token_Identifier:
-      find_symbol_in_frames(c, c->tokz.last_id);
+      {
+        AstSymbol *symbol
+          = find_symbol_in_frames(c, c->tokz.last_id);
 
-      advance(c);
+        advance(c);
 
-      switch (c->tokz.token.type)
-        {
-        case Token_Open_Paren:
-          advance(c);
-          parse_arg_list(c);
-          break;
-        case Token_Open_Bracket:
-          advance(c);
-          parse_expr(c);
-          assert_token_is(c, Token_Close_Bracket);
-          advance(c);
-          break;
-        default:
-          ;
-        }
+        switch (c->tokz.token.type)
+          {
+          case Token_Open_Paren:
+            advance(c);
+            expr = malloc_or_exit(sizeof(AstExpr));
+            expr->type = Ast_Expr_Func_Call;
+            expr->as.func_call.symbol = &symbol->as.func;
+            expr->as.func_call.expr_list
+              = parse_arg_list(c, &expr->as.func_call.expr_count);
+            break;
+          case Token_Open_Bracket:
+            advance(c);
+            expr = malloc_or_exit(sizeof(AstExpr));
+            expr->type = Ast_Expr_Array_Access;
+            expr->as.array_access.symbol = &symbol->as.array;
+            expr->as.array_access.index = parse_expr(c);
+            assert_token_is(c, Token_Close_Bracket);
+            advance(c);
+            break;
+          default:
+            ;
+          }
+      }
 
       break;
     default:
       assert(false);
     }
+
+  return expr;
 }
 
-void
+AstExpr *
+combine(TokenType op, AstExpr *left, AstExpr *right)
+{
+  AstExpr *expr = malloc_or_exit(sizeof(AstExpr));
+  expr->type = Ast_Expr_Binop;
+  expr->as.binop.type = token_type2binop_type(op);
+  expr->as.binop.left = left;
+  expr->as.binop.right = right;
+
+  return expr;
+}
+
+AstExpr *
 parse_prec(Compiler *c, int limit)
 {
-  parse_base(c);
+  AstExpr *left = parse_base(c);
 
   TokenType op = c->tokz.token.type;
   int prev_prec = INT_MAX, curr_prec = prec_of(op);
@@ -643,7 +800,7 @@ parse_prec(Compiler *c, int limit)
       do
         {
           advance(c);
-          parse_prec(c, limit + 1);
+          left = combine(op, left, parse_prec(c, limit + 1));
           op = c->tokz.token.type;
         }
       while (curr_prec == prec_of(op));
@@ -651,31 +808,43 @@ parse_prec(Compiler *c, int limit)
       prev_prec = curr_prec;
       curr_prec = prec_of(op);
     }
+
+  return left;
 }
 
-void
+AstExpr *
 parse_expr(Compiler *c)
 {
-  parse_prec(c, LOWEST_PREC);
+  AstExpr *expr = parse_prec(c, LOWEST_PREC);
 
   if (c->tokz.token.type == Token_Question_Mark)
     {
+      AstExpr *inline_if = malloc_or_exit(sizeof(AstExpr));
+      inline_if->type = Ast_Expr_Inline_If;
+      inline_if->as.inline_if.cond = expr;
       advance(c);
-      parse_expr(c);
+      inline_if->as.inline_if.if_true = parse_expr(c);
       assert_token_is(c, Token_Colon);
       advance(c);
-      parse_expr(c);
+      inline_if->as.inline_if.if_false = parse_expr(c);
+      expr = inline_if;
     }
+
+  return expr;
 }
 
-void
-parse_arg_list(Compiler *c)
+AstExpr **
+parse_arg_list(Compiler *c, size_t *arg_count)
 {
+  size_t count = 0;
+
   if (c->tokz.token.type != Token_Close_Paren)
     {
       do
         {
-          parse_expr(c);
+          AstExpr *expr = parse_expr(c);
+          stack_push(c->ast.expr_list, expr);
+          ++count;
 
           if (c->tokz.token.type == Token_Close_Paren)
             break;
@@ -688,105 +857,106 @@ parse_arg_list(Compiler *c)
     }
 
   advance(c);
+
+  AstExpr **expr_list = stack_pop(c->ast.expr_list, count);
+  *arg_count = count;
+
+  return expr_list;
 }
 
-void
+AstStmtBlock
+parse_body(Compiler *c)
+{
+  AstStmtBlock block = { NULL, 0 };
+
+  switch (c->tokz.token.type)
+    {
+    case Token_Semicolon:
+      advance(c);
+      break;
+    case Token_Open_Curly:
+      advance(c);
+      block = parse_stmt_block(c, true);
+      break;
+    default:
+      push_frame(c);
+
+      block.count = 1;
+      block.data =
+        malloc_or_exit(block.count * sizeof(*block.data));
+      block.data[0] = parse_single_statement(c);
+
+      pop_frame(c);
+    }
+
+  return block;
+}
+
+AstStmt
 parse_single_statement(Compiler *c)
 {
+  AstStmt stmt;
+
   switch (c->tokz.token.type)
     {
     case Token_Print:
+      stmt.type = Ast_Stmt_Print;
       advance(c);
       assert_token_is(c, Token_Open_Paren);
       advance(c);
-      parse_expr(c);
+      stmt.as.print_expr = parse_expr(c);
       assert_token_is(c, Token_Close_Paren);
       advance(c);
       assert_token_is(c, Token_Semicolon);
       advance(c);
       break;
     case Token_If:
+      stmt.type = Ast_Stmt_If;
       advance(c);
-      parse_expr(c);
+      stmt.as.iff.cond = parse_expr(c);
       assert_token_is(c, Token_Then);
       advance(c);
 
       assert(c->tokz.token.type != Token_Else);
 
-      switch (c->tokz.token.type)
-        {
-        case Token_Semicolon:
-          advance(c);
-          break;
-        case Token_Open_Curly:
-          advance(c);
-          parse_stmt_block(c, true);
-          break;
-        default:
-          push_frame(c);
-          parse_single_statement(c);
-          pop_frame(c);
-        }
+      stmt.as.iff.if_true = parse_body(c);
 
       if (c->tokz.token.type == Token_Else)
         {
           advance(c);
-
-          switch (c->tokz.token.type)
-            {
-            case Token_Semicolon:
-              advance(c);
-              break;
-            case Token_Open_Curly:
-              advance(c);
-              parse_stmt_block(c, true);
-              break;
-            default:
-              push_frame(c);
-              parse_single_statement(c);
-              pop_frame(c);
-            }
+          stmt.as.iff.if_false = parse_body(c);
         }
 
       break;
     case Token_While:
+      stmt.type = Ast_Stmt_While;
       advance(c);
-      parse_expr(c);
+      stmt.as.while_loop.cond = parse_expr(c);
       assert_token_is(c, Token_Do);
       advance(c);
-
-      switch (c->tokz.token.type)
-        {
-        case Token_Semicolon:
-          advance(c);
-          break;
-        case Token_Open_Curly:
-          advance(c);
-          parse_stmt_block(c, true);
-          break;
-        default:
-          push_frame(c);
-          parse_single_statement(c);
-          pop_frame(c);
-        }
+      stmt.as.while_loop.body = parse_body(c);
 
       break;
     case Token_Break:
+      stmt.type = Ast_Stmt_Break;
       advance(c);
       assert_token_is(c, Token_Semicolon);
       advance(c);
       break;
     case Token_Continue:
+      stmt.type = Ast_Stmt_Continue;
       advance(c);
       assert_token_is(c, Token_Semicolon);
       advance(c);
       break;
     case Token_Return:
+      stmt.type = Ast_Stmt_Return_Nothing;
       advance(c);
 
       if (c->tokz.token.type != Token_Semicolon)
         {
-          parse_expr(c);
+          stmt.type = Ast_Stmt_Return_Expr;
+          stmt.as.return_expr = parse_expr(c);
           assert_token_is(c, Token_Semicolon);
         }
 
@@ -799,30 +969,51 @@ parse_single_statement(Compiler *c)
       switch (c->tokz.token.type)
         {
         case Token_Open_Paren:
-          find_symbol_in_frames(c, c->tokz.last_id);
+          {
+            stmt.type = Ast_Stmt_Func_Call;
+            AstSymbol *symbol
+              = find_symbol_in_frames(c, c->tokz.last_id);
 
-          advance(c);
-          parse_arg_list(c);
+            advance(c);
+
+            stmt.as.func_call.symbol = &symbol->as.func;
+            stmt.as.func_call.expr_list
+              = parse_arg_list(c, &stmt.as.func_call.expr_count);
+          }
+
           break;
         case Token_Open_Bracket:
-          find_symbol_in_frames(c, c->tokz.last_id);
+          {
+            stmt.type = Ast_Stmt_Array_Assign;
+            AstSymbol *symbol
+              = find_symbol_in_frames(c, c->tokz.last_id);
+            stmt.as.array_assign.symbol = &symbol->as.array;
 
-          advance(c);
-          parse_expr(c);
-          assert_token_is(c, Token_Close_Bracket);
-          advance(c);
-          assert_token_is(c, Token_Colon_Equal);
-          advance(c);
-          parse_expr(c);
+            advance(c);
+            stmt.as.array_assign.index = parse_expr(c);
+            assert_token_is(c, Token_Close_Bracket);
+            advance(c);
+            assert_token_is(c, Token_Colon_Equal);
+            advance(c);
+            stmt.as.array_assign.expr = parse_expr(c);
+          }
+
           break;
         case Token_Colon_Equal:
-          find_symbol_in_frames(c, c->tokz.last_id);
+          {
+            stmt.type = Ast_Stmt_Var_Assign;
+            AstSymbol *symbol
+              = find_symbol_in_frames(c, c->tokz.last_id);
+            stmt.as.var_assign.symbol = &symbol->as.var;
 
-          advance(c);
-          parse_expr(c);
+            advance(c);
+            stmt.as.var_assign.expr = parse_expr(c);
+          }
+
           break;
         case Token_Colon:
           {
+            stmt.type = Ast_Stmt_Decl;
             AstSymbol *symbol
               = insert_ast_symbol(c, c->tokz.last_id);
 
@@ -832,12 +1023,21 @@ parse_single_statement(Compiler *c)
               {
               case Token_Open_Bracket:
                 advance(c);
+
+                stmt.as.decl.type = Ast_Decl_Array;
+                stmt.as.decl.as.array.symbol = &symbol->as.array;
                 symbol->type = Ast_Symbol_Array;
-                parse_array_declaration(c);
+                symbol->as.array.type = stmt.as.decl.as.array.type;
+
+                parse_array_declaration(c, &stmt.as.decl.as.array);
                 break;
               default:
+                stmt.as.decl.type = Ast_Decl_Var;
+                stmt.as.decl.as.var.symbol = &symbol->as.var;
                 symbol->type = Ast_Symbol_Var;
-                parse_variable_declaration(c);
+                symbol->as.var.type = stmt.as.decl.as.var.type;
+
+                parse_variable_declaration(c, &stmt.as.decl.as.var);
               }
           }
 
@@ -853,54 +1053,74 @@ parse_single_statement(Compiler *c)
     default:
       assert(false);
     }
+
+  return stmt;
 }
 
-void
+AstStmtBlock
 parse_stmt_block(Compiler *c, bool should_create_frame)
 {
   if (should_create_frame)
     push_frame(c);
 
+  AstStmtBlock block;
+  block.count = 0;
+
   while (c->tokz.token.type != Token_Close_Curly
          && c->tokz.token.type != Token_End_Of_File)
     {
-      parse_single_statement(c);
+      AstStmt stmt = parse_single_statement(c);
+      stack_push(c->ast.stmt_list, stmt);
+      ++block.count;
     }
 
   assert_token_is(c, Token_Close_Curly);
   advance(c);
 
+  block.data = stack_pop(c->ast.stmt_list, block.count);
+
   if (should_create_frame)
     pop_frame(c);
+
+  return block;
 }
 
 void
-parse_variable_declaration(Compiler *c)
+parse_variable_declaration(Compiler *c, AstVarDecl *decl)
 {
-  assert_token_is_non_void_type(c);
+  decl->type = token_type2ast_type(c);
+  assert(decl->type != Ast_Type_Void);
+
   advance(c);
 
   switch (c->tokz.token.type)
     {
     case Token_Semicolon:
+      decl->expr = NULL;
       break;
     case Token_Equal:
       advance(c);
-      parse_expr(c);
+      decl->expr = parse_expr(c);
       break;
     default:
       assert(false);
     }
 }
 
-void
+AstListInit
 parse_list_initilizer(Compiler *c)
 {
+  AstListInit list_init;
+  list_init.type = Ast_List_Init_Expr_List;
+  list_init.count = 0;
+
   if (c->tokz.token.type != Token_Close_Bracket)
     {
       do
         {
-          parse_expr(c);
+          AstExpr *expr = parse_expr(c);
+          stack_push(c->ast.expr_list, expr);
+          ++list_init.count;
 
           if (c->tokz.token.type == Token_Close_Bracket)
             break;
@@ -912,27 +1132,34 @@ parse_list_initilizer(Compiler *c)
       while (true);
     }
 
+  list_init.as.exprs = stack_pop(c->ast.expr_list, list_init.count);
   advance(c);
+
+  return list_init;
 }
 
 void
-parse_array_declaration(Compiler *c)
+parse_array_declaration(Compiler *c, AstArrayDecl *decl)
 {
   if (c->tokz.token.type == Token_Close_Bracket)
     ;
   else
     {
-      parse_expr(c);
+      decl->size = parse_expr(c);
       assert_token_is(c, Token_Close_Bracket);
     }
 
   advance(c);
-  assert_token_is_non_void_type(c);
+
+  decl->type = token_type2ast_type(c);
+  assert(decl->type != Ast_Type_Void);
+
   advance(c);
 
   switch (c->tokz.token.type)
     {
     case Token_Semicolon:
+      decl->list_init.type = Ast_List_Init_None;
       break;
     case Token_Equal:
       advance(c);
@@ -941,9 +1168,14 @@ parse_array_declaration(Compiler *c)
         {
         case Token_Open_Bracket:
           advance(c);
-          parse_list_initilizer(c);
+          decl->list_init = parse_list_initilizer(c);
           break;
         case Token_String_Literal:
+          decl->list_init.type = Ast_List_Init_String_Literal;
+          decl->list_init.count = c->tokz.token.view.size;
+          decl->list_init.as.string
+            = copy_view_to_cstring(c->tokz.token.view);
+
           advance(c);
           break;
         default:
@@ -957,9 +1189,12 @@ parse_array_declaration(Compiler *c)
 }
 
 void
-parse_function_declaration(Compiler *c)
+parse_function_declaration(Compiler *c, AstFuncDecl *decl)
 {
   push_frame(c);
+
+  decl->param_list_idx = stack_count(c->ast.func_param_list);
+  decl->param_count = 0;
 
   if (c->tokz.token.type == Token_Close_Paren)
     ;
@@ -971,12 +1206,20 @@ parse_function_declaration(Compiler *c)
           advance(c);
           assert_token_is(c, Token_Colon);
           advance(c);
-          assert_token_is_non_void_type(c);
 
-          {
-            AstSymbol *symbol = insert_ast_symbol(c, c->tokz.last_id);
-            symbol->type = Ast_Symbol_Var;
-          }
+          AstSymbol *symbol = insert_ast_symbol(c, c->tokz.last_id);
+
+          AstFuncParam param;
+          param.symbol = &symbol->as.var;
+          param.type = token_type2ast_type(c);
+
+          assert(param.type != Ast_Type_Void);
+
+          symbol->type = Ast_Symbol_Var;
+          symbol->as.var.type = param.type;
+
+          stack_push(c->ast.func_param_list, param);
+          ++decl->param_count;
 
           advance(c);
 
@@ -991,17 +1234,18 @@ parse_function_declaration(Compiler *c)
     }
 
   advance(c);
+  decl->return_type = Ast_Type_Void;
 
   if (c->tokz.token.type != Token_Open_Curly)
     {
-      assert_token_is_type(c);
+      decl->return_type = token_type2ast_type(c);
       advance(c);
       assert_token_is(c, Token_Open_Curly);
     }
 
   advance(c);
 
-  parse_stmt_block(c, false);
+  decl->stmt_list = parse_stmt_block(c, false);
 
   pop_frame(c);
 }
