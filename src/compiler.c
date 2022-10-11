@@ -594,12 +594,13 @@ parse_base(Compiler *c)
     case Token_Open_Paren:
       advance(c);
       parse_expr(c);
+      assert_token_is(c, Token_Close_Paren);
+      advance(c);
       break;
     case Token_Integer_Literal:
     case Token_False_Literal:
     case Token_True_Literal:
     case Token_Char_Literal:
-    case Token_String_Literal:
       advance(c);
       break;
     case Token_Identifier:
