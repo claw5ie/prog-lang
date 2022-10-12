@@ -1212,8 +1212,12 @@ parse_list_initializer(Compiler *c)
 void
 parse_array_declaration(Compiler *c, AstArrayDecl *decl)
 {
+  bool should_deduce_array_size = true;
+  decl->size = NULL;
+
   if (c->tokz.token.type != Token_Close_Bracket)
     {
+      should_deduce_array_size = false;
       decl->size = parse_expr(c);
       assert_token_is(c, Token_Close_Bracket);
     }
@@ -1233,6 +1237,14 @@ parse_array_declaration(Compiler *c, AstArrayDecl *decl)
   switch (c->tokz.token.type)
     {
     case Token_Semicolon:
+      if (should_deduce_array_size)
+        {
+          fputs("ERROR: cannot deduce the size of array without"
+                " initializer list.\n",
+                stderr);
+          exit(EXIT_FAILURE);
+        }
+
       decl->list_init.type = Ast_List_Init_None;
       break;
     case Token_Equal:
