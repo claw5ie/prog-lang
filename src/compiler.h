@@ -291,21 +291,21 @@ struct AstArrayDecl
   AstListInit list_init;
 };
 
-typedef struct AstFuncDecl AstFuncDecl;
-struct AstFuncDecl
-{
-  AstSymbolFunc *symbol;
-  AstType return_type;
-  size_t param_list_idx;
-  size_t param_count;
-  AstStmtBlock stmt_list;
-};
-
 typedef struct AstFuncParam AstFuncParam;
 struct AstFuncParam
 {
   AstSymbolVar *symbol;
   AstType type;
+};
+
+typedef struct AstFuncDecl AstFuncDecl;
+struct AstFuncDecl
+{
+  AstSymbolFunc *symbol;
+  AstType return_type;
+  AstFuncParam *param_list;
+  size_t param_count;
+  AstStmtBlock stmt_list;
 };
 
 enum AstDeclType

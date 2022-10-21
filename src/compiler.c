@@ -289,9 +289,11 @@ compile(const char *filepath)
 
   parse_top_level(&compiler);
 
+  assert(stack_count(compiler.ast.func_param_list) == 0);
   assert(stack_count(compiler.ast.expr_list) == 0);
   assert(stack_count(compiler.ast.stmt_list) == 0);
 
+  stack_destroy(compiler.ast.func_param_list);
   stack_destroy(compiler.ast.expr_list);
   stack_destroy(compiler.ast.stmt_list);
 
@@ -1281,7 +1283,7 @@ parse_function_declaration(Compiler *c, AstFuncDecl *decl)
 {
   push_frame(c);
 
-  decl->param_list_idx = stack_count(c->ast.func_param_list);
+  decl->param_list = NULL;
   decl->param_count = 0;
 
   if (c->tokz.token.type != Token_Close_Paren)
@@ -1321,6 +1323,9 @@ parse_function_declaration(Compiler *c, AstFuncDecl *decl)
           advance(c);
         }
       while (true);
+
+      decl->param_list
+        = stack_pop(c->ast.func_param_list, decl->param_count);
     }
 
   advance(c);
