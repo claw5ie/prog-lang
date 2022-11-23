@@ -862,7 +862,7 @@ parse_prec(Compiler *c, int limit)
       do
         {
           advance(c);
-          left = combine(op, left, parse_prec(c, limit + 1));
+          left = combine(op, left, parse_prec(c, curr_prec + 1));
           op = c->tokz.token.type;
         }
       while (curr_prec == prec_of(op));
