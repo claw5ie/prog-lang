@@ -126,10 +126,14 @@ struct AstSymbolArray
   AstType type;
 };
 
+typedef struct AstFuncParam AstFuncParam;
+
 typedef struct AstSymbolFunc AstSymbolFunc;
 struct AstSymbolFunc
 {
   AstType return_type;
+  AstFuncParam *param_list;
+  size_t param_count;
 };
 
 enum AstSymbolType
@@ -291,7 +295,6 @@ struct AstArrayDecl
   AstListInit list_init;
 };
 
-typedef struct AstFuncParam AstFuncParam;
 struct AstFuncParam
 {
   AstSymbolVar *symbol;

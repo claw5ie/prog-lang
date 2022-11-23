@@ -1335,6 +1335,9 @@ parse_function_declaration(Compiler *c, AstFuncDecl *decl)
         = stack_pop(c->ast.func_param_list, decl->param_count);
     }
 
+  decl->symbol->param_list = decl->param_list;
+  decl->symbol->param_count = decl->param_count;
+
   advance(c);
   decl->return_type = Ast_Type_Void;
 
