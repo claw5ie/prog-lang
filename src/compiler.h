@@ -2,6 +2,7 @@
 #define COMPILER_H
 
 #include <stdint.h>
+#include <stdbool.h>
 #include <stddef.h>
 
 typedef uint32_t u32;
@@ -400,6 +401,13 @@ struct Ast
   Stack(AstFuncParam) func_param_list;
   Stack(AstExpr *) expr_list;
   Stack(AstStmt) stmt_list;
+};
+
+typedef struct TypecheckerInfo TypecheckerInfo;
+struct TypecheckerInfo
+{
+  AstType return_type;
+  bool is_inside_loop;
 };
 
 typedef struct Compiler Compiler;

@@ -262,6 +262,9 @@ void parse_function_declaration(Compiler *c, AstFuncDecl *decl);
 AstExpr **parse_arg_list(Compiler *c, size_t *arg_count);
 AstStmtBlock parse_stmt_block(Compiler *c, bool should_create_frame);
 
+void typecheck(Compiler *c);
+void typecheck_decl(AstDecl *decl);
+
 void
 compile(const char *filepath)
 {
@@ -301,6 +304,8 @@ compile(const char *filepath)
   stack_destroy(compiler.ast.stmt_list);
 
   free(file_data);
+
+  typecheck(&compiler);
 }
 
 void
@@ -1353,4 +1358,388 @@ parse_function_declaration(Compiler *c, AstFuncDecl *decl)
   decl->stmt_list = parse_stmt_block(c, false);
 
   pop_frame(c);
+}
+
+bool
+is_binop_boolop(AstBinopType type)
+{
+  return type < Ast_Binop_Equals;
+}
+
+AstType
+typecheck_expr(AstExpr *expr)
+{
+  switch (expr->type)
+    {
+    case Ast_Expr_Binop:
+      {
+        AstType left_type = typecheck_expr(expr->as.binop.left);
+        AstType right_type = typecheck_expr(expr->as.binop.right);
+
+        if (left_type != right_type)
+          {
+            fputs("ERROR: left hand side and right hand side need to "
+                  "of the same type.\n",
+                  stderr);
+            assert(false);
+            exit(EXIT_FAILURE);
+          }
+
+        if (is_binop_boolop(expr->as.binop.type))
+          {
+            if (left_type != Ast_Type_Bool)
+              {
+                fputs("ERROR: operands of boolean operators "
+                      "should be of boolean type.\n",
+                      stderr);
+                exit(EXIT_FAILURE);
+              }
+
+            return Ast_Type_Bool;
+          }
+        else if (expr->as.binop.type == Ast_Binop_Equals)
+          {
+            return Ast_Type_Bool;
+          }
+        else if (left_type != Ast_Type_Int)
+          {
+            fputs("ERROR: arithmetic operators should have "
+                  "integer type.\n",
+                  stderr);
+            exit(EXIT_FAILURE);
+          }
+        else
+          return Ast_Type_Int;
+      }
+    case Ast_Expr_Unop_Minus:
+      if (typecheck_expr(expr->as.unop) != Ast_Type_Int)
+        {
+          fputs("ERROR: unary minus can only be applied "
+                "to integers.\n",
+                stderr);
+          exit(EXIT_FAILURE);
+        }
+
+      return Ast_Type_Int;
+    case Ast_Expr_Inline_If:
+      if (typecheck_expr(expr->as.inline_if.cond) != Ast_Type_Bool)
+        {
+          fputs("ERROR: condition should be of boolean type.\n",
+                stderr);
+          exit(EXIT_FAILURE);
+        }
+
+      AstType if_true = typecheck_expr(expr->as.inline_if.if_true);
+      AstType if_false = typecheck_expr(expr->as.inline_if.if_false);
+
+      if (if_true != if_false)
+        {
+          fputs("ERROR: \"true\" branch has different "
+                "type than \"false\" branch.\n",
+                stderr);
+          exit(EXIT_FAILURE);
+        }
+
+      return if_true;
+    case Ast_Expr_Var:
+      return expr->as.var->type;
+    case Ast_Expr_Array_Access:
+      if (typecheck_expr(expr->as.array_access.index)
+          != Ast_Type_Int)
+        {
+          fputs("ERROR: index of array should be an integer.\n",
+                stderr);
+          exit(EXIT_FAILURE);
+        }
+
+      return expr->as.array_access.symbol->type;
+    case Ast_Expr_Func_Call:
+      {
+        AstFuncCall func_call = expr->as.func_call;
+
+        if (func_call.expr_count
+            != expr->as.func_call.symbol->param_count)
+          {
+            fputs("ERROR: the number of arguments doens't match.\n",
+                  stderr);
+            exit(EXIT_FAILURE);
+          }
+
+        AstFuncParam *params = expr->as.func_call.symbol->param_list;
+
+        for (size_t i = 0, count = func_call.expr_count;
+             i < count;
+             i++)
+          {
+            if (typecheck_expr(func_call.expr_list[i])
+                != params[i].type)
+              {
+                fprintf(stderr,
+                        "ERROR: mismatched types on argument %zu.\n",
+                        i);
+                exit(EXIT_FAILURE);
+              }
+          }
+      }
+
+      return expr->as.func_call.symbol->return_type;
+    case Ast_Expr_Char:
+      return Ast_Type_Char;
+    case Ast_Expr_Bool:
+      return Ast_Type_Bool;
+    case Ast_Expr_Int64:
+      return Ast_Type_Int;
+    default:
+      assert(false);
+    }
+}
+
+void
+typecheck_stmt_block(TypecheckerInfo info, AstStmtBlock block)
+{
+  for (size_t i = 0; i < block.count; i++)
+    {
+      AstStmt *stmt = &block.data[i];
+
+      switch (stmt->type)
+        {
+        case Ast_Stmt_Print:
+          break;
+        case Ast_Stmt_If:
+          {
+            AstType type = typecheck_expr(stmt->as.iff.cond);
+
+            if (type != Ast_Type_Bool)
+              {
+                fputs("ERROR: condition should have boolean "
+                      " type.\n",
+                      stderr);
+                exit(EXIT_FAILURE);
+              }
+
+            typecheck_stmt_block(info, stmt->as.iff.if_true);
+            typecheck_stmt_block(info, stmt->as.iff.if_false);
+          }
+
+          break;
+        case Ast_Stmt_While:
+          {
+            AstType type = typecheck_expr(stmt->as.while_loop.cond);
+
+            if (type != Ast_Type_Bool)
+              {
+                fputs("ERROR: condition should have boolean "
+                      " type.\n",
+                      stderr);
+                exit(EXIT_FAILURE);
+              }
+
+            info.is_inside_loop = true;
+            typecheck_stmt_block(info, stmt->as.while_loop.body);
+          }
+
+          break;
+        case Ast_Stmt_Break:
+        case Ast_Stmt_Continue:
+          {
+            if (!info.is_inside_loop)
+              {
+                fputs("ERROR: break/continue outside of loop.\n", stderr);
+                exit(EXIT_FAILURE);
+              }
+          }
+
+          break;
+        case Ast_Stmt_Return_Expr:
+          {
+            AstType type = typecheck_expr(stmt->as.return_expr);
+
+            if (type != info.return_type)
+              {
+                fputs("ERROR: type of return statement doesn't"
+                      " match functions return type.\n",
+                      stderr);
+                exit(EXIT_FAILURE);
+              }
+          }
+
+          break;
+        case Ast_Stmt_Return_Nothing:
+          if (info.return_type != Ast_Type_Void)
+            {
+              fputs("ERROR: type of return statement doesn't"
+                    " match functions return type (void).\n",
+                    stderr);
+              exit(EXIT_FAILURE);
+            }
+
+          break;
+        case Ast_Stmt_Var_Assign:
+          {
+            AstType type = typecheck_expr(stmt->as.var_assign.expr);
+
+            if (stmt->as.var_assign.symbol->type != type)
+              {
+                // printf("%i\n", stmt->as.var_assign.symbol->type);
+                fputs("ERROR: type of expression doesn't match the "
+                      "type of variable.\n",
+                      stderr);
+                exit(EXIT_FAILURE);
+              }
+          }
+
+          break;
+        case Ast_Stmt_Array_Assign:
+          {
+            AstType type = typecheck_expr(stmt->as.array_assign.index);
+
+            if (type != Ast_Type_Int)
+              {
+                fputs("ERROR: size should be an integer.\n",
+                      stderr);
+                exit(EXIT_FAILURE);
+              }
+
+            type = typecheck_expr(stmt->as.array_assign.expr);
+
+            if (stmt->as.array_assign.symbol->type != type)
+              {
+                fputs("ERROR: type of expression doesn't match the "
+                      "type of variable.\n",
+                      stderr);
+                exit(EXIT_FAILURE);
+              }
+          }
+
+          break;
+        case Ast_Stmt_Func_Call:
+          {
+            AstFuncCall func_call = stmt->as.func_call;
+
+            if (func_call.expr_count != func_call.symbol->param_count)
+              {
+                fputs("ERROR: incorrect number of arguments in"
+                      " function call.\n",
+                      stderr);
+                exit(EXIT_FAILURE);
+              }
+
+            AstFuncParam *const params = func_call.symbol->param_list;
+
+            for (size_t i = 0; i < func_call.expr_count; i++)
+              {
+                AstType type = typecheck_expr(func_call.expr_list[i]);
+
+                if (type != params[i].type)
+                  {
+                    fprintf(stderr,
+                            "ERROR: %zu-th argument is of incorrect"
+                            "type.\n",
+                            i);
+                    exit(EXIT_FAILURE);
+                  }
+              }
+          }
+
+          break;
+        case Ast_Stmt_Decl:
+          typecheck_decl(&stmt->as.decl);
+          break;
+        }
+    }
+}
+
+void
+typecheck_decl(AstDecl *decl)
+{
+  switch (decl->type)
+    {
+    case Ast_Decl_Var:
+      {
+        if (decl->as.var.expr == NULL)
+          return;
+
+        AstType type = typecheck_expr(decl->as.var.expr);
+
+        if (type != decl->as.var.type)
+          {
+            fputs("ERROR: the type of variable doesn't match the"
+                  " type of expression.\n",
+                  stderr);
+            exit(EXIT_FAILURE);
+          }
+      }
+
+      break;
+    case Ast_Decl_Array:
+      {
+        if (decl->as.array.size != NULL)
+          {
+            AstType type = typecheck_expr(decl->as.array.size);
+
+            if (type != Ast_Type_Int)
+              {
+                fputs("ERROR: array size should be an"
+                      " integer.\n",
+                      stderr);
+                exit(EXIT_FAILURE);
+              }
+          }
+
+        AstListInit list_init = decl->as.array.list_init;
+
+        switch (list_init.type)
+          {
+          case Ast_List_Init_None:
+            break;
+          case Ast_List_Init_Expr_List:
+            for (size_t i = 0; i < list_init.count; i++)
+              {
+                AstType type = typecheck_expr(list_init.as.exprs[i]);
+
+                if (type != decl->as.array.type)
+                  {
+                    fprintf(stderr,
+                            "ERROR: the argument %zu has"
+                            " different type.\n",
+                            i);
+                    exit(EXIT_FAILURE);
+                  }
+              }
+
+            break;
+          case Ast_List_Init_String_Literal:
+            if (decl->as.array.type != Ast_Type_Char)
+              {
+                fputs("ERROR: string literal can only be used to"
+                      " initialize char array different type.\n",
+                      stderr);
+                exit(EXIT_FAILURE);
+              }
+
+            break;
+          }
+      }
+
+      break;
+    case Ast_Decl_Func:
+      {
+        TypecheckerInfo info;
+        info.return_type = decl->as.func.return_type;
+        info.is_inside_loop = false;
+
+        typecheck_stmt_block(info, decl->as.func.stmt_list);
+      }
+
+      break;
+    }
+}
+
+void
+typecheck(Compiler *c)
+{
+  for (size_t i = 0, count = stack_count(c->ast.global_decl_list);
+       i < count;
+       i++)
+    typecheck_decl(&c->ast.global_decl_list[i]);
 }

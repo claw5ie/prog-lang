@@ -1,5 +1,6 @@
 // Hello, Comment!
 
+truea: bool = true && false || 2 == 2;
 foobt: bool = true;
 foobf: bool = false;
 fooc: char = 'a;
@@ -8,14 +9,13 @@ fooarrb: [2] bool = [true || false, false];
 fooarrc: [] char = "Hello, World";
 fooarrcn: [4] char;
 if_: int;
-truea: bool = true && false || fooi == 2;
 
-foo: (left: bool, right: bool) char
+foo: (left: bool, right: bool) int
 {
   return left && right ? 0 : 1;
 }
 
-bar: () void
+bar: () bool
 {
   return (1 + 2) * 3 == 7 && 1 == 1 || 2 == 2;
 }
@@ -30,10 +30,8 @@ main: ()
   print(fooarrc);
   print(fooarrc);
 
-  foo: [2] int;
-  baz: int;
-
-  foo[0] := foo[0] + baz + bar(1, bar(1, 2), 3);
+  fooarr: [2] int;
+  fooarr[0] := fooarr[0] + 1;
 
   if foobt then
     {
