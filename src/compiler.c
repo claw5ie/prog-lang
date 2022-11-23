@@ -822,7 +822,9 @@ parse_base(Compiler *c)
             advance(c);
             break;
           default:
-            ;
+            expr = malloc_or_exit(sizeof(AstExpr));
+            expr->type = Ast_Expr_Var;
+            expr->as.var = &symbol->as.var;
           }
       }
 
