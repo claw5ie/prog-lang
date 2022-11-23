@@ -287,6 +287,9 @@ compile(const char *filepath)
     = malloc_or_exit(compiler.symbols.capacity
                      * sizeof(*compiler.symbols.data));
 
+  for (size_t i = compiler.symbols.capacity; i-- > 0; )
+    compiler.symbols.data[i] = NULL;
+
   parse_top_level(&compiler);
 
   assert(stack_count(compiler.ast.func_param_list) == 0);
