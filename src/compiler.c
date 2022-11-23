@@ -682,9 +682,9 @@ parse_top_level(Compiler *c)
           decl.type = Ast_Decl_Func;
           decl.as.func.symbol = &symbol->as.func;
           symbol->type = Ast_Symbol_Func;
-          symbol->as.func.return_type = decl.as.func.return_type;
 
           parse_function_declaration(c, &decl.as.func);
+          symbol->as.func.return_type = decl.as.func.return_type;
           break;
         case Token_Open_Bracket:
           advance(c);
@@ -692,9 +692,10 @@ parse_top_level(Compiler *c)
           decl.type = Ast_Decl_Array;
           decl.as.array.symbol = &symbol->as.array;
           symbol->type = Ast_Symbol_Array;
-          symbol->as.array.type = decl.as.array.type;
 
           parse_array_declaration(c, &decl.as.array);
+          symbol->as.array.type = decl.as.array.type;
+
           assert_token_is(c, Token_Semicolon);
           advance(c);
           break;
@@ -702,9 +703,10 @@ parse_top_level(Compiler *c)
           decl.type = Ast_Decl_Var;
           decl.as.var.symbol = &symbol->as.var;
           symbol->type = Ast_Symbol_Var;
-          symbol->as.var.type = decl.as.var.type;
 
           parse_variable_declaration(c, &decl.as.var);
+          symbol->as.var.type = decl.as.var.type;
+
           assert_token_is(c, Token_Semicolon);
           advance(c);
         }
@@ -1095,17 +1097,17 @@ parse_single_statement(Compiler *c)
                 stmt.as.decl.type = Ast_Decl_Array;
                 stmt.as.decl.as.array.symbol = &symbol->as.array;
                 symbol->type = Ast_Symbol_Array;
-                symbol->as.array.type = stmt.as.decl.as.array.type;
 
                 parse_array_declaration(c, &stmt.as.decl.as.array);
+                symbol->as.array.type = stmt.as.decl.as.array.type;
                 break;
               default:
                 stmt.as.decl.type = Ast_Decl_Var;
                 stmt.as.decl.as.var.symbol = &symbol->as.var;
                 symbol->type = Ast_Symbol_Var;
-                symbol->as.var.type = stmt.as.decl.as.var.type;
 
                 parse_variable_declaration(c, &stmt.as.decl.as.var);
+                symbol->as.var.type = stmt.as.decl.as.var.type;
               }
           }
 
