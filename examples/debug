@@ -1,0 +1,10 @@
+foo := proc(a, b)
+{
+  return a + b;
+}
+
+main := proc()
+{
+  print foo(2, 3);
+  return;
+}
