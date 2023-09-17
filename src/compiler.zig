@@ -1,12 +1,24 @@
 const std = @import("std");
 const utils = @import("utils.zig");
+const notstd = @import("notstd.zig");
+
+const ArenaAllocator = std.heap.ArenaAllocator;
+const Allocator = std.mem.Allocator;
+
+const stderr = std.io.getStdErr().writer();
 
 var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
 var gpa = general_purpose_allocator.allocator();
 
+const MAX_SCOPE_COUNT = 256;
+var scopes_buffer: [MAX_SCOPE_COUNT]ScopeId = undefined;
+var scopes: []ScopeId = scopes_buffer[0..0];
+var next_scope: ScopeId = 0;
+
+const LOWEST_PREC = -127;
+
 const Compiler = struct {
     const LOOKAHEAD = 2;
-
     tokens: [LOOKAHEAD]Token = undefined,
     token_start: u8 = 0,
     token_count: u8 = 0,
@@ -14,18 +26,50 @@ const Compiler = struct {
     source_code: [:0]u8,
     line_info: LineInfo = .{},
 
+    globals: SymbolList,
+    ast_arena: ArenaAllocator,
+    ast_arena_allocator: Allocator,
+    symbols: SymbolTable,
+
     pub fn advance(c: *Compiler) void {
         c.token_start += 1;
         c.token_start %= LOOKAHEAD;
         c.token_count -= 1;
     }
 
-    pub fn next(c: *Compiler) Token {
+    pub fn grab(c: *Compiler) Token {
         if (c.token_count == 0) {
             c.buffer_token();
         }
 
         return c.tokens[c.token_start];
+    }
+
+    pub fn peek(c: *Compiler) TokenTag {
+        if (c.token_count == 0) {
+            c.buffer_token();
+        }
+
+        return c.tokens[c.token_start].tag;
+    }
+
+    pub fn peek_ahead(c: *Compiler, index: usize) TokenTag {
+        std.debug.assert(index < LOOKAHEAD);
+
+        while (index >= c.token_count) {
+            c.buffer_token();
+        }
+
+        return c.tokens[(c.token_start + index) % LOOKAHEAD].tag;
+    }
+
+    pub fn expect(c: *Compiler, expected: TokenTag) void {
+        if (c.peek() != expected) {
+            var token = c.grab();
+            print_error(c, token.line_info, "expected {s}, but got {s}", .{ token_tag_to_text(expected), token_tag_to_text(token.tag) });
+            std.os.exit(1);
+        }
+        c.advance();
     }
 
     fn buffer_token(c: *Compiler) void {
@@ -76,8 +120,13 @@ const Compiler = struct {
 
             const keywords = [_]ReservedKeyword{
                 .{ .text = "print", .tag = .Print },
-                .{ .text = "proc", .tag = .Proc },
                 .{ .text = "return", .tag = .Return },
+                .{ .text = "proc", .tag = .Proc },
+                .{ .text = "void", .tag = .Void },
+                .{ .text = "bool", .tag = .Bool },
+                .{ .text = "int", .tag = .Int },
+                .{ .text = "false", .tag = .False },
+                .{ .text = "true", .tag = .True },
             };
 
             for (keywords) |keyword| {
@@ -93,13 +142,17 @@ const Compiler = struct {
             };
 
             const symbols = [_]ReservedSymbol{
-                .{ .text = "+", .tag = .Token_Add },
+                .{ .text = "+", .tag = .Add },
+                .{ .text = "*", .tag = .Mul },
                 .{ .text = "(", .tag = .Open_Paren },
                 .{ .text = ")", .tag = .Close_Paren },
                 .{ .text = "{", .tag = .Open_Curly },
                 .{ .text = "}", .tag = .Close_Curly },
+                .{ .text = "->", .tag = .Arrow },
                 .{ .text = ":=", .tag = .Colon_Equal },
+                .{ .text = ":", .tag = .Colon },
                 .{ .text = ";", .tag = .Semicolon },
+                .{ .text = "=", .tag = .Equal },
                 .{ .text = ",", .tag = .Comma },
             };
 
@@ -119,7 +172,7 @@ const Compiler = struct {
             }
 
             if (!found_symbol) {
-                std.debug.print("{s}:{}:{}: error: unrecognized character '{c}'.\n", .{ c.filepath, token.line_info.line, token.line_info.column, text[i] });
+                print_error(c, token.line_info, "unrecognized character '{c}'.\n", .{text[i]});
                 std.os.exit(1);
             }
         }
@@ -147,19 +200,30 @@ const LineInfo = struct {
 };
 
 const TokenTag = enum {
-    Token_Add,
+    Add,
+    Mul,
 
     Open_Paren,
     Close_Paren,
     Open_Curly,
     Close_Curly,
+    Arrow,
     Colon_Equal,
+    Colon,
     Semicolon,
+    Equal,
     Comma,
 
     Print,
-    Proc,
     Return,
+
+    Proc,
+    Void,
+    Bool,
+    Int,
+
+    False,
+    True,
 
     Identifier,
     Integer,
@@ -173,29 +237,730 @@ const Token = struct {
     line_info: LineInfo,
 };
 
+const ScopeId = u32;
+
+const TypeFunction = struct {
+    params: ParameterList,
+    return_type: *Type,
+};
+
+const TypeTag = enum {
+    Function,
+    Void,
+    Bool,
+    Int64,
+};
+
+const Type = union(TypeTag) {
+    Function: TypeFunction,
+    Void: void,
+    Bool: void,
+    Int64: void,
+};
+
+const ExprBinaryOpTag = enum {
+    Add,
+    Mul,
+};
+
+const ExprTag = enum {
+    Binary_Op,
+    Call,
+    Bool,
+    Int64,
+    Symbol,
+    Identifier,
+};
+
+const ExprPayload = union(ExprTag) {
+    Binary_Op: struct {
+        tag: ExprBinaryOpTag,
+        lhs: *Expr,
+        rhs: *Expr,
+    },
+    Call: struct {
+        lhs: *Expr,
+        args: ExprList,
+    },
+    Bool: bool,
+    Int64: i64,
+    Symbol: *Symbol,
+    Identifier: Token,
+};
+
+const Expr = struct {
+    payload: ExprPayload,
+    line_info: LineInfo,
+};
+
+const ExprList = notstd.DoublyLinkedList(Expr);
+
+const StmtTag = enum {
+    Print,
+    Return,
+    Return_Expr,
+    Symbol,
+    Assign,
+    Expr,
+};
+
+const StmtPayload = union(StmtTag) {
+    Print: *Expr,
+    Return: void,
+    Return_Expr: *Expr,
+    Symbol: *Symbol,
+    Assign: struct {
+        lhs: *Expr,
+        rhs: *Expr,
+    },
+    Expr: *Expr,
+};
+
+const Stmt = struct {
+    payload: StmtPayload,
+    line_info: LineInfo,
+};
+
+const StmtList = notstd.DoublyLinkedList(Stmt);
+
+const ScopedStmtBlock = struct {
+    stmts: StmtList,
+    scope: ScopeId,
+};
+
+const ParameterList = notstd.DoublyLinkedList(*SymbolParameter);
+
+const SymbolVariable = struct {
+    typ: ?Type,
+    expr: ?Expr,
+    line_info: LineInfo,
+};
+
+const SymbolParameter = struct {
+    typ: Type,
+    line_info: LineInfo,
+};
+
+const SymbolFunction = struct {
+    typ: TypeFunction,
+    block: ScopedStmtBlock,
+    line_info: LineInfo,
+};
+
+const SymbolTag = enum {
+    Variable,
+    Parameter,
+    Function,
+};
+
+const Symbol = union(SymbolTag) {
+    Variable: SymbolVariable,
+    Parameter: SymbolParameter,
+    Function: SymbolFunction,
+};
+
+const SymbolList = notstd.DoublyLinkedList(*Symbol);
+
+const SymbolKey = struct {
+    text: []const u8,
+    scope: ScopeId,
+};
+
+const SymbolTableContext = struct {
+    pub fn hash(_: SymbolTableContext, key: SymbolKey) u64 {
+        const MurMur = std.hash.Murmur2_64;
+
+        var h0 = MurMur.hash(key.text);
+        var h1 = MurMur.hashUint32(key.scope);
+
+        return h0 +% 33 *% h1;
+    }
+
+    pub fn eql(_: SymbolTableContext, k0: SymbolKey, k1: SymbolKey) bool {
+        return k0.scope == k1.scope and std.mem.eql(u8, k0.text, k1.text);
+    }
+};
+
+const SymbolTable = std.HashMap(SymbolKey, *Symbol, SymbolTableContext, 80);
+
+fn token_tag_to_text(tag: TokenTag) []const u8 {
+    return switch (tag) {
+        .Add => "'+'",
+        .Mul => "'*'",
+        .Open_Paren => "'('",
+        .Close_Paren => "')'",
+        .Open_Curly => "'{'",
+        .Close_Curly => "'}'",
+        .Arrow => "'->'",
+        .Colon_Equal => "':='",
+        .Colon => "':'",
+        .Semicolon => "';'",
+        .Equal => "'equal'",
+        .Comma => "'comma'",
+        .Print => "'print'",
+        .Return => "'return'",
+        .Proc => "'proc'",
+        .Void => "'void'",
+        .Bool => "'bool'",
+        .Int => "'int'",
+        .False => "'false'",
+        .True => "'true'",
+        .Identifier => "identifier",
+        .Integer => "integer",
+        .End_Of_File => "EOF",
+    };
+}
+
+fn print_error(c: *Compiler, line_info: LineInfo, comptime format: []const u8, args: anytype) void {
+    stderr.print("{s}:{}:{}: error: " ++ format ++ "\n", .{ c.filepath, line_info.line, line_info.column } ++ args) catch {
+        std.os.exit(1);
+    };
+}
+
+fn print_note(c: *Compiler, line_info: LineInfo, comptime format: []const u8, args: anytype) void {
+    stderr.print("{s}:{}:{}: note: " ++ format ++ "\n", .{ c.filepath, line_info.line, line_info.column } ++ args) catch {
+        std.os.exit(1);
+    };
+}
+
+fn push_scope(c: *Compiler) void {
+    if (scopes.len >= MAX_SCOPE_COUNT) {
+        print_error(c, c.line_info, "reached maximum amount of scopes ({})", .{MAX_SCOPE_COUNT});
+        std.os.exit(1);
+    }
+
+    scopes.len += 1;
+    scopes[scopes.len - 1] = next_scope;
+    next_scope += 1;
+}
+
+fn pop_scope() void {
+    scopes.len -= 1;
+}
+
+fn grab_current_scope() ScopeId {
+    return scopes[scopes.len - 1];
+}
+
+fn ast_create(c: *Compiler, comptime T: type) *T {
+    return c.ast_arena_allocator.create(T) catch {
+        std.os.exit(1);
+    };
+}
+
+fn grab_symbol_line_info(symbol: *Symbol) LineInfo {
+    switch (symbol.*) {
+        .Variable => |variable| return variable.line_info,
+        .Parameter => |parameter| return parameter.line_info,
+        .Function => |function| return function.line_info,
+    }
+}
+
+fn insert_symbol(c: *Compiler, id: Token) *Symbol {
+    std.debug.assert(id.tag == .Identifier);
+
+    // Should create arena with identifier strings?
+    var key = SymbolKey{
+        .text = id.text,
+        .scope = grab_current_scope(),
+    };
+    var get_or_put_result = c.symbols.getOrPut(key) catch {
+        std.os.exit(1);
+    };
+
+    if (get_or_put_result.found_existing) {
+        print_error(
+            c,
+            id.line_info,
+            "symbol '{s}' is already defined.",
+            .{id.text},
+        );
+        print_note(
+            c,
+            grab_symbol_line_info(get_or_put_result.value_ptr.*),
+            "first defined here.",
+            .{},
+        );
+        std.os.exit(1);
+    }
+
+    var symbol = ast_create(c, Symbol);
+    get_or_put_result.value_ptr.* = symbol;
+
+    return symbol;
+}
+
+fn parse_top_level(c: *Compiler) void {
+    push_scope(c);
+
+    while (c.peek() != .End_Of_File) {
+        var symbol = parse_symbol(c);
+        var node = ast_create(c, SymbolList.Node);
+        node.* = .{
+            .payload = symbol,
+        };
+        c.globals.insert_last(node);
+    }
+
+    pop_scope();
+    std.debug.assert(scopes.len == 0);
+    next_scope = 0;
+}
+
+fn parse_type(c: *Compiler) Type {
+    switch (c.peek()) {
+        .Open_Paren => {
+            c.advance();
+
+            var typ = parse_type(c);
+            c.expect(.Close_Paren);
+
+            return typ;
+        },
+        .Proc => {
+            var typ = parse_type_function(c, false);
+            return .{ .Function = typ };
+        },
+        .Void => {
+            c.advance();
+            return .Void;
+        },
+        .Bool => {
+            c.advance();
+            return .Bool;
+        },
+        .Int => {
+            c.advance();
+            return .Int64;
+        },
+        else => {
+            var token = c.grab();
+            print_error(c, token.line_info, "'{s}' doesn't start a type.", .{token.text});
+            std.os.exit(1);
+        },
+    }
+}
+
+fn parse_type_function(c: *Compiler, should_insert_symbol: bool) TypeFunction {
+    c.expect(.Proc);
+    c.expect(.Open_Paren);
+
+    var params = ParameterList{};
+
+    var tt = c.peek();
+    while (tt != .End_Of_File and tt != .Close_Paren) {
+        var id = c.grab();
+        var has_id = false;
+
+        if (c.peek() == .Identifier) {
+            c.advance();
+            c.expect(.Colon);
+            has_id = true;
+        }
+
+        var typ = parse_type(c);
+        var symbol = symbol: {
+            if (has_id and should_insert_symbol) {
+                var symbol = insert_symbol(c, id);
+                symbol.* = .{ .Parameter = .{
+                    .typ = typ,
+                    .line_info = id.line_info,
+                } };
+
+                break :symbol &symbol.Parameter;
+            } else {
+                var symbol = ast_create(c, SymbolParameter);
+                symbol.* = .{
+                    .typ = typ,
+                    .line_info = id.line_info,
+                };
+
+                break :symbol symbol;
+            }
+        };
+        var node = ast_create(c, ParameterList.Node);
+        node.* = .{
+            .payload = symbol,
+        };
+        params.insert_last(node);
+
+        tt = c.peek();
+        if (tt != .End_Of_File and tt != .Close_Paren) {
+            c.expect(.Comma);
+            tt = c.peek();
+        }
+    }
+
+    c.expect(.Close_Paren);
+
+    var return_type = ast_create(c, Type);
+    return_type.* = .Void;
+
+    if (c.peek() == .Arrow) {
+        c.advance();
+        return_type.* = parse_type(c);
+    }
+
+    return .{
+        .params = params,
+        .return_type = return_type,
+    };
+}
+
+fn is_def(c: *Compiler) bool {
+    var fst = c.peek();
+    var snd = c.peek_ahead(1);
+    return fst == .Identifier and (snd == .Colon_Equal or snd == .Colon);
+}
+
+fn parse_symbol(c: *Compiler) *Symbol {
+    var id = c.grab();
+    c.expect(.Identifier);
+
+    var symbol = insert_symbol(c, id);
+
+    switch (c.peek()) {
+        .Colon_Equal => {
+            c.advance();
+
+            switch (c.peek()) {
+                .Proc => {
+                    push_scope(c);
+                    var typ = parse_type_function(c, true);
+                    pop_scope();
+
+                    var block = parse_scoped_stmt_block(c);
+
+                    symbol.* = .{ .Function = .{
+                        .typ = typ,
+                        .block = block,
+                        .line_info = id.line_info,
+                    } };
+
+                    return symbol;
+                },
+                else => {
+                    var expr = parse_expr(c);
+                    c.expect(.Semicolon);
+
+                    symbol.* = .{ .Variable = .{
+                        .typ = null,
+                        .expr = expr,
+                        .line_info = id.line_info,
+                    } };
+
+                    return symbol;
+                },
+            }
+        },
+        .Colon => {
+            c.advance();
+
+            var typ = parse_type(c);
+            var expr: ?Expr = null;
+
+            if (c.peek() == .Equal) {
+                c.advance();
+                expr = parse_expr(c);
+            }
+
+            c.expect(.Semicolon);
+
+            symbol.* = .{ .Variable = .{
+                .typ = typ,
+                .expr = expr,
+                .line_info = id.line_info,
+            } };
+
+            return symbol;
+        },
+        else => {
+            var token = c.grab();
+            print_error(c, token.line_info, "expected ':' or ':=' to define symbol.", .{});
+            std.os.exit(1);
+        },
+    }
+}
+
+fn parse_expr(c: *Compiler) Expr {
+    return parse_prec(c, LOWEST_PREC);
+}
+
+fn parse_prec(c: *Compiler, min_prec: i32) Expr {
+    var lhs = parse_highest_prec(c);
+    parse_postfix_unary_ops(c, &lhs);
+
+    var op = c.peek();
+    var prev_prec: i32 = 0x7FFF_FFFF;
+    var curr_prec: i32 = prec_of_op(op);
+
+    while (curr_prec < prev_prec and curr_prec >= min_prec) {
+        while (curr_prec == prec_of_op(op)) {
+            c.advance();
+
+            var lhs_ptr = ast_create(c, Expr);
+            var rhs_ptr = ast_create(c, Expr);
+            lhs_ptr.* = lhs;
+            rhs_ptr.* = parse_prec(c, curr_prec + 1);
+            lhs = .{
+                .payload = .{ .Binary_Op = .{
+                    .tag = token_tag_to_expr_binary_op_tag(op),
+                    .lhs = lhs_ptr,
+                    .rhs = rhs_ptr,
+                } },
+                .line_info = lhs_ptr.line_info,
+            };
+
+            op = c.peek();
+        }
+
+        prev_prec = curr_prec;
+        curr_prec = prec_of_op(op);
+    }
+
+    return lhs;
+}
+
+fn parse_highest_prec(c: *Compiler) Expr {
+    var token = c.grab();
+    c.advance();
+
+    switch (token.tag) {
+        .Open_Paren => {
+            var expr = parse_expr(c);
+            expr.line_info = token.line_info;
+            c.expect(.Close_Paren);
+
+            return expr;
+        },
+        .False,
+        .True,
+        => {
+            return .{
+                .payload = .{ .Bool = token.tag == .True },
+                .line_info = token.line_info,
+            };
+        },
+        .Identifier => {
+            return .{
+                .payload = .{ .Identifier = token },
+                .line_info = token.line_info,
+            };
+        },
+        .Integer => {
+            var value: i64 = 0;
+            for (token.text) |ch| {
+                value = 10 * value + (ch - '0');
+            }
+
+            return .{
+                .payload = .{ .Int64 = value },
+                .line_info = token.line_info,
+            };
+        },
+        else => {
+            print_error(c, token.line_info, "'{s}' doesn't start expression.", .{token.text});
+            std.os.exit(1);
+        },
+    }
+}
+
+fn parse_postfix_unary_ops(c: *Compiler, inner: *Expr) void {
+    while (true) {
+        switch (c.peek()) {
+            .Open_Paren => {
+                var line_info = c.grab().line_info;
+                c.advance();
+
+                var args = ExprList{};
+
+                var tt = c.peek();
+                while (tt != .End_Of_File and tt != .Close_Paren) {
+                    var expr = parse_expr(c);
+                    var node = ast_create(c, ExprList.Node);
+                    node.* = .{
+                        .payload = expr,
+                    };
+                    args.insert_last(node);
+
+                    tt = c.peek();
+                    if (tt != .End_Of_File and tt != .Close_Paren) {
+                        c.expect(.Comma);
+                        tt = c.peek();
+                    }
+                }
+
+                c.expect(.Close_Paren);
+
+                var lhs = ast_create(c, Expr);
+                lhs.* = inner.*;
+                inner.* = .{
+                    .payload = .{ .Call = .{
+                        .lhs = lhs,
+                        .args = args,
+                    } },
+                    .line_info = line_info,
+                };
+            },
+            else => {
+                break;
+            },
+        }
+    }
+}
+
+fn prec_of_op(op: TokenTag) i32 {
+    return switch (op) {
+        .Add => 1,
+        .Mul => 2,
+        else => LOWEST_PREC - 1,
+    };
+}
+
+fn token_tag_to_expr_binary_op_tag(op: TokenTag) ExprBinaryOpTag {
+    return switch (op) {
+        .Add => .Add,
+        .Mul => .Mul,
+        else => unreachable,
+    };
+}
+
+fn parse_stmt(c: *Compiler) Stmt {
+    var line_info = c.grab().line_info;
+
+    switch (c.peek()) {
+        .Print => {
+            c.advance();
+
+            var expr = ast_create(c, Expr);
+            expr.* = parse_expr(c);
+            c.expect(.Semicolon);
+
+            return .{
+                .payload = .{ .Print = expr },
+                .line_info = line_info,
+            };
+        },
+        .Return => {
+            c.advance();
+
+            if (c.peek() == .Semicolon) {
+                c.advance();
+
+                return .{
+                    .payload = .Return,
+                    .line_info = line_info,
+                };
+            }
+
+            var expr = ast_create(c, Expr);
+            expr.* = parse_expr(c);
+            c.expect(.Semicolon);
+
+            return .{
+                .payload = .{ .Return_Expr = expr },
+                .line_info = line_info,
+            };
+        },
+        else => {
+            if (is_def(c)) {
+                var symbol = parse_symbol(c);
+
+                if (symbol.* != .Variable) {
+                    print_error(
+                        c,
+                        grab_symbol_line_info(symbol),
+                        "only variable definitions are allowed inside a function.",
+                        .{},
+                    );
+                    std.os.exit(1);
+                }
+
+                return .{
+                    .payload = .{ .Symbol = symbol },
+                    .line_info = line_info,
+                };
+            } else {
+                var lhs = ast_create(c, Expr);
+                lhs.* = parse_expr(c);
+
+                if (c.peek() == .Equal) {
+                    c.advance();
+
+                    var rhs = ast_create(c, Expr);
+                    rhs.* = parse_expr(c);
+                    c.expect(.Semicolon);
+
+                    return .{
+                        .payload = .{ .Assign = .{
+                            .lhs = lhs,
+                            .rhs = rhs,
+                        } },
+                        .line_info = line_info,
+                    };
+                }
+
+                c.expect(.Semicolon);
+
+                return .{
+                    .payload = .{ .Expr = lhs },
+                    .line_info = line_info,
+                };
+            }
+        },
+    }
+}
+
+fn parse_scoped_stmt_block(c: *Compiler) ScopedStmtBlock {
+    push_scope(c);
+
+    var block = ScopedStmtBlock{
+        .stmts = .{},
+        .scope = grab_current_scope(),
+    };
+
+    c.expect(.Open_Curly);
+
+    var tt = c.peek();
+    while (tt != .End_Of_File and tt != .Close_Curly) {
+        var stmt = parse_stmt(c);
+        var node = ast_create(c, StmtList.Node);
+        node.* = .{
+            .payload = stmt,
+        };
+        block.stmts.insert_last(node);
+
+        tt = c.peek();
+    }
+
+    c.expect(.Close_Curly);
+
+    pop_scope();
+
+    return block;
+}
+
 pub fn compile() void {
     var filepath = "examples/debug";
     var source_code = utils.read_entire_file(gpa, filepath) catch {
         std.debug.print("error: failed to read file '{s}'.\n", .{filepath});
         std.os.exit(1);
     };
+    var ast_arena = ArenaAllocator.init(std.heap.page_allocator);
 
     var compiler = Compiler{
         .filepath = filepath,
         .source_code = source_code,
+        .globals = .{},
+        .ast_arena = ast_arena,
+        .ast_arena_allocator = ast_arena.allocator(),
+        .symbols = SymbolTable.init(gpa),
     };
 
-    while (true) {
-        var token = compiler.next();
-        compiler.advance();
-
-        std.debug.print("{}\n", .{token});
-
-        if (token.tag == .End_Of_File) {
-            break;
-        }
-    }
+    parse_top_level(&compiler);
 
     gpa.free(source_code);
+    compiler.symbols.deinit();
+    ast_arena.deinit();
     std.debug.assert(general_purpose_allocator.deinit() == .ok);
 }
