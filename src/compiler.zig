@@ -66,7 +66,7 @@ const Compiler = struct {
     pub fn expect(c: *Compiler, expected: TokenTag) void {
         if (c.peek() != expected) {
             var token = c.grab();
-            print_error(c, token.line_info, "expected {s}, but got {s}", .{ token_tag_to_text(expected), token_tag_to_text(token.tag) });
+            print_error(c, token.line_info, "expected {s}, but got {s}.", .{ token_tag_to_text(expected), token_tag_to_text(token.tag) });
             std.os.exit(1);
         }
         c.advance();
@@ -256,6 +256,60 @@ const Type = union(TypeTag) {
     Void: void,
     Bool: void,
     Int64: void,
+
+    pub fn eql(self: Type, other: Type) bool {
+        if (self != @as(TypeTag, other)) {
+            return false;
+        }
+
+        switch (self) {
+            .Function => |sfunc| {
+                var ofunc = &other.Function;
+
+                if (sfunc.params.count != ofunc.params.count) {
+                    return false;
+                }
+
+                var sit = sfunc.params.iterator();
+                var oit = ofunc.params.iterator();
+                while (sit.next()) |sparam_type| {
+                    var oparam_type = oit.next().?;
+
+                    if (!sparam_type.*.typ.eql(oparam_type.*.typ)) {
+                        return false;
+                    }
+                }
+
+                return sfunc.return_type.eql(ofunc.return_type.*);
+            },
+            .Void,
+            .Bool,
+            .Int64,
+            => return true,
+        }
+    }
+
+    pub fn format(typ: Type, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+        switch (typ) {
+            .Function => |function| {
+                try writer.writeAll("proc(");
+
+                var it = function.params.iterator();
+                while (it.next()) |param| {
+                    try writer.print("{}", .{param.*.typ});
+
+                    if (it.has_next()) {
+                        try writer.writeAll(", ");
+                    }
+                }
+
+                try writer.print(") -> {}", .{function.return_type});
+            },
+            .Void => try writer.writeAll("void"),
+            .Bool => try writer.writeAll("bool"),
+            .Int64 => try writer.writeAll("int64"),
+        }
+    }
 };
 
 const ExprBinaryOpTag = enum {
@@ -291,6 +345,7 @@ const ExprPayload = union(ExprTag) {
 const Expr = struct {
     payload: ExprPayload,
     line_info: LineInfo,
+    is_lvalue: bool = false,
 };
 
 const ExprList = notstd.DoublyLinkedList(Expr);
@@ -345,6 +400,7 @@ const SymbolFunction = struct {
     typ: TypeFunction,
     block: ScopedStmtBlock,
     line_info: LineInfo,
+    is_type_typechecked: bool = false,
 };
 
 const SymbolTag = enum {
@@ -382,6 +438,10 @@ const SymbolTableContext = struct {
 };
 
 const SymbolTable = std.HashMap(SymbolKey, *Symbol, SymbolTableContext, 80);
+
+const TypecheckerContext = struct {
+    return_type: *Type,
+};
 
 fn token_tag_to_text(tag: TokenTag) []const u8 {
     return switch (tag) {
@@ -425,7 +485,7 @@ fn print_note(c: *Compiler, line_info: LineInfo, comptime format: []const u8, ar
 
 fn push_scope(c: *Compiler) void {
     if (scopes.len >= MAX_SCOPE_COUNT) {
-        print_error(c, c.line_info, "reached maximum amount of scopes ({})", .{MAX_SCOPE_COUNT});
+        print_error(c, c.line_info, "reached maximum amount of scopes ({}).", .{MAX_SCOPE_COUNT});
         std.os.exit(1);
     }
 
@@ -1000,7 +1060,7 @@ fn resolve_identifiers_symbol(c: *Compiler, symbol: *Symbol) void {
                 resolve_identifiers_expr(c, expr);
             }
         },
-        .Parameter => {},
+        .Parameter => unreachable,
         .Function => |function| {
             resolve_identifiers_scoped_stmt_block(c, function.block);
         },
@@ -1065,6 +1125,220 @@ fn resolve_identifiers_expr(c: *Compiler, expr: *Expr) void {
     }
 }
 
+fn typecheck(c: *Compiler) void {
+    var it = c.globals.iterator();
+    while (it.next()) |symbol| {
+        typecheck_symbol(c, symbol.*);
+    }
+}
+
+fn typecheck_type(c: *Compiler, typ: *Type) void {
+    switch (typ.*) {
+        .Function => |*function| {
+            typecheck_type_function(c, function);
+        },
+        .Void,
+        .Bool,
+        .Int64,
+        => {},
+    }
+}
+
+fn typecheck_type_function(c: *Compiler, function: *TypeFunction) void {
+    var it = function.params.iterator();
+    while (it.next()) |param| {
+        typecheck_type(c, &param.*.typ);
+        if (param.*.typ == .Void) {
+            print_error(c, param.*.line_info, "parameter can't be 'void'.", .{});
+            std.os.exit(1);
+        }
+    }
+
+    typecheck_type(c, function.return_type);
+}
+
+fn typecheck_symbol(c: *Compiler, symbol: *Symbol) void {
+    switch (symbol.*) {
+        .Variable => |*variable| {
+            var variant: u2 = @as(u2, @intFromBool(variable.typ != null)) << 1 | @intFromBool(variable.expr != null);
+
+            switch (variant) {
+                0b00 => unreachable,
+                0b01 => {
+                    var typ = typecheck_expr(c, &variable.expr.?);
+                    variable.typ = typ;
+                },
+                0b10 => {
+                    typecheck_type(c, &variable.typ.?);
+                    if (variable.typ.? == .Void) {
+                        print_error(c, variable.line_info, "variable can't be 'void'.", .{});
+                        std.os.exit(1);
+                    }
+                },
+                0b11 => {
+                    typecheck_type(c, &variable.typ.?);
+
+                    var typ = typecheck_expr(c, &variable.expr.?);
+                    if (!typ.eql(variable.typ.?)) {
+                        print_error(c, variable.line_info, "mismatched types: '{}', '{}'", .{ variable.typ.?, typ });
+                        std.os.exit(1);
+                    }
+                },
+            }
+        },
+        .Parameter => unreachable,
+        .Function => |*function| {
+            if (!function.is_type_typechecked) {
+                function.is_type_typechecked = true;
+                typecheck_type_function(c, &function.typ);
+            }
+
+            var ctx = TypecheckerContext{
+                .return_type = function.typ.return_type,
+            };
+            typecheck_scoped_stmt_block(c, ctx, function.block);
+        },
+    }
+}
+
+fn typecheck_scoped_stmt_block(c: *Compiler, ctx: TypecheckerContext, block: ScopedStmtBlock) void {
+    var it = block.stmts.iterator();
+    while (it.next()) |stmt| {
+        typecheck_stmt(c, ctx, stmt);
+    }
+}
+
+fn typecheck_stmt(c: *Compiler, ctx: TypecheckerContext, stmt: *Stmt) void {
+    switch (stmt.payload) {
+        .Print => |expr| {
+            _ = typecheck_expr(c, expr);
+        },
+        .Return => {
+            if (ctx.return_type.* != .Void) {
+                print_error(c, stmt.line_info, "expected '{}'.", .{ctx.return_type});
+                std.os.exit(1);
+            }
+        },
+        .Return_Expr => |expr| {
+            var typ = typecheck_expr(c, expr);
+            if (ctx.return_type.* == .Void) {
+                print_error(c, expr.line_info, "shouldn't have an expression here.", .{});
+                std.os.exit(1);
+            } else if (!ctx.return_type.eql(typ)) {
+                print_error(c, stmt.line_info, "expected '{}', but got '{}'.", .{ ctx.return_type, typ });
+                std.os.exit(1);
+            }
+        },
+        .Symbol => |symbol| {
+            typecheck_symbol(c, symbol);
+        },
+        .Assign => |assign| {
+            var lhs_type = typecheck_expr(c, assign.lhs);
+            var rhs_type = typecheck_expr(c, assign.rhs);
+
+            if (!assign.lhs.is_lvalue) {
+                print_error(c, assign.lhs.line_info, "expression is not an lvalue.", .{});
+                std.os.exit(1);
+            }
+
+            if (!lhs_type.eql(rhs_type)) {
+                print_error(c, assign.rhs.line_info, "mismatched types: '{}', '{}'.", .{ lhs_type, rhs_type });
+                std.os.exit(1);
+            }
+        },
+        .Expr => |expr| {
+            _ = typecheck_expr_allow_void(c, expr);
+        },
+    }
+}
+
+fn typecheck_expr(c: *Compiler, expr: *Expr) Type {
+    var typ = typecheck_expr_allow_void(c, expr);
+    if (typ == .Void) {
+        print_error(c, expr.line_info, "expression can't be 'void'.", .{});
+        std.os.exit(1);
+    }
+    return typ;
+}
+
+fn typecheck_expr_allow_void(c: *Compiler, expr: *Expr) Type {
+    switch (expr.payload) {
+        .Binary_Op => |op| {
+            var lhs_type = typecheck_expr_allow_void(c, op.lhs);
+            var rhs_type = typecheck_expr_allow_void(c, op.rhs);
+
+            switch (op.tag) {
+                .Add,
+                .Mul,
+                => {
+                    if (lhs_type != .Int64 or rhs_type != .Int64) {
+                        print_error(c, expr.line_info, "mismatched types: '{}', '{}'.", .{ lhs_type, rhs_type });
+                        std.os.exit(1);
+                    }
+
+                    return .Int64;
+                },
+            }
+        },
+        .Call => |call| {
+            var lhs_type = typecheck_expr_allow_void(c, call.lhs);
+
+            if (lhs_type != .Function) {
+                print_error(c, call.lhs.line_info, "expected function, but got '{}'.", .{lhs_type});
+                std.os.exit(1);
+            }
+
+            var function = &lhs_type.Function;
+
+            if (call.args.count != function.params.count) {
+                print_error(c, expr.line_info, "expected {} arguments, but got {}.", .{ function.params.count, call.args.count });
+                std.os.exit(1);
+            }
+
+            var pit = function.params.iterator();
+            var ait = call.args.iterator();
+            while (pit.next()) |param_type| {
+                var arg = ait.next().?;
+                var arg_type = typecheck_expr_allow_void(c, arg);
+
+                if (!arg_type.eql(param_type.*.typ)) {
+                    print_error(c, arg.line_info, "expected '{}', but got '{}'", .{ param_type.*.typ, arg_type });
+                    std.os.exit(1);
+                }
+            }
+
+            return function.return_type.*;
+        },
+        .Bool => {
+            return .Bool;
+        },
+        .Int64 => {
+            return .Int64;
+        },
+        .Symbol => |symbol| {
+            switch (symbol.*) {
+                .Variable => |variable| {
+                    expr.is_lvalue = true;
+                    return variable.typ.?;
+                },
+                .Parameter => |parameter| {
+                    expr.is_lvalue = true;
+                    return parameter.typ;
+                },
+                .Function => |*function| {
+                    if (!function.is_type_typechecked) {
+                        function.is_type_typechecked = true;
+                        typecheck_type_function(c, &function.typ);
+                    }
+
+                    return .{ .Function = function.typ };
+                },
+            }
+        },
+        .Identifier => unreachable,
+    }
+}
+
 pub fn compile() void {
     var filepath = "examples/debug";
     var source_code = utils.read_entire_file(gpa, filepath) catch {
@@ -1084,6 +1358,7 @@ pub fn compile() void {
 
     parse_top_level(&compiler);
     resolve_identifiers(&compiler);
+    typecheck(&compiler);
 
     gpa.free(source_code);
     compiler.symbols.deinit();

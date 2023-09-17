@@ -3,11 +3,6 @@ bar := proc()
   return;
 }
 
-foo := proc(a: int, b: int) -> int
-{
-  return a + b;
-}
-
 main := proc() -> void
 {
   val0 := 2;
@@ -15,7 +10,18 @@ main := proc() -> void
   val2: bool = false;
 
   val0 = 4;
+  val3: proc() = main;
+  val3();
 
-  print foo(2, 3);
+  val4: int;
+
+  main();
+
+  print foo(2, 3 + 2);
   return;
+}
+
+foo := proc(a: int, b: int) -> int
+{
+  return a + b;
 }
