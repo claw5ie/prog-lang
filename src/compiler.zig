@@ -438,6 +438,11 @@ fn pop_scope() void {
     scopes.len -= 1;
 }
 
+fn revert_scope() void {
+    scopes.len -= 1;
+    next_scope -= 1;
+}
+
 fn grab_current_scope() ScopeId {
     return scopes[scopes.len - 1];
 }
@@ -488,6 +493,41 @@ fn insert_symbol(c: *Compiler, id: Token) *Symbol {
     get_or_put_result.value_ptr.* = symbol;
 
     return symbol;
+}
+
+fn find_symbol(c: *Compiler, id: Token) *Symbol {
+    std.debug.assert(id.tag == .Identifier);
+
+    var key = SymbolKey{
+        .text = id.text,
+        .scope = undefined,
+    };
+
+    var i = scopes.len;
+    while (i > 0) {
+        i -= 1;
+        key.scope = scopes[i];
+
+        var found_symbol = c.symbols.get(key);
+        if (found_symbol) |symbol| {
+            switch (symbol.*) {
+                .Variable,
+                .Parameter,
+                => {
+                    var line_info = grab_symbol_line_info(symbol);
+                    if (line_info.offset < id.line_info.offset) {
+                        return symbol;
+                    }
+                },
+                .Function => {
+                    return symbol;
+                },
+            }
+        }
+    }
+
+    print_error(c, id.line_info, "'{s}' is not defined.", .{id.text});
+    std.os.exit(1);
 }
 
 fn parse_top_level(c: *Compiler) void {
@@ -627,7 +667,7 @@ fn parse_symbol(c: *Compiler) *Symbol {
                 .Proc => {
                     push_scope(c);
                     var typ = parse_type_function(c, true);
-                    pop_scope();
+                    revert_scope();
 
                     var block = parse_scoped_stmt_block(c);
 
@@ -940,6 +980,91 @@ fn parse_scoped_stmt_block(c: *Compiler) ScopedStmtBlock {
     return block;
 }
 
+fn resolve_identifiers(c: *Compiler) void {
+    push_scope(c);
+
+    var it = c.globals.iterator();
+    while (it.next()) |symbol| {
+        resolve_identifiers_symbol(c, symbol.*);
+    }
+
+    pop_scope();
+    std.debug.assert(scopes.len == 0);
+    next_scope = 0;
+}
+
+fn resolve_identifiers_symbol(c: *Compiler, symbol: *Symbol) void {
+    switch (symbol.*) {
+        .Variable => |*variable| {
+            if (variable.expr) |*expr| {
+                resolve_identifiers_expr(c, expr);
+            }
+        },
+        .Parameter => {},
+        .Function => |function| {
+            resolve_identifiers_scoped_stmt_block(c, function.block);
+        },
+    }
+}
+
+fn resolve_identifiers_scoped_stmt_block(c: *Compiler, block: ScopedStmtBlock) void {
+    push_scope(c);
+    std.debug.assert(block.scope == grab_current_scope());
+
+    var it = block.stmts.iterator();
+    while (it.next()) |stmt| {
+        resolve_identifiers_stmt(c, stmt);
+    }
+
+    pop_scope();
+}
+
+fn resolve_identifiers_stmt(c: *Compiler, stmt: *Stmt) void {
+    switch (stmt.payload) {
+        .Print => |expr| {
+            resolve_identifiers_expr(c, expr);
+        },
+        .Return => {},
+        .Return_Expr => |expr| {
+            resolve_identifiers_expr(c, expr);
+        },
+        .Symbol => |symbol| {
+            resolve_identifiers_symbol(c, symbol);
+        },
+        .Assign => |assign| {
+            resolve_identifiers_expr(c, assign.lhs);
+            resolve_identifiers_expr(c, assign.rhs);
+        },
+        .Expr => |expr| {
+            resolve_identifiers_expr(c, expr);
+        },
+    }
+}
+
+fn resolve_identifiers_expr(c: *Compiler, expr: *Expr) void {
+    switch (expr.payload) {
+        .Binary_Op => |op| {
+            resolve_identifiers_expr(c, op.lhs);
+            resolve_identifiers_expr(c, op.rhs);
+        },
+        .Call => |call| {
+            resolve_identifiers_expr(c, call.lhs);
+
+            var it = call.args.iterator();
+            while (it.next()) |arg| {
+                resolve_identifiers_expr(c, arg);
+            }
+        },
+        .Bool => {},
+        .Int64 => {},
+        .Symbol => unreachable,
+        .Identifier => |id| {
+            var symbol = find_symbol(c, id);
+            expr.payload = .{ .Symbol = symbol };
+        },
+    }
+}
+
 pub fn compile() void {
     var filepath = "examples/debug";
     var source_code = utils.read_entire_file(gpa, filepath) catch {
@@ -958,6 +1083,7 @@ pub fn compile() void {
     };
 
     parse_top_level(&compiler);
+    resolve_identifiers(&compiler);
 
     gpa.free(source_code);
     compiler.symbols.deinit();

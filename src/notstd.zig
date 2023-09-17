@@ -14,7 +14,7 @@ pub fn DoublyLinkedList(comptime T: type) type {
             pub fn next(it: *Iterator) ?*T {
                 if (it.node) |node| {
                     it.node = node.next;
-                    return &node.data;
+                    return &node.payload;
                 } else {
                     return null;
                 }
