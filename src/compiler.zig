@@ -27,9 +27,16 @@ const Compiler = struct {
     line_info: LineInfo = .{},
 
     globals: SymbolList,
+    main_function: *SymbolFunction,
     ast_arena: ArenaAllocator,
     ast_arena_allocator: Allocator,
     symbols: SymbolTable,
+
+    instr_list: IrInstrList,
+    next_tmp: IrTmp = 0,
+    next_label: IrLabel = 0,
+    biggest_next_tmp: IrTmp = 0,
+    last_tmp_in_scope: IrTmp = 0,
 
     pub fn advance(c: *Compiler) void {
         c.token_start += 1;
@@ -388,17 +395,20 @@ const ParameterList = notstd.DoublyLinkedList(*SymbolParameter);
 const SymbolVariable = struct {
     typ: ?Type,
     expr: ?Expr,
+    storage: IrOperand,
     line_info: LineInfo,
 };
 
 const SymbolParameter = struct {
     typ: Type,
+    storage: IrOperand,
     line_info: LineInfo,
 };
 
 const SymbolFunction = struct {
     typ: TypeFunction,
     block: ScopedStmtBlock,
+    label: IrLabel,
     line_info: LineInfo,
     is_type_typechecked: bool = false,
 };
@@ -442,6 +452,49 @@ const SymbolTable = std.HashMap(SymbolKey, *Symbol, SymbolTableContext, 80);
 const TypecheckerContext = struct {
     return_type: *Type,
 };
+
+const IrOperandTag = enum {
+    None,
+    Tmp,
+    Imm,
+    Label,
+};
+
+const IrOperand = union(IrOperandTag) {
+    None: void,
+    Tmp: IrTmp,
+    Imm: i64,
+    Label: IrLabel,
+};
+
+const IrInstrTag = enum(u16) {
+    Add,
+    Mul,
+
+    Mov,
+    Push,
+    Pop,
+    Call,
+    Ret,
+
+    GV, // Global Variable
+    GFB, // Global Function Begin
+    GFE, // Global Function End
+
+    Print,
+};
+
+const Is_Operand_Address = 0x1;
+
+const IrInstr = struct {
+    tag: IrInstrTag,
+    flags: u16 = 0,
+    dst: IrOperand = .None,
+    src0: IrOperand = .None,
+    src1: IrOperand = .None,
+};
+
+const IrInstrList = std.ArrayList(IrInstr);
 
 fn token_tag_to_text(tag: TokenTag) []const u8 {
     return switch (tag) {
@@ -664,6 +717,7 @@ fn parse_type_function(c: *Compiler, should_insert_symbol: bool) TypeFunction {
                 var symbol = insert_symbol(c, id);
                 symbol.* = .{ .Parameter = .{
                     .typ = typ,
+                    .storage = undefined,
                     .line_info = id.line_info,
                 } };
 
@@ -672,6 +726,7 @@ fn parse_type_function(c: *Compiler, should_insert_symbol: bool) TypeFunction {
                 var symbol = ast_create(c, SymbolParameter);
                 symbol.* = .{
                     .typ = typ,
+                    .storage = undefined,
                     .line_info = id.line_info,
                 };
 
@@ -734,6 +789,7 @@ fn parse_symbol(c: *Compiler) *Symbol {
                     symbol.* = .{ .Function = .{
                         .typ = typ,
                         .block = block,
+                        .label = next_label(c),
                         .line_info = id.line_info,
                     } };
 
@@ -746,6 +802,7 @@ fn parse_symbol(c: *Compiler) *Symbol {
                     symbol.* = .{ .Variable = .{
                         .typ = null,
                         .expr = expr,
+                        .storage = undefined,
                         .line_info = id.line_info,
                     } };
 
@@ -769,6 +826,7 @@ fn parse_symbol(c: *Compiler) *Symbol {
             symbol.* = .{ .Variable = .{
                 .typ = typ,
                 .expr = expr,
+                .storage = undefined,
                 .line_info = id.line_info,
             } };
 
@@ -1130,6 +1188,37 @@ fn typecheck(c: *Compiler) void {
     while (it.next()) |symbol| {
         typecheck_symbol(c, symbol.*);
     }
+
+    var found_symbol = c.symbols.get(SymbolKey{
+        .text = "main",
+        .scope = 0,
+    });
+    if (found_symbol) |symbol| {
+        switch (symbol.*) {
+            .Function => |*function| {
+                if (function.typ.params.count != 0) {
+                    print_error(c, function.line_info, "expected 0 arguments, but got {}.", .{function.typ.params.count});
+                    std.os.exit(1);
+                }
+
+                if (function.typ.return_type.* != .Void) {
+                    print_error(c, function.line_info, "expected return type 'void', but got {}.", .{function.typ.return_type});
+                    std.os.exit(1);
+                }
+
+                c.main_function = function;
+            },
+            else => {
+                var line_info = grab_symbol_line_info(symbol);
+                print_error(c, line_info, "'main' is not a function.", .{});
+                std.os.exit(1);
+            },
+        }
+    } else {
+        // TODO: change the printing function?
+        std.debug.print("error: 'main' function is missing.", .{});
+        std.os.exit(1);
+    }
 }
 
 fn typecheck_type(c: *Compiler, typ: *Type) void {
@@ -1169,18 +1258,21 @@ fn typecheck_symbol(c: *Compiler, symbol: *Symbol) void {
                     variable.typ = typ;
                 },
                 0b10 => {
-                    typecheck_type(c, &variable.typ.?);
-                    if (variable.typ.? == .Void) {
+                    var typ = &variable.typ.?;
+                    typecheck_type(c, typ);
+
+                    if (typ.* == .Void) {
                         print_error(c, variable.line_info, "variable can't be 'void'.", .{});
                         std.os.exit(1);
                     }
                 },
                 0b11 => {
-                    typecheck_type(c, &variable.typ.?);
+                    var var_type = &variable.typ.?;
+                    typecheck_type(c, var_type);
 
-                    var typ = typecheck_expr(c, &variable.expr.?);
-                    if (!typ.eql(variable.typ.?)) {
-                        print_error(c, variable.line_info, "mismatched types: '{}', '{}'", .{ variable.typ.?, typ });
+                    var expr_type = typecheck_expr(c, &variable.expr.?);
+                    if (!expr_type.eql(var_type.*)) {
+                        print_error(c, variable.line_info, "mismatched types: '{}', '{}'", .{ var_type, expr_type });
                         std.os.exit(1);
                     }
                 },
@@ -1280,7 +1372,7 @@ fn typecheck_expr_allow_void(c: *Compiler, expr: *Expr) Type {
                 },
             }
         },
-        .Call => |call| {
+        .Call => |*call| {
             var lhs_type = typecheck_expr_allow_void(c, call.lhs);
 
             if (lhs_type != .Function) {
@@ -1339,6 +1431,404 @@ fn typecheck_expr_allow_void(c: *Compiler, expr: *Expr) Type {
     }
 }
 
+const IrTmp = u32;
+const IrLabel = u32;
+
+fn next_tmp(c: *Compiler) IrTmp {
+    var result = c.next_tmp;
+
+    c.next_tmp += 1;
+    if (c.biggest_next_tmp < c.next_tmp) {
+        c.biggest_next_tmp = c.next_tmp;
+    }
+
+    return result;
+}
+
+fn return_tmp(c: *Compiler, dst: IrTmp) void {
+    c.next_tmp -= 1;
+    std.debug.assert(c.next_tmp == dst);
+}
+
+fn next_label(c: *Compiler) IrLabel {
+    var result = c.next_label;
+    c.next_label += 1;
+    return result;
+}
+
+fn reduce_expr(c: *Compiler, expr: *Expr) i64 {
+    var result: i64 = 0;
+
+    switch (expr.payload) {
+        .Binary_Op => |op| {
+            result = reduce_expr(c, op.lhs);
+            var rhs = reduce_expr(c, op.rhs);
+
+            switch (op.tag) {
+                .Add => result += rhs,
+                .Mul => result *= rhs,
+            }
+        },
+        .Bool => |boolean| {
+            result = @intFromBool(boolean);
+        },
+        .Int64 => |int64| {
+            result = int64;
+        },
+        .Call,
+        .Symbol,
+        => {
+            print_error(c, expr.line_info, "can't evaluate non-constant expression at compile-time.", .{});
+            std.os.exit(1);
+        },
+        .Identifier => unreachable,
+    }
+
+    expr.payload = .{ .Int64 = result };
+    return result;
+}
+
+fn generate_ir_instr(c: *Compiler, instr: IrInstr) void {
+    c.instr_list.append(instr) catch {
+        std.os.exit(1);
+    };
+}
+
+fn generate_ir(c: *Compiler) void {
+    var it = c.globals.iterator();
+    while (it.next()) |symbol| {
+        generate_ir_symbol(c, symbol.*);
+    }
+}
+
+fn generate_ir_symbol(c: *Compiler, symbol: *Symbol) void {
+    switch (symbol.*) {
+        .Variable => |*variable| {
+            var label = next_label(c);
+            var value: i64 = 0;
+            variable.storage = .{ .Label = label };
+
+            if (variable.expr) |*expr| {
+                value = reduce_expr(c, expr);
+            }
+
+            generate_ir_instr(c, .{
+                .tag = .GV,
+                .dst = .{ .Label = label },
+                .src0 = .{ .Imm = value },
+            });
+        },
+        .Parameter => unreachable,
+        .Function => |*function| {
+            {
+                var it = function.typ.params.iterator();
+                while (it.next()) |param| {
+                    param.*.storage = .{ .Tmp = next_tmp(c) };
+                }
+            }
+
+            // dst  -> past last temporary
+            // src0 -> past last parameter temporary
+            // src1 -> label
+            var header_index = c.instr_list.items.len;
+            generate_ir_instr(c, .{
+                .tag = .GFB,
+                .dst = undefined,
+                .src0 = .{ .Tmp = c.next_tmp },
+                .src1 = .{ .Label = function.label },
+            });
+            generate_ir_scoped_stmt_block(c, function.block);
+            generate_ir_instr(c, .{ .tag = .GFE });
+            c.instr_list.items[header_index].dst = .{
+                .Tmp = c.last_tmp_in_scope,
+            };
+
+            c.next_tmp = 0;
+            c.biggest_next_tmp = 0;
+        },
+    }
+}
+
+fn generate_ir_scoped_stmt_block(c: *Compiler, block: ScopedStmtBlock) void {
+    var old_next_tmp = c.next_tmp;
+    var old_biggest_next_tmp = c.biggest_next_tmp;
+
+    var it = block.stmts.iterator();
+    while (it.next()) |stmt| {
+        generate_ir_stmt(c, stmt);
+    }
+
+    c.last_tmp_in_scope = c.biggest_next_tmp;
+    c.biggest_next_tmp = old_biggest_next_tmp;
+    c.next_tmp = old_next_tmp;
+}
+
+fn generate_ir_stmt(c: *Compiler, stmt: *Stmt) void {
+    switch (stmt.payload) {
+        .Print => |expr| {
+            var src = next_tmp(c);
+            generate_ir_expr(c, expr, src);
+            generate_ir_instr(c, .{
+                .tag = .Print,
+                .src0 = .{ .Tmp = src },
+            });
+            return_tmp(c, src);
+        },
+        .Return => {
+            generate_ir_instr(c, .{ .tag = .Ret });
+        },
+        .Return_Expr => |expr| {
+            var src = next_tmp(c);
+            generate_ir_expr(c, expr, src);
+            generate_ir_instr(c, .{
+                .tag = .Ret,
+                .src0 = .{ .Tmp = src },
+            });
+            return_tmp(c, src);
+        },
+        .Symbol => |symbol| {
+            switch (symbol.*) {
+                .Variable => |*variable| {
+                    var dst = next_tmp(c);
+                    variable.storage = .{ .Tmp = dst };
+
+                    if (variable.expr) |*expr| {
+                        generate_ir_expr(c, expr, dst);
+                    }
+                },
+                .Parameter => {},
+                .Function => unreachable,
+            }
+        },
+        .Assign => |assign| {
+            var src = next_tmp(c);
+            generate_ir_expr(c, assign.rhs, src);
+            generate_ir_lvalue(c, assign.lhs, src);
+            return_tmp(c, src);
+        },
+        .Expr => |expr| {
+            var dst = next_tmp(c);
+            generate_ir_expr(c, expr, dst);
+            return_tmp(c, dst);
+        },
+    }
+}
+
+fn generate_ir_expr(c: *Compiler, expr: *Expr, dst: IrTmp) void {
+    switch (expr.payload) {
+        .Binary_Op => |op| {
+            var src = next_tmp(c);
+            generate_ir_expr(c, op.rhs, src);
+            generate_ir_expr(c, op.lhs, dst);
+            return_tmp(c, src);
+
+            var tag: IrInstrTag = switch (op.tag) {
+                .Add => .Add,
+                .Mul => .Mul,
+            };
+
+            generate_ir_instr(c, .{
+                .tag = tag,
+                .dst = .{ .Tmp = dst },
+                .src0 = .{ .Tmp = src },
+            });
+        },
+        .Call => |call| {
+            {
+                var arg_tmp = next_tmp(c);
+                var it = call.args.reverse_iterator();
+                while (it.prev()) |arg| {
+                    generate_ir_expr(c, arg, arg_tmp);
+                    generate_ir_instr(c, .{
+                        .tag = .Push,
+                        .src0 = .{ .Tmp = arg_tmp },
+                    });
+                }
+                return_tmp(c, arg_tmp);
+            }
+
+            if (call.lhs.payload == .Symbol and
+                call.lhs.payload.Symbol.* == .Function)
+            {
+                generate_ir_instr(c, .{
+                    .tag = .Call,
+                    .dst = .{ .Tmp = dst },
+                    .src0 = .{ .Label = call.lhs.payload.Symbol.Function.label },
+                });
+            } else {
+                var src = next_tmp(c);
+                generate_ir_expr(c, call.lhs, src);
+                generate_ir_instr(c, .{
+                    .tag = .Call,
+                    .dst = .{ .Tmp = dst },
+                    .src0 = .{ .Tmp = src },
+                });
+                return_tmp(c, src);
+            }
+
+            var stack_space_used: i64 = @intCast(call.args.count * 8);
+            if (stack_space_used != 0) {
+                generate_ir_instr(c, .{
+                    .tag = .Pop,
+                    .src0 = .{ .Imm = stack_space_used },
+                });
+            }
+        },
+        .Bool => |boolean| {
+            generate_ir_instr(c, .{
+                .tag = .Mov,
+                .dst = .{ .Tmp = dst },
+                .src0 = .{ .Imm = @intFromBool(boolean) },
+            });
+        },
+        .Int64 => |int64| {
+            generate_ir_instr(c, .{
+                .tag = .Mov,
+                .dst = .{ .Tmp = dst },
+                .src0 = .{ .Imm = int64 },
+            });
+        },
+        .Symbol => |symbol| {
+            switch (symbol.*) {
+                .Variable => |variable| {
+                    if (variable.storage == .Label) {
+                        generate_ir_instr(c, .{
+                            .tag = .Mov,
+                            .flags = Is_Operand_Address << 1,
+                            .dst = .{ .Tmp = dst },
+                            .src0 = variable.storage,
+                        });
+                    } else {
+                        generate_ir_instr(c, .{
+                            .tag = .Mov,
+                            .dst = .{ .Tmp = dst },
+                            .src0 = variable.storage,
+                        });
+                    }
+                },
+                .Parameter => |parameter| {
+                    if (parameter.storage == .Label) {
+                        generate_ir_instr(c, .{
+                            .tag = .Mov,
+                            .flags = Is_Operand_Address << 1,
+                            .dst = .{ .Tmp = dst },
+                            .src0 = parameter.storage,
+                        });
+                    } else {
+                        generate_ir_instr(c, .{
+                            .tag = .Mov,
+                            .dst = .{ .Tmp = dst },
+                            .src0 = parameter.storage,
+                        });
+                    }
+                },
+                .Function => |function| {
+                    generate_ir_instr(c, .{
+                        .tag = .Mov,
+                        .dst = .{ .Tmp = dst },
+                        .src0 = .{ .Label = function.label },
+                    });
+                },
+            }
+        },
+        .Identifier => unreachable,
+    }
+}
+
+fn generate_ir_lvalue(c: *Compiler, expr: *Expr, src: IrTmp) void {
+    switch (expr.payload) {
+        .Symbol => |symbol| {
+            switch (symbol.*) {
+                .Variable => |variable| {
+                    generate_ir_instr(c, .{
+                        .tag = .Mov,
+                        .dst = variable.storage,
+                        .src0 = .{ .Tmp = src },
+                    });
+                },
+                .Parameter => |parameter| {
+                    generate_ir_instr(c, .{
+                        .tag = .Mov,
+                        .dst = parameter.storage,
+                        .src0 = .{ .Tmp = src },
+                    });
+                },
+                .Function => unreachable,
+            }
+        },
+        .Binary_Op,
+        .Call,
+        .Bool,
+        .Int64,
+        .Identifier,
+        => unreachable,
+    }
+}
+
+fn debug_print_operand(operand: IrOperand, is_address: bool) void {
+    if (is_address) {
+        std.debug.print("[", .{});
+    }
+
+    switch (operand) {
+        .None => {},
+        .Tmp => |tmp| {
+            std.debug.print("t{}", .{tmp});
+        },
+        .Imm => |imm| {
+            std.debug.print("{}", .{imm});
+        },
+        .Label => |label| {
+            std.debug.print("l{}", .{label});
+        },
+    }
+
+    if (is_address) {
+        std.debug.print("]", .{});
+    }
+}
+
+fn debug_print_ir(c: *Compiler) void {
+    for (c.instr_list.items) |instr| {
+        var should_print_comma = false;
+        var tag_string = switch (instr.tag) {
+            .Add => "    add  ",
+            .Mul => "    mul  ",
+            .Mov => "    mov  ",
+            .Push => "    push ",
+            .Pop => "    pop  ",
+            .Call => "    call ",
+            .Ret => "    ret  ",
+            .GV => "GV:",
+            .GFB => "GFB:",
+            .GFE => "GFE",
+            .Print => "    print",
+        };
+
+        std.debug.print("{s} ", .{tag_string});
+
+        if (instr.dst != .None) {
+            debug_print_operand(instr.dst, (instr.flags & 0x1) == 0x1);
+            should_print_comma = true;
+        }
+
+        if (should_print_comma and instr.src0 != .None) {
+            std.debug.print(", ", .{});
+        }
+
+        should_print_comma = instr.src0 != .None;
+        debug_print_operand(instr.src0, (instr.flags & 0x2) == 0x2);
+
+        if (should_print_comma and instr.src1 != .None) {
+            std.debug.print(", ", .{});
+        }
+
+        debug_print_operand(instr.src1, (instr.flags & 0x4) == 0x4);
+
+        std.debug.print("\n", .{});
+    }
+}
+
 pub fn compile() void {
     var filepath = "examples/debug";
     var source_code = utils.read_entire_file(gpa, filepath) catch {
@@ -1351,17 +1841,22 @@ pub fn compile() void {
         .filepath = filepath,
         .source_code = source_code,
         .globals = .{},
+        .main_function = undefined,
         .ast_arena = ast_arena,
         .ast_arena_allocator = ast_arena.allocator(),
         .symbols = SymbolTable.init(gpa),
+        .instr_list = IrInstrList.init(gpa),
     };
 
     parse_top_level(&compiler);
     resolve_identifiers(&compiler);
     typecheck(&compiler);
+    generate_ir(&compiler);
+    debug_print_ir(&compiler);
 
     gpa.free(source_code);
     compiler.symbols.deinit();
     ast_arena.deinit();
+    compiler.instr_list.deinit();
     std.debug.assert(general_purpose_allocator.deinit() == .ok);
 }

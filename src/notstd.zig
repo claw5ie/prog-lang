@@ -23,6 +23,19 @@ pub fn DoublyLinkedList(comptime T: type) type {
             pub fn has_next(it: Iterator) bool {
                 return it.node != null;
             }
+
+            pub fn prev(it: *Iterator) ?*T {
+                if (it.node) |node| {
+                    it.node = node.prev;
+                    return &node.payload;
+                } else {
+                    return null;
+                }
+            }
+
+            pub fn has_prev(it: Iterator) bool {
+                return it.node != null;
+            }
         };
 
         first: ?*Node = null,
@@ -31,6 +44,10 @@ pub fn DoublyLinkedList(comptime T: type) type {
 
         pub fn iterator(list: Self) Iterator {
             return .{ .node = list.first };
+        }
+
+        pub fn reverse_iterator(list: Self) Iterator {
+            return .{ .node = list.last };
         }
 
         pub fn insert_last(list: *Self, node: *Node) void {

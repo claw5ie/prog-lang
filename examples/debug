@@ -1,5 +1,8 @@
+val00 := 0;
+
 bar := proc()
 {
+  val00 = val00 + 42;
   return;
 }
 
@@ -21,7 +24,7 @@ main := proc() -> void
   return;
 }
 
-foo := proc(a: int, b: int) -> int
+foo := proc(a: int, b: int,) -> int
 {
   return a + b;
 }
