@@ -467,6 +467,9 @@ const IrOperand = union(IrOperandTag) {
     Label: IrLabel,
 };
 
+const IrOperandFlagsType = u2;
+const Is_Operand_Address = 0x1;
+
 const IrInstrTag = enum(u16) {
     Add,
     Mul,
@@ -484,11 +487,11 @@ const IrInstrTag = enum(u16) {
     Print,
 };
 
-const Is_Operand_Address = 0x1;
-
 const IrInstr = struct {
     tag: IrInstrTag,
-    flags: u16 = 0,
+    dst_flags: IrOperandFlagsType = 0,
+    src0_flags: IrOperandFlagsType = 0,
+    src1_flags: IrOperandFlagsType = 0,
     dst: IrOperand = .None,
     src0: IrOperand = .None,
     src1: IrOperand = .None,
@@ -1694,8 +1697,8 @@ fn generate_ir_expr(c: *Compiler, expr: *Expr, dst: IrTmp) void {
                     if (variable.storage == .Label) {
                         generate_ir_instr(c, .{
                             .tag = .Mov,
-                            .flags = Is_Operand_Address << 1,
                             .dst = .{ .Tmp = dst },
+                            .src0_flags = Is_Operand_Address,
                             .src0 = variable.storage,
                         });
                     } else {
@@ -1710,8 +1713,8 @@ fn generate_ir_expr(c: *Compiler, expr: *Expr, dst: IrTmp) void {
                     if (parameter.storage == .Label) {
                         generate_ir_instr(c, .{
                             .tag = .Mov,
-                            .flags = Is_Operand_Address << 1,
                             .dst = .{ .Tmp = dst },
+                            .src0_flags = Is_Operand_Address,
                             .src0 = parameter.storage,
                         });
                     } else {
@@ -1765,8 +1768,12 @@ fn generate_ir_lvalue(c: *Compiler, expr: *Expr, src: IrTmp) void {
     }
 }
 
-fn debug_print_operand(operand: IrOperand, is_address: bool) void {
-    if (is_address) {
+inline fn is_flag_active(flags: anytype, expected: anytype) bool {
+    return (flags & expected) == expected;
+}
+
+fn debug_print_operand(operand: IrOperand, flags: IrOperandFlagsType) void {
+    if (is_flag_active(flags, Is_Operand_Address)) {
         std.debug.print("[", .{});
     }
 
@@ -1783,7 +1790,7 @@ fn debug_print_operand(operand: IrOperand, is_address: bool) void {
         },
     }
 
-    if (is_address) {
+    if (is_flag_active(flags, Is_Operand_Address)) {
         std.debug.print("]", .{});
     }
 }
@@ -1808,22 +1815,22 @@ fn debug_print_ir(c: *Compiler) void {
         std.debug.print("{s} ", .{tag_string});
 
         if (instr.dst != .None) {
-            debug_print_operand(instr.dst, (instr.flags & 0x1) == 0x1);
+            debug_print_operand(instr.dst, instr.dst_flags);
             should_print_comma = true;
         }
 
         if (should_print_comma and instr.src0 != .None) {
             std.debug.print(", ", .{});
+            should_print_comma = true;
         }
 
-        should_print_comma = instr.src0 != .None;
-        debug_print_operand(instr.src0, (instr.flags & 0x2) == 0x2);
+        debug_print_operand(instr.src0, instr.src0_flags);
 
         if (should_print_comma and instr.src1 != .None) {
             std.debug.print(", ", .{});
         }
 
-        debug_print_operand(instr.src1, (instr.flags & 0x4) == 0x4);
+        debug_print_operand(instr.src1, instr.src1_flags);
 
         std.debug.print("\n", .{});
     }
