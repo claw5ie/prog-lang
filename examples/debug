@@ -10,7 +10,7 @@ bar := proc()
 
 main := proc() -> void
 {
-  val0 := 2;
+  val0 := -2 + 2;
   val1: int = 2;
   val2: bool = false;
 
@@ -18,7 +18,7 @@ main := proc() -> void
   val3: proc() = main;
   val3();
 
-  if true
+  if !true || false && true
     ;
   else
     ;

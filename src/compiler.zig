@@ -170,6 +170,7 @@ const Compiler = struct {
                 .{ .text = "*", .tag = .Mul },
                 .{ .text = "/", .tag = .Div },
                 .{ .text = "%", .tag = .Mod },
+                .{ .text = "!", .tag = .Not },
                 .{ .text = "(", .tag = .Open_Paren },
                 .{ .text = ")", .tag = .Close_Paren },
                 .{ .text = "{", .tag = .Open_Curly },
@@ -238,6 +239,7 @@ const TokenTag = enum {
     Div,
     Mod,
 
+    Not,
     Open_Paren,
     Close_Paren,
     Open_Curly,
@@ -368,8 +370,14 @@ const ExprBinaryOpTag = enum {
     Mod,
 };
 
+const ExprUnaryOpTag = enum {
+    Not,
+    Neg,
+};
+
 const ExprTag = enum {
     Binary_Op,
+    Unary_Op,
     If,
     Call,
     Bool,
@@ -383,6 +391,10 @@ const ExprPayload = union(ExprTag) {
         tag: ExprBinaryOpTag,
         lhs: *Expr,
         rhs: *Expr,
+    },
+    Unary_Op: struct {
+        tag: ExprUnaryOpTag,
+        subexpr: *Expr,
     },
     If: struct {
         cond: *Expr,
@@ -549,6 +561,9 @@ const IrInstrTag = enum(u16) {
     Div,
     Mod,
 
+    Not,
+    Neg,
+
     Mov,
     Jmp,
     Jz,
@@ -593,6 +608,7 @@ fn token_tag_to_text(tag: TokenTag) []const u8 {
         .Mul => "'*'",
         .Div => "'/'",
         .Mod => "'%'",
+        .Not => "'!'",
         .Open_Paren => "'('",
         .Close_Paren => "')'",
         .Open_Curly => "'{'",
@@ -976,6 +992,20 @@ fn parse_highest_prec(c: *Compiler) Expr {
     c.advance();
 
     switch (token.tag) {
+        .Sub,
+        .Not,
+        => {
+            var subexpr = ast_create(c, Expr);
+            subexpr.* = parse_highest_prec(c);
+
+            return .{
+                .payload = .{ .Unary_Op = .{
+                    .tag = token_tag_to_expr_unary_op_tag(token.tag),
+                    .subexpr = subexpr,
+                } },
+                .line_info = token.line_info,
+            };
+        },
         .Open_Paren => {
             var expr = parse_expr(c);
             expr.line_info = token.line_info;
@@ -1119,6 +1149,14 @@ fn token_tag_to_expr_binary_op_tag(op: TokenTag) ExprBinaryOpTag {
         .Mul => .Mul,
         .Div => .Div,
         .Mod => .Mod,
+        else => unreachable,
+    };
+}
+
+fn token_tag_to_expr_unary_op_tag(op: TokenTag) ExprUnaryOpTag {
+    return switch (op) {
+        .Sub => .Neg,
+        .Not => .Not,
         else => unreachable,
     };
 }
@@ -1406,6 +1444,9 @@ fn resolve_identifiers_expr(c: *Compiler, expr: *Expr) void {
             resolve_identifiers_expr(c, op.lhs);
             resolve_identifiers_expr(c, op.rhs);
         },
+        .Unary_Op => |op| {
+            resolve_identifiers_expr(c, op.subexpr);
+        },
         .If => |eef| {
             resolve_identifiers_expr(c, eef.cond);
             resolve_identifiers_expr(c, eef.if_true);
@@ -1685,6 +1726,28 @@ fn typecheck_expr_allow_void(c: *Compiler, expr: *Expr) Type {
                 },
             }
         },
+        .Unary_Op => |op| {
+            var subexpr_type = typecheck_expr_allow_void(c, op.subexpr);
+
+            switch (op.tag) {
+                .Not => {
+                    if (subexpr_type != .Bool) {
+                        print_error(c, op.subexpr.line_info, "expected 'bool', but got '{}'.", .{subexpr_type});
+                        std.os.exit(1);
+                    }
+
+                    return .Bool;
+                },
+                .Neg => {
+                    if (subexpr_type != .Int64) {
+                        print_error(c, op.subexpr.line_info, "expected integer type, but got '{}'.", .{subexpr_type});
+                        std.os.exit(1);
+                    }
+
+                    return .Int64;
+                },
+            }
+        },
         .If => |eef| {
             var cond_type = typecheck_expr(c, eef.cond);
             if (cond_type != .Bool) {
@@ -1815,6 +1878,14 @@ fn reduce_expr(c: *Compiler, expr: *Expr) i64 {
                 .Mul => result *= rhs,
                 .Div => result = @divTrunc(result, rhs),
                 .Mod => result = @rem(result, rhs),
+            }
+        },
+        .Unary_Op => |op| {
+            result = reduce_expr(c, op.subexpr);
+
+            switch (op.tag) {
+                .Not => result = @intFromBool(result == 0),
+                .Neg => result = -result,
             }
         },
         .If => |eef| {
@@ -2097,6 +2168,19 @@ fn generate_ir_expr(c: *Compiler, expr: *Expr, dst: IrTmp) void {
                 .src0 = .{ .Tmp = src },
             });
         },
+        .Unary_Op => |op| {
+            generate_ir_expr(c, op.subexpr, dst);
+
+            var tag: IrInstrTag = switch (op.tag) {
+                .Not => .Not,
+                .Neg => .Neg,
+            };
+
+            generate_ir_instr(c, .{
+                .tag = tag,
+                .dst = .{ .Tmp = dst },
+            });
+        },
         .If => |eef| {
             var if_false_label = next_label(c);
             var end_label = next_label(c);
@@ -2248,6 +2332,7 @@ fn generate_ir_lvalue(c: *Compiler, expr: *Expr, src: IrTmp) void {
             }
         },
         .Binary_Op,
+        .Unary_Op,
         .If,
         .Call,
         .Bool,
@@ -2301,6 +2386,8 @@ fn debug_print_ir(c: *Compiler) void {
             .Mul => "    mul  ",
             .Div => "    div  ",
             .Mod => "    mod  ",
+            .Not => "    not  ",
+            .Neg => "    neg  ",
             .Mov => "    mov  ",
             .Jmp => "    jmp  ",
             .Jz => "    jz   ",
