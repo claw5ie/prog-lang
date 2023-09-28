@@ -2,6 +2,8 @@ val00 := 0;
 
 bar := proc()
 {
+  if false then {} else {}
+
   val00 = val00 + 42;
   return;
 }
@@ -15,6 +17,11 @@ main := proc() -> void
   val0 = 4;
   val3: proc() = main;
   val3();
+
+  if true
+    ;
+  else
+    ;
 
   val4: int;
 

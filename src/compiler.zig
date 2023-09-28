@@ -10,10 +10,11 @@ const stderr = std.io.getStdErr().writer();
 var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
 var gpa = general_purpose_allocator.allocator();
 
+const GLOBAL_SCOPE_ID = 0;
 const MAX_SCOPE_COUNT = 256;
 var scopes_buffer: [MAX_SCOPE_COUNT]ScopeId = undefined;
 var scopes: []ScopeId = scopes_buffer[0..0];
-var next_scope: ScopeId = 0;
+var next_scope: ScopeId = GLOBAL_SCOPE_ID;
 
 const LOWEST_PREC = -127;
 
@@ -127,6 +128,11 @@ const Compiler = struct {
 
             const keywords = [_]ReservedKeyword{
                 .{ .text = "print", .tag = .Print },
+                .{ .text = "if", .tag = .If },
+                .{ .text = "then", .tag = .Then },
+                .{ .text = "else", .tag = .Else },
+                .{ .text = "while", .tag = .While },
+                .{ .text = "do", .tag = .Do },
                 .{ .text = "return", .tag = .Return },
                 .{ .text = "proc", .tag = .Proc },
                 .{ .text = "void", .tag = .Void },
@@ -149,14 +155,25 @@ const Compiler = struct {
             };
 
             const symbols = [_]ReservedSymbol{
+                .{ .text = "||", .tag = .Or },
+                .{ .text = "&&", .tag = .And },
+                .{ .text = "==", .tag = .Eq },
+                .{ .text = "!=", .tag = .Neq },
+                .{ .text = "<=", .tag = .Leq },
+                .{ .text = ">=", .tag = .Geq },
+                .{ .text = "->", .tag = .Arrow },
+                .{ .text = ":=", .tag = .Colon_Equal },
+                .{ .text = "<", .tag = .Lt },
+                .{ .text = ">", .tag = .Gt },
                 .{ .text = "+", .tag = .Add },
+                .{ .text = "-", .tag = .Sub },
                 .{ .text = "*", .tag = .Mul },
+                .{ .text = "/", .tag = .Div },
+                .{ .text = "%", .tag = .Mod },
                 .{ .text = "(", .tag = .Open_Paren },
                 .{ .text = ")", .tag = .Close_Paren },
                 .{ .text = "{", .tag = .Open_Curly },
                 .{ .text = "}", .tag = .Close_Curly },
-                .{ .text = "->", .tag = .Arrow },
-                .{ .text = ":=", .tag = .Colon_Equal },
                 .{ .text = ":", .tag = .Colon },
                 .{ .text = ";", .tag = .Semicolon },
                 .{ .text = "=", .tag = .Equal },
@@ -207,8 +224,19 @@ const LineInfo = struct {
 };
 
 const TokenTag = enum {
+    Or,
+    And,
+    Eq,
+    Neq,
+    Lt,
+    Leq,
+    Gt,
+    Geq,
     Add,
+    Sub,
     Mul,
+    Div,
+    Mod,
 
     Open_Paren,
     Close_Paren,
@@ -222,6 +250,11 @@ const TokenTag = enum {
     Comma,
 
     Print,
+    If,
+    Then,
+    Else,
+    While,
+    Do,
     Return,
 
     Proc,
@@ -320,12 +353,24 @@ const Type = union(TypeTag) {
 };
 
 const ExprBinaryOpTag = enum {
+    Or,
+    And,
+    Eq,
+    Neq,
+    Lt,
+    Leq,
+    Gt,
+    Geq,
     Add,
+    Sub,
     Mul,
+    Div,
+    Mod,
 };
 
 const ExprTag = enum {
     Binary_Op,
+    If,
     Call,
     Bool,
     Int64,
@@ -338,6 +383,11 @@ const ExprPayload = union(ExprTag) {
         tag: ExprBinaryOpTag,
         lhs: *Expr,
         rhs: *Expr,
+    },
+    If: struct {
+        cond: *Expr,
+        if_true: *Expr,
+        if_false: *Expr,
     },
     Call: struct {
         lhs: *Expr,
@@ -359,6 +409,9 @@ const ExprList = notstd.DoublyLinkedList(Expr);
 
 const StmtTag = enum {
     Print,
+    Block,
+    If,
+    While,
     Return,
     Return_Expr,
     Symbol,
@@ -368,6 +421,16 @@ const StmtTag = enum {
 
 const StmtPayload = union(StmtTag) {
     Print: *Expr,
+    Block: StmtBlock,
+    If: struct {
+        cond: *Expr,
+        if_true: StmtBlock,
+        if_false: StmtBlock,
+    },
+    While: struct {
+        cond: *Expr,
+        block: StmtBlock,
+    },
     Return: void,
     Return_Expr: *Expr,
     Symbol: *Symbol,
@@ -385,9 +448,9 @@ const Stmt = struct {
 
 const StmtList = notstd.DoublyLinkedList(Stmt);
 
-const ScopedStmtBlock = struct {
+const StmtBlock = struct {
     stmts: StmtList,
-    scope: ScopeId,
+    scope: ?ScopeId,
 };
 
 const ParameterList = notstd.DoublyLinkedList(*SymbolParameter);
@@ -395,6 +458,7 @@ const ParameterList = notstd.DoublyLinkedList(*SymbolParameter);
 const SymbolVariable = struct {
     typ: ?Type,
     expr: ?Expr,
+    was_visited: bool = false,
     storage: IrOperand,
     line_info: LineInfo,
 };
@@ -407,7 +471,7 @@ const SymbolParameter = struct {
 
 const SymbolFunction = struct {
     typ: TypeFunction,
-    block: ScopedStmtBlock,
+    block: StmtBlock,
     label: IrLabel,
     line_info: LineInfo,
     is_type_typechecked: bool = false,
@@ -471,14 +535,29 @@ const IrOperandFlagsType = u2;
 const Is_Operand_Address = 0x1;
 
 const IrInstrTag = enum(u16) {
+    Or,
+    And,
+    Eq,
+    Neq,
+    Lt,
+    Leq,
+    Gt,
+    Geq,
     Add,
+    Sub,
     Mul,
+    Div,
+    Mod,
 
     Mov,
+    Jmp,
+    Jz,
+    Jnz,
     Push,
     Pop,
     Call,
     Ret,
+    Label,
 
     GV, // Global Variable
     GFB, // Global Function Begin
@@ -501,8 +580,19 @@ const IrInstrList = std.ArrayList(IrInstr);
 
 fn token_tag_to_text(tag: TokenTag) []const u8 {
     return switch (tag) {
+        .Or => "'||'",
+        .And => "'&&'",
+        .Eq => "'=='",
+        .Neq => "'!='",
+        .Lt => "'<'",
+        .Leq => "'<='",
+        .Gt => "'>'",
+        .Geq => "'>='",
         .Add => "'+'",
+        .Sub => "'-'",
         .Mul => "'*'",
+        .Div => "'/'",
+        .Mod => "'%'",
         .Open_Paren => "'('",
         .Close_Paren => "')'",
         .Open_Curly => "'{'",
@@ -514,6 +604,11 @@ fn token_tag_to_text(tag: TokenTag) []const u8 {
         .Equal => "'equal'",
         .Comma => "'comma'",
         .Print => "'print'",
+        .If => "'if'",
+        .Then => "'then'",
+        .Else => "'else'",
+        .While => "'while'",
+        .Do => "'do'",
         .Return => "'return'",
         .Proc => "'proc'",
         .Void => "'void'",
@@ -548,6 +643,11 @@ fn push_scope(c: *Compiler) void {
     scopes.len += 1;
     scopes[scopes.len - 1] = next_scope;
     next_scope += 1;
+}
+
+fn push_given_scope(scope: ScopeId) void {
+    scopes.len += 1;
+    scopes[scopes.len - 1] = scope;
 }
 
 fn pop_scope() void {
@@ -590,18 +690,8 @@ fn insert_symbol(c: *Compiler, id: Token) *Symbol {
     };
 
     if (get_or_put_result.found_existing) {
-        print_error(
-            c,
-            id.line_info,
-            "symbol '{s}' is already defined.",
-            .{id.text},
-        );
-        print_note(
-            c,
-            grab_symbol_line_info(get_or_put_result.value_ptr.*),
-            "first defined here.",
-            .{},
-        );
+        print_error(c, id.line_info, "symbol '{s}' is already defined.", .{id.text});
+        print_note(c, grab_symbol_line_info(get_or_put_result.value_ptr.*), "first defined here.", .{});
         std.os.exit(1);
     }
 
@@ -660,7 +750,6 @@ fn parse_top_level(c: *Compiler) void {
 
     pop_scope();
     std.debug.assert(scopes.len == 0);
-    next_scope = 0;
 }
 
 fn parse_type(c: *Compiler) Type {
@@ -787,7 +876,7 @@ fn parse_symbol(c: *Compiler) *Symbol {
                     var typ = parse_type_function(c, true);
                     revert_scope();
 
-                    var block = parse_scoped_stmt_block(c);
+                    var block = parse_scoped_block(c);
 
                     symbol.* = .{ .Function = .{
                         .typ = typ,
@@ -894,6 +983,28 @@ fn parse_highest_prec(c: *Compiler) Expr {
 
             return expr;
         },
+        .If => {
+            var cond = ast_create(c, Expr);
+            var if_true = ast_create(c, Expr);
+            var if_false = ast_create(c, Expr);
+
+            cond.* = parse_expr(c);
+            if (c.peek() == .Then) {
+                c.advance();
+            }
+            if_true.* = parse_expr(c);
+            c.expect(.Else);
+            if_false.* = parse_expr(c);
+
+            return .{
+                .payload = .{ .If = .{
+                    .cond = cond,
+                    .if_true = if_true,
+                    .if_false = if_false,
+                } },
+                .line_info = token.line_info,
+            };
+        },
         .False,
         .True,
         => {
@@ -972,16 +1083,42 @@ fn parse_postfix_unary_ops(c: *Compiler, inner: *Expr) void {
 
 fn prec_of_op(op: TokenTag) i32 {
     return switch (op) {
-        .Add => 1,
-        .Mul => 2,
+        .Or => 0,
+        .And => 1,
+        .Eq,
+        .Neq,
+        => 2,
+        .Lt,
+        .Leq,
+        .Gt,
+        .Geq,
+        => 3,
+        .Add,
+        .Sub,
+        => 4,
+        .Mul,
+        .Div,
+        .Mod,
+        => 5,
         else => LOWEST_PREC - 1,
     };
 }
 
 fn token_tag_to_expr_binary_op_tag(op: TokenTag) ExprBinaryOpTag {
     return switch (op) {
+        .Or => .Or,
+        .And => .And,
+        .Eq => .Eq,
+        .Neq => .Neq,
+        .Lt => .Lt,
+        .Leq => .Leq,
+        .Gt => .Gt,
+        .Geq => .Geq,
         .Add => .Add,
+        .Sub => .Sub,
         .Mul => .Mul,
+        .Div => .Div,
+        .Mod => .Mod,
         else => unreachable,
     };
 }
@@ -999,6 +1136,62 @@ fn parse_stmt(c: *Compiler) Stmt {
 
             return .{
                 .payload = .{ .Print = expr },
+                .line_info = line_info,
+            };
+        },
+        .Open_Curly => {
+            return .{
+                .payload = .{ .Block = parse_scoped_block(c) },
+                .line_info = line_info,
+            };
+        },
+        .If => {
+            c.advance();
+
+            var cond = ast_create(c, Expr);
+            cond.* = parse_expr(c);
+
+            if (c.peek() == .Then) {
+                c.advance();
+            }
+
+            var if_true = parse_stmt_or_scoped_block(c);
+            var if_false = StmtBlock{
+                .stmts = .{},
+                .scope = null,
+            };
+
+            if (c.peek() == .Else) {
+                c.advance();
+                if_false = parse_stmt_or_scoped_block(c);
+            }
+
+            return .{
+                .payload = .{ .If = .{
+                    .cond = cond,
+                    .if_true = if_true,
+                    .if_false = if_false,
+                } },
+                .line_info = line_info,
+            };
+        },
+        .While => {
+            c.advance();
+
+            var cond = ast_create(c, Expr);
+            cond.* = parse_expr(c);
+
+            if (c.peek() == .Do) {
+                c.advance();
+            }
+
+            var block = parse_stmt_or_scoped_block(c);
+
+            return .{
+                .payload = .{ .While = .{
+                    .cond = cond,
+                    .block = block,
+                } },
                 .line_info = line_info,
             };
         },
@@ -1072,10 +1265,10 @@ fn parse_stmt(c: *Compiler) Stmt {
     }
 }
 
-fn parse_scoped_stmt_block(c: *Compiler) ScopedStmtBlock {
+fn parse_scoped_block(c: *Compiler) StmtBlock {
     push_scope(c);
 
-    var block = ScopedStmtBlock{
+    var block = StmtBlock{
         .stmts = .{},
         .scope = grab_current_scope(),
     };
@@ -1101,8 +1294,39 @@ fn parse_scoped_stmt_block(c: *Compiler) ScopedStmtBlock {
     return block;
 }
 
+fn parse_stmt_or_scoped_block(c: *Compiler) StmtBlock {
+    var result = StmtBlock{
+        .stmts = .{},
+        .scope = null,
+    };
+
+    switch (c.peek()) {
+        .Open_Curly => {
+            result = parse_scoped_block(c);
+        },
+        .Semicolon => {
+            c.advance();
+        },
+        else => {
+            var stmt = parse_stmt(c);
+            var node = ast_create(c, StmtList.Node);
+            node.* = .{
+                .payload = stmt,
+            };
+            result.stmts.insert_last(node);
+
+            if (stmt.payload == .Symbol) {
+                print_error(c, stmt.line_info, "definitions are not allowed inside a single statement block.", .{});
+                std.os.exit(1);
+            }
+        },
+    }
+
+    return result;
+}
+
 fn resolve_identifiers(c: *Compiler) void {
-    push_scope(c);
+    push_given_scope(GLOBAL_SCOPE_ID);
 
     var it = c.globals.iterator();
     while (it.next()) |symbol| {
@@ -1111,7 +1335,6 @@ fn resolve_identifiers(c: *Compiler) void {
 
     pop_scope();
     std.debug.assert(scopes.len == 0);
-    next_scope = 0;
 }
 
 fn resolve_identifiers_symbol(c: *Compiler, symbol: *Symbol) void {
@@ -1123,27 +1346,42 @@ fn resolve_identifiers_symbol(c: *Compiler, symbol: *Symbol) void {
         },
         .Parameter => unreachable,
         .Function => |function| {
-            resolve_identifiers_scoped_stmt_block(c, function.block);
+            resolve_identifiers_block(c, function.block);
         },
     }
 }
 
-fn resolve_identifiers_scoped_stmt_block(c: *Compiler, block: ScopedStmtBlock) void {
-    push_scope(c);
-    std.debug.assert(block.scope == grab_current_scope());
+fn resolve_identifiers_block(c: *Compiler, block: StmtBlock) void {
+    if (block.scope) |scope| {
+        push_given_scope(scope);
+    }
 
     var it = block.stmts.iterator();
     while (it.next()) |stmt| {
         resolve_identifiers_stmt(c, stmt);
     }
 
-    pop_scope();
+    if (block.scope != null) {
+        pop_scope();
+    }
 }
 
 fn resolve_identifiers_stmt(c: *Compiler, stmt: *Stmt) void {
     switch (stmt.payload) {
         .Print => |expr| {
             resolve_identifiers_expr(c, expr);
+        },
+        .Block => |block| {
+            resolve_identifiers_block(c, block);
+        },
+        .If => |eef| {
+            resolve_identifiers_expr(c, eef.cond);
+            resolve_identifiers_block(c, eef.if_true);
+            resolve_identifiers_block(c, eef.if_false);
+        },
+        .While => |loop| {
+            resolve_identifiers_expr(c, loop.cond);
+            resolve_identifiers_block(c, loop.block);
         },
         .Return => {},
         .Return_Expr => |expr| {
@@ -1167,6 +1405,11 @@ fn resolve_identifiers_expr(c: *Compiler, expr: *Expr) void {
         .Binary_Op => |op| {
             resolve_identifiers_expr(c, op.lhs);
             resolve_identifiers_expr(c, op.rhs);
+        },
+        .If => |eef| {
+            resolve_identifiers_expr(c, eef.cond);
+            resolve_identifiers_expr(c, eef.if_true);
+            resolve_identifiers_expr(c, eef.if_false);
         },
         .Call => |call| {
             resolve_identifiers_expr(c, call.lhs);
@@ -1194,7 +1437,7 @@ fn typecheck(c: *Compiler) void {
 
     var found_symbol = c.symbols.get(SymbolKey{
         .text = "main",
-        .scope = 0,
+        .scope = GLOBAL_SCOPE_ID,
     });
     if (found_symbol) |symbol| {
         switch (symbol.*) {
@@ -1275,11 +1518,13 @@ fn typecheck_symbol(c: *Compiler, symbol: *Symbol) void {
 
                     var expr_type = typecheck_expr(c, &variable.expr.?);
                     if (!expr_type.eql(var_type.*)) {
-                        print_error(c, variable.line_info, "mismatched types: '{}', '{}'", .{ var_type, expr_type });
+                        print_error(c, variable.line_info, "mismatched types: '{}' and '{}'", .{ var_type, expr_type });
                         std.os.exit(1);
                     }
                 },
             }
+
+            variable.was_visited = true;
         },
         .Parameter => unreachable,
         .Function => |*function| {
@@ -1291,12 +1536,12 @@ fn typecheck_symbol(c: *Compiler, symbol: *Symbol) void {
             var ctx = TypecheckerContext{
                 .return_type = function.typ.return_type,
             };
-            typecheck_scoped_stmt_block(c, ctx, function.block);
+            typecheck_block(c, ctx, function.block);
         },
     }
 }
 
-fn typecheck_scoped_stmt_block(c: *Compiler, ctx: TypecheckerContext, block: ScopedStmtBlock) void {
+fn typecheck_block(c: *Compiler, ctx: TypecheckerContext, block: StmtBlock) void {
     var it = block.stmts.iterator();
     while (it.next()) |stmt| {
         typecheck_stmt(c, ctx, stmt);
@@ -1307,6 +1552,28 @@ fn typecheck_stmt(c: *Compiler, ctx: TypecheckerContext, stmt: *Stmt) void {
     switch (stmt.payload) {
         .Print => |expr| {
             _ = typecheck_expr(c, expr);
+        },
+        .Block => |block| {
+            typecheck_block(c, ctx, block);
+        },
+        .If => |eef| {
+            var cond_type = typecheck_expr(c, eef.cond);
+            if (cond_type != .Bool) {
+                print_error(c, eef.cond.line_info, "expected 'bool', but got '{}'", .{cond_type});
+                std.os.exit(1);
+            }
+
+            typecheck_block(c, ctx, eef.if_true);
+            typecheck_block(c, ctx, eef.if_false);
+        },
+        .While => |loop| {
+            var cond_type = typecheck_expr(c, loop.cond);
+            if (cond_type != .Bool) {
+                print_error(c, loop.cond.line_info, "expected 'bool', but got '{}'", .{cond_type});
+                std.os.exit(1);
+            }
+
+            typecheck_block(c, ctx, loop.block);
         },
         .Return => {
             if (ctx.return_type.* != .Void) {
@@ -1337,7 +1604,7 @@ fn typecheck_stmt(c: *Compiler, ctx: TypecheckerContext, stmt: *Stmt) void {
             }
 
             if (!lhs_type.eql(rhs_type)) {
-                print_error(c, assign.rhs.line_info, "mismatched types: '{}', '{}'.", .{ lhs_type, rhs_type });
+                print_error(c, assign.rhs.line_info, "mismatched types: '{}' and '{}'.", .{ lhs_type, rhs_type });
                 std.os.exit(1);
             }
         },
@@ -1363,17 +1630,77 @@ fn typecheck_expr_allow_void(c: *Compiler, expr: *Expr) Type {
             var rhs_type = typecheck_expr_allow_void(c, op.rhs);
 
             switch (op.tag) {
-                .Add,
-                .Mul,
+                .Or,
+                .And,
+                => {
+                    if (lhs_type != .Bool or rhs_type != .Bool) {
+                        print_error(c, expr.line_info, "expected 'bool', but got '{}' and '{}'.", .{ lhs_type, rhs_type });
+                        print_note(c, op.lhs.line_info, "left-hand side is here.", .{});
+                        print_note(c, op.rhs.line_info, "right-hand side is here.", .{});
+                        std.os.exit(1);
+                    }
+
+                    return .Bool;
+                },
+                .Eq,
+                .Neq,
+                => {
+                    if (lhs_type == .Void or !lhs_type.eql(rhs_type)) {
+                        print_error(c, expr.line_info, "mismatched types: '{}' and '{}'.", .{ lhs_type, rhs_type });
+                        print_note(c, op.lhs.line_info, "left-hand side is here.", .{});
+                        print_note(c, op.rhs.line_info, "right-hand side is here.", .{});
+                        std.os.exit(1);
+                    }
+
+                    return .Bool;
+                },
+                .Lt,
+                .Leq,
+                .Gt,
+                .Geq,
                 => {
                     if (lhs_type != .Int64 or rhs_type != .Int64) {
-                        print_error(c, expr.line_info, "mismatched types: '{}', '{}'.", .{ lhs_type, rhs_type });
+                        print_error(c, expr.line_info, "expected integer type, but got '{}' and '{}'.", .{ lhs_type, rhs_type });
+                        print_note(c, op.lhs.line_info, "left-hand side is here.", .{});
+                        print_note(c, op.rhs.line_info, "right-hand side is here.", .{});
+                        std.os.exit(1);
+                    }
+
+                    return .Bool;
+                },
+                .Add,
+                .Sub,
+                .Mul,
+                .Div,
+                .Mod,
+                => {
+                    if (lhs_type != .Int64 or rhs_type != .Int64) {
+                        print_error(c, expr.line_info, "expected integer type, but got '{}' and '{}'.", .{ lhs_type, rhs_type });
+                        print_note(c, op.lhs.line_info, "left-hand side is here.", .{});
+                        print_note(c, op.rhs.line_info, "right-hand side is here.", .{});
                         std.os.exit(1);
                     }
 
                     return .Int64;
                 },
             }
+        },
+        .If => |eef| {
+            var cond_type = typecheck_expr(c, eef.cond);
+            if (cond_type != .Bool) {
+                print_error(c, eef.cond.line_info, "expected 'bool', but got '{}'", .{cond_type});
+                std.os.exit(1);
+            }
+
+            var if_true_type = typecheck_expr(c, eef.if_true);
+            var if_false_type = typecheck_expr(c, eef.if_false);
+
+            if (!if_true_type.eql(if_false_type)) {
+                print_error(c, eef.if_true.line_info, "mismatched types: '{}' and '{}'", .{ if_true_type, if_false_type });
+                std.os.exit(1);
+            }
+
+            return if_true_type;
         },
         .Call => |*call| {
             var lhs_type = typecheck_expr_allow_void(c, call.lhs);
@@ -1414,6 +1741,13 @@ fn typecheck_expr_allow_void(c: *Compiler, expr: *Expr) Type {
             switch (symbol.*) {
                 .Variable => |variable| {
                     expr.is_lvalue = true;
+
+                    if (!variable.was_visited) {
+                        print_error(c, expr.line_info, "can't refer to a variable in its own definition.", .{});
+                        print_note(c, variable.line_info, "definition is here.", .{});
+                        std.os.exit(1);
+                    }
+
                     return variable.typ.?;
                 },
                 .Parameter => |parameter| {
@@ -1468,9 +1802,27 @@ fn reduce_expr(c: *Compiler, expr: *Expr) i64 {
             var rhs = reduce_expr(c, op.rhs);
 
             switch (op.tag) {
+                .Or => result = @intFromBool((result != 0) or (rhs != 0)),
+                .And => result = @intFromBool((result != 0) and (rhs != 0)),
+                .Eq => result = @intFromBool(result == rhs),
+                .Neq => result = @intFromBool(result != rhs),
+                .Lt => result = @intFromBool(result < rhs),
+                .Leq => result = @intFromBool(result <= rhs),
+                .Gt => result = @intFromBool(result > rhs),
+                .Geq => result = @intFromBool(result >= rhs),
                 .Add => result += rhs,
+                .Sub => result -= rhs,
                 .Mul => result *= rhs,
+                .Div => result = @divTrunc(result, rhs),
+                .Mod => result = @rem(result, rhs),
             }
+        },
+        .If => |eef| {
+            var cond = reduce_expr(c, eef.cond);
+            var if_true = reduce_expr(c, eef.if_true);
+            var if_false = reduce_expr(c, eef.if_false);
+
+            result = if (cond != 0) if_true else if_false;
         },
         .Bool => |boolean| {
             result = @intFromBool(boolean);
@@ -1540,7 +1892,7 @@ fn generate_ir_symbol(c: *Compiler, symbol: *Symbol) void {
                 .src0 = .{ .Tmp = c.next_tmp },
                 .src1 = .{ .Label = function.label },
             });
-            generate_ir_scoped_stmt_block(c, function.block);
+            generate_ir_block(c, function.block);
             generate_ir_instr(c, .{ .tag = .GFE });
             c.instr_list.items[header_index].dst = .{
                 .Tmp = c.last_tmp_in_scope,
@@ -1552,7 +1904,7 @@ fn generate_ir_symbol(c: *Compiler, symbol: *Symbol) void {
     }
 }
 
-fn generate_ir_scoped_stmt_block(c: *Compiler, block: ScopedStmtBlock) void {
+fn generate_ir_block(c: *Compiler, block: StmtBlock) void {
     var old_next_tmp = c.next_tmp;
     var old_biggest_next_tmp = c.biggest_next_tmp;
 
@@ -1576,6 +1928,103 @@ fn generate_ir_stmt(c: *Compiler, stmt: *Stmt) void {
                 .src0 = .{ .Tmp = src },
             });
             return_tmp(c, src);
+        },
+        .Block => |block| {
+            generate_ir_block(c, block);
+        },
+        .If => |eef| {
+            var cond_tmp = next_tmp(c);
+            generate_ir_expr(c, eef.cond, cond_tmp);
+
+            var variant: u2 = @as(u2, @intFromBool(eef.if_true.stmts.count != 0)) << 1 |
+                @intFromBool(eef.if_false.stmts.count != 0);
+            switch (variant) {
+                0b00 => {
+                    return_tmp(c, cond_tmp);
+                },
+                0b01 => {
+                    var end_label = next_label(c);
+
+                    generate_ir_instr(c, .{
+                        .tag = .Jnz,
+                        .src0 = .{ .Tmp = cond_tmp },
+                        .src1 = .{ .Label = end_label },
+                    });
+                    return_tmp(c, cond_tmp);
+                    generate_ir_block(c, eef.if_false);
+                    generate_ir_instr(c, .{
+                        .tag = .Label,
+                        .src0 = .{ .Label = end_label },
+                    });
+                },
+                0b10 => {
+                    var end_label = next_label(c);
+
+                    generate_ir_instr(c, .{
+                        .tag = .Jz,
+                        .src0 = .{ .Tmp = cond_tmp },
+                        .src1 = .{ .Label = end_label },
+                    });
+                    return_tmp(c, cond_tmp);
+                    generate_ir_block(c, eef.if_true);
+                    generate_ir_instr(c, .{
+                        .tag = .Label,
+                        .src0 = .{ .Label = end_label },
+                    });
+                },
+                0b11 => {
+                    var if_false_label = next_label(c);
+                    var end_label = next_label(c);
+
+                    generate_ir_instr(c, .{
+                        .tag = .Jz,
+                        .src0 = .{ .Tmp = cond_tmp },
+                        .src1 = .{ .Label = if_false_label },
+                    });
+                    return_tmp(c, cond_tmp);
+                    generate_ir_block(c, eef.if_true);
+                    generate_ir_instr(c, .{
+                        .tag = .Jmp,
+                        .src0 = .{ .Label = end_label },
+                    });
+                    generate_ir_instr(c, .{
+                        .tag = .Label,
+                        .src0 = .{ .Label = if_false_label },
+                    });
+                    generate_ir_block(c, eef.if_false);
+                    generate_ir_instr(c, .{
+                        .tag = .Label,
+                        .src0 = .{ .Label = end_label },
+                    });
+                },
+            }
+        },
+        .While => |loop| {
+            var block_label = next_label(c);
+            var cond_label = next_label(c);
+
+            generate_ir_instr(c, .{
+                .tag = .Jmp,
+                .src0 = .{ .Label = cond_label },
+            });
+            generate_ir_instr(c, .{
+                .tag = .Label,
+                .src0 = .{ .Label = block_label },
+            });
+            generate_ir_block(c, loop.block);
+            generate_ir_instr(c, .{
+                .tag = .Label,
+                .src0 = .{ .Label = cond_label },
+            });
+
+            var cond_tmp = next_tmp(c);
+            generate_ir_expr(c, loop.cond, cond_tmp);
+            generate_ir_instr(c, .{
+                .tag = .Jnz,
+                .src0 = .{ .Tmp = cond_tmp },
+                .src1 = .{ .Label = block_label },
+            });
+            return_tmp(c, cond_tmp);
         },
         .Return => {
             generate_ir_instr(c, .{ .tag = .Ret });
@@ -1625,15 +2074,54 @@ fn generate_ir_expr(c: *Compiler, expr: *Expr, dst: IrTmp) void {
             generate_ir_expr(c, op.lhs, dst);
             return_tmp(c, src);
 
+            // TODO: 'or' and 'and' should short circuit.
             var tag: IrInstrTag = switch (op.tag) {
+                .Or => .Or,
+                .And => .And,
+                .Eq => .Eq,
+                .Neq => .Neq,
+                .Lt => .Lt,
+                .Leq => .Leq,
+                .Gt => .Gt,
+                .Geq => .Geq,
                 .Add => .Add,
+                .Sub => .Sub,
                 .Mul => .Mul,
+                .Div => .Div,
+                .Mod => .Mod,
             };
 
             generate_ir_instr(c, .{
                 .tag = tag,
                 .dst = .{ .Tmp = dst },
                 .src0 = .{ .Tmp = src },
+            });
+        },
+        .If => |eef| {
+            var if_false_label = next_label(c);
+            var end_label = next_label(c);
+            var cond_tmp = next_tmp(c);
+
+            generate_ir_expr(c, eef.cond, cond_tmp);
+            generate_ir_instr(c, .{
+                .tag = .Jz,
+                .src0 = .{ .Tmp = cond_tmp },
+                .src1 = .{ .Label = if_false_label },
+            });
+            return_tmp(c, cond_tmp);
+            generate_ir_expr(c, eef.if_true, dst);
+            generate_ir_instr(c, .{
+                .tag = .Jmp,
+                .src0 = .{ .Label = end_label },
+            });
+            generate_ir_instr(c, .{
+                .tag = .Label,
+                .src0 = .{ .Label = if_false_label },
+            });
+            generate_ir_expr(c, eef.if_false, dst);
+            generate_ir_instr(c, .{
+                .tag = .Label,
+                .src0 = .{ .Label = end_label },
             });
         },
         .Call => |call| {
@@ -1760,6 +2248,7 @@ fn generate_ir_lvalue(c: *Compiler, expr: *Expr, src: IrTmp) void {
             }
         },
         .Binary_Op,
+        .If,
         .Call,
         .Bool,
         .Int64,
@@ -1799,13 +2288,28 @@ fn debug_print_ir(c: *Compiler) void {
     for (c.instr_list.items) |instr| {
         var should_print_comma = false;
         var tag_string = switch (instr.tag) {
+            .Or => "    or   ",
+            .And => "    and  ",
+            .Eq => "    eq   ",
+            .Neq => "    neq  ",
+            .Lt => "    lt   ",
+            .Leq => "    leq  ",
+            .Gt => "    gt   ",
+            .Geq => "    geq  ",
             .Add => "    add  ",
+            .Sub => "    sub  ",
             .Mul => "    mul  ",
+            .Div => "    div  ",
+            .Mod => "    mod  ",
             .Mov => "    mov  ",
+            .Jmp => "    jmp  ",
+            .Jz => "    jz   ",
+            .Jnz => "    jnz  ",
             .Push => "    push ",
             .Pop => "    pop  ",
             .Call => "    call ",
             .Ret => "    ret  ",
+            .Label => "label:",
             .GV => "GV:",
             .GFB => "GFB:",
             .GFE => "GFE",
@@ -1814,17 +2318,15 @@ fn debug_print_ir(c: *Compiler) void {
 
         std.debug.print("{s} ", .{tag_string});
 
-        if (instr.dst != .None) {
-            debug_print_operand(instr.dst, instr.dst_flags);
-            should_print_comma = true;
-        }
+        debug_print_operand(instr.dst, instr.dst_flags);
+        should_print_comma = instr.dst != .None;
 
         if (should_print_comma and instr.src0 != .None) {
             std.debug.print(", ", .{});
-            should_print_comma = true;
         }
 
         debug_print_operand(instr.src0, instr.src0_flags);
+        should_print_comma = instr.src0 != .None;
 
         if (should_print_comma and instr.src1 != .None) {
             std.debug.print(", ", .{});
@@ -1837,7 +2339,14 @@ fn debug_print_ir(c: *Compiler) void {
 }
 
 pub fn compile() void {
-    var filepath = "examples/debug";
+    var args = std.process.args();
+    var filepath: [:0]const u8 = "examples/debug";
+
+    _ = args.next().?;
+    if (args.next()) |arg| {
+        filepath = arg;
+    }
+
     var source_code = utils.read_entire_file(gpa, filepath) catch {
         std.debug.print("error: failed to read file '{s}'.\n", .{filepath});
         std.os.exit(1);
