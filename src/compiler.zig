@@ -18,6 +18,22 @@ var next_scope: ScopeId = GLOBAL_SCOPE_ID;
 
 const LOWEST_PREC = -127;
 
+const VOID_TYPE: Type = .{
+    .payload = .Void,
+    .size = 0,
+    .typechecking_stage = .Fully_Typechecked,
+};
+const BOOL_TYPE: Type = .{
+    .payload = .Bool,
+    .size = 1,
+    .typechecking_stage = .Fully_Typechecked,
+};
+const INT64_TYPE: Type = .{
+    .payload = .Int64,
+    .size = 8,
+    .typechecking_stage = .Fully_Typechecked,
+};
+
 const Compiler = struct {
     const LOOKAHEAD = 2;
     tokens: [LOOKAHEAD]Token = undefined,
@@ -293,20 +309,26 @@ const TypeTag = enum {
     Int64,
 };
 
-const Type = union(TypeTag) {
+const TypePayload = union(TypeTag) {
     Function: TypeFunction,
     Void: void,
     Bool: void,
     Int64: void,
+};
+
+const Type = struct {
+    payload: TypePayload,
+    size: u32,
+    typechecking_stage: TypecheckingStage = .Not_Typechecked,
 
     pub fn eql(self: Type, other: Type) bool {
-        if (self != @as(TypeTag, other)) {
+        if (self.payload != @as(TypeTag, other.payload)) {
             return false;
         }
 
-        switch (self) {
+        switch (self.payload) {
             .Function => |sfunc| {
-                var ofunc = &other.Function;
+                var ofunc = &other.payload.Function;
 
                 if (sfunc.params.count != ofunc.params.count) {
                     return false;
@@ -332,7 +354,7 @@ const Type = union(TypeTag) {
     }
 
     pub fn format(typ: Type, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-        switch (typ) {
+        switch (typ.payload) {
             .Function => |function| {
                 try writer.writeAll("proc(");
 
@@ -482,7 +504,7 @@ const SymbolParameter = struct {
 };
 
 const SymbolFunction = struct {
-    typ: TypeFunction,
+    typ: Type,
     block: StmtBlock,
     label: IrLabel,
     line_info: LineInfo,
@@ -524,6 +546,12 @@ const SymbolTableContext = struct {
 };
 
 const SymbolTable = std.HashMap(SymbolKey, *Symbol, SymbolTableContext, 80);
+
+const TypecheckingStage = enum {
+    Not_Typechecked,
+    Being_Typechecked,
+    Fully_Typechecked,
+};
 
 const TypecheckerContext = struct {
     return_type: *Type,
@@ -779,20 +807,19 @@ fn parse_type(c: *Compiler) Type {
             return typ;
         },
         .Proc => {
-            var typ = parse_type_function(c, false);
-            return .{ .Function = typ };
+            return parse_type_function(c, false);
         },
         .Void => {
             c.advance();
-            return .Void;
+            return VOID_TYPE;
         },
         .Bool => {
             c.advance();
-            return .Bool;
+            return BOOL_TYPE;
         },
         .Int => {
             c.advance();
-            return .Int64;
+            return INT64_TYPE;
         },
         else => {
             var token = c.grab();
@@ -802,7 +829,7 @@ fn parse_type(c: *Compiler) Type {
     }
 }
 
-fn parse_type_function(c: *Compiler, should_insert_symbol: bool) TypeFunction {
+fn parse_type_function(c: *Compiler, should_insert_symbol: bool) Type {
     c.expect(.Proc);
     c.expect(.Open_Paren);
 
@@ -857,7 +884,7 @@ fn parse_type_function(c: *Compiler, should_insert_symbol: bool) TypeFunction {
     c.expect(.Close_Paren);
 
     var return_type = ast_create(c, Type);
-    return_type.* = .Void;
+    return_type.* = VOID_TYPE;
 
     if (c.peek() == .Arrow) {
         c.advance();
@@ -865,8 +892,11 @@ fn parse_type_function(c: *Compiler, should_insert_symbol: bool) TypeFunction {
     }
 
     return .{
-        .params = params,
-        .return_type = return_type,
+        .payload = .{ .Function = .{
+            .params = params,
+            .return_type = return_type,
+        } },
+        .size = 8,
     };
 }
 
@@ -1483,13 +1513,15 @@ fn typecheck(c: *Compiler) void {
     if (found_symbol) |symbol| {
         switch (symbol.*) {
             .Function => |*function| {
-                if (function.typ.params.count != 0) {
-                    print_error(c, function.line_info, "expected 0 arguments, but got {}.", .{function.typ.params.count});
+                var typ = &function.typ.payload.Function;
+
+                if (typ.params.count != 0) {
+                    print_error(c, function.line_info, "expected 0 arguments, but got {}.", .{typ.params.count});
                     std.os.exit(1);
                 }
 
-                if (function.typ.return_type.* != .Void) {
-                    print_error(c, function.line_info, "expected return type 'void', but got {}.", .{function.typ.return_type});
+                if (!typ.return_type.eql(VOID_TYPE)) {
+                    print_error(c, function.line_info, "expected return type 'void', but got {}.", .{typ.return_type});
                     std.os.exit(1);
                 }
 
@@ -1509,28 +1541,39 @@ fn typecheck(c: *Compiler) void {
 }
 
 fn typecheck_type(c: *Compiler, typ: *Type) void {
-    switch (typ.*) {
+    switch (typ.typechecking_stage) {
+        .Not_Typechecked => {
+            typ.typechecking_stage = .Being_Typechecked;
+        },
+        .Being_Typechecked => {
+            // TODO: error message.
+            std.os.exit(1);
+        },
+        .Fully_Typechecked => {
+            return;
+        },
+    }
+
+    switch (typ.payload) {
         .Function => |*function| {
-            typecheck_type_function(c, function);
+            var it = function.params.iterator();
+            while (it.next()) |param| {
+                typecheck_type(c, &param.*.typ);
+                if (param.*.typ.eql(VOID_TYPE)) {
+                    print_error(c, param.*.line_info, "parameter can't be 'void'.", .{});
+                    std.os.exit(1);
+                }
+            }
+
+            typecheck_type(c, function.return_type);
         },
         .Void,
         .Bool,
         .Int64,
         => {},
     }
-}
 
-fn typecheck_type_function(c: *Compiler, function: *TypeFunction) void {
-    var it = function.params.iterator();
-    while (it.next()) |param| {
-        typecheck_type(c, &param.*.typ);
-        if (param.*.typ == .Void) {
-            print_error(c, param.*.line_info, "parameter can't be 'void'.", .{});
-            std.os.exit(1);
-        }
-    }
-
-    typecheck_type(c, function.return_type);
+    typ.typechecking_stage = .Fully_Typechecked;
 }
 
 fn typecheck_symbol(c: *Compiler, symbol: *Symbol) void {
@@ -1548,7 +1591,7 @@ fn typecheck_symbol(c: *Compiler, symbol: *Symbol) void {
                     var typ = &variable.typ.?;
                     typecheck_type(c, typ);
 
-                    if (typ.* == .Void) {
+                    if (typ.eql(VOID_TYPE)) {
                         print_error(c, variable.line_info, "variable can't be 'void'.", .{});
                         std.os.exit(1);
                     }
@@ -1569,13 +1612,10 @@ fn typecheck_symbol(c: *Compiler, symbol: *Symbol) void {
         },
         .Parameter => unreachable,
         .Function => |*function| {
-            if (!function.is_type_typechecked) {
-                function.is_type_typechecked = true;
-                typecheck_type_function(c, &function.typ);
-            }
+            typecheck_type(c, &function.typ);
 
             var ctx = TypecheckerContext{
-                .return_type = function.typ.return_type,
+                .return_type = function.typ.payload.Function.return_type,
             };
             typecheck_block(c, ctx, function.block);
         },
@@ -1599,7 +1639,7 @@ fn typecheck_stmt(c: *Compiler, ctx: TypecheckerContext, stmt: *Stmt) void {
         },
         .If => |eef| {
             var cond_type = typecheck_expr(c, eef.cond);
-            if (cond_type != .Bool) {
+            if (!cond_type.eql(BOOL_TYPE)) {
                 print_error(c, eef.cond.line_info, "expected 'bool', but got '{}'", .{cond_type});
                 std.os.exit(1);
             }
@@ -1609,7 +1649,7 @@ fn typecheck_stmt(c: *Compiler, ctx: TypecheckerContext, stmt: *Stmt) void {
         },
         .While => |loop| {
             var cond_type = typecheck_expr(c, loop.cond);
-            if (cond_type != .Bool) {
+            if (!cond_type.eql(BOOL_TYPE)) {
                 print_error(c, loop.cond.line_info, "expected 'bool', but got '{}'", .{cond_type});
                 std.os.exit(1);
             }
@@ -1617,14 +1657,14 @@ fn typecheck_stmt(c: *Compiler, ctx: TypecheckerContext, stmt: *Stmt) void {
             typecheck_block(c, ctx, loop.block);
         },
         .Return => {
-            if (ctx.return_type.* != .Void) {
+            if (!ctx.return_type.eql(VOID_TYPE)) {
                 print_error(c, stmt.line_info, "expected '{}'.", .{ctx.return_type});
                 std.os.exit(1);
             }
         },
         .Return_Expr => |expr| {
             var typ = typecheck_expr(c, expr);
-            if (ctx.return_type.* == .Void) {
+            if (ctx.return_type.eql(VOID_TYPE)) {
                 print_error(c, expr.line_info, "shouldn't have an expression here.", .{});
                 std.os.exit(1);
             } else if (!ctx.return_type.eql(typ)) {
@@ -1657,7 +1697,7 @@ fn typecheck_stmt(c: *Compiler, ctx: TypecheckerContext, stmt: *Stmt) void {
 
 fn typecheck_expr(c: *Compiler, expr: *Expr) Type {
     var typ = typecheck_expr_allow_void(c, expr);
-    if (typ == .Void) {
+    if (typ.eql(VOID_TYPE)) {
         print_error(c, expr.line_info, "expression can't be 'void'.", .{});
         std.os.exit(1);
     }
@@ -1674,40 +1714,40 @@ fn typecheck_expr_allow_void(c: *Compiler, expr: *Expr) Type {
                 .Or,
                 .And,
                 => {
-                    if (lhs_type != .Bool or rhs_type != .Bool) {
+                    if (!lhs_type.eql(BOOL_TYPE) or !rhs_type.eql(BOOL_TYPE)) {
                         print_error(c, expr.line_info, "expected 'bool', but got '{}' and '{}'.", .{ lhs_type, rhs_type });
                         print_note(c, op.lhs.line_info, "left-hand side is here.", .{});
                         print_note(c, op.rhs.line_info, "right-hand side is here.", .{});
                         std.os.exit(1);
                     }
 
-                    return .Bool;
+                    return BOOL_TYPE;
                 },
                 .Eq,
                 .Neq,
                 => {
-                    if (lhs_type == .Void or !lhs_type.eql(rhs_type)) {
+                    if (lhs_type.eql(VOID_TYPE) or !lhs_type.eql(rhs_type)) {
                         print_error(c, expr.line_info, "mismatched types: '{}' and '{}'.", .{ lhs_type, rhs_type });
                         print_note(c, op.lhs.line_info, "left-hand side is here.", .{});
                         print_note(c, op.rhs.line_info, "right-hand side is here.", .{});
                         std.os.exit(1);
                     }
 
-                    return .Bool;
+                    return BOOL_TYPE;
                 },
                 .Lt,
                 .Leq,
                 .Gt,
                 .Geq,
                 => {
-                    if (lhs_type != .Int64 or rhs_type != .Int64) {
+                    if (!lhs_type.eql(INT64_TYPE) or !rhs_type.eql(INT64_TYPE)) {
                         print_error(c, expr.line_info, "expected integer type, but got '{}' and '{}'.", .{ lhs_type, rhs_type });
                         print_note(c, op.lhs.line_info, "left-hand side is here.", .{});
                         print_note(c, op.rhs.line_info, "right-hand side is here.", .{});
                         std.os.exit(1);
                     }
 
-                    return .Bool;
+                    return BOOL_TYPE;
                 },
                 .Add,
                 .Sub,
@@ -1715,14 +1755,14 @@ fn typecheck_expr_allow_void(c: *Compiler, expr: *Expr) Type {
                 .Div,
                 .Mod,
                 => {
-                    if (lhs_type != .Int64 or rhs_type != .Int64) {
+                    if (!lhs_type.eql(INT64_TYPE) or !rhs_type.eql(INT64_TYPE)) {
                         print_error(c, expr.line_info, "expected integer type, but got '{}' and '{}'.", .{ lhs_type, rhs_type });
                         print_note(c, op.lhs.line_info, "left-hand side is here.", .{});
                         print_note(c, op.rhs.line_info, "right-hand side is here.", .{});
                         std.os.exit(1);
                     }
 
-                    return .Int64;
+                    return INT64_TYPE;
                 },
             }
         },
@@ -1731,26 +1771,26 @@ fn typecheck_expr_allow_void(c: *Compiler, expr: *Expr) Type {
 
             switch (op.tag) {
                 .Not => {
-                    if (subexpr_type != .Bool) {
+                    if (!subexpr_type.eql(BOOL_TYPE)) {
                         print_error(c, op.subexpr.line_info, "expected 'bool', but got '{}'.", .{subexpr_type});
                         std.os.exit(1);
                     }
 
-                    return .Bool;
+                    return BOOL_TYPE;
                 },
                 .Neg => {
-                    if (subexpr_type != .Int64) {
+                    if (!subexpr_type.eql(INT64_TYPE)) {
                         print_error(c, op.subexpr.line_info, "expected integer type, but got '{}'.", .{subexpr_type});
                         std.os.exit(1);
                     }
 
-                    return .Int64;
+                    return INT64_TYPE;
                 },
             }
         },
         .If => |eef| {
             var cond_type = typecheck_expr(c, eef.cond);
-            if (cond_type != .Bool) {
+            if (!cond_type.eql(BOOL_TYPE)) {
                 print_error(c, eef.cond.line_info, "expected 'bool', but got '{}'", .{cond_type});
                 std.os.exit(1);
             }
@@ -1768,12 +1808,12 @@ fn typecheck_expr_allow_void(c: *Compiler, expr: *Expr) Type {
         .Call => |*call| {
             var lhs_type = typecheck_expr_allow_void(c, call.lhs);
 
-            if (lhs_type != .Function) {
+            if (lhs_type.payload != .Function) {
                 print_error(c, call.lhs.line_info, "expected function, but got '{}'.", .{lhs_type});
                 std.os.exit(1);
             }
 
-            var function = &lhs_type.Function;
+            var function = &lhs_type.payload.Function;
 
             if (call.args.count != function.params.count) {
                 print_error(c, expr.line_info, "expected {} arguments, but got {}.", .{ function.params.count, call.args.count });
@@ -1795,10 +1835,10 @@ fn typecheck_expr_allow_void(c: *Compiler, expr: *Expr) Type {
             return function.return_type.*;
         },
         .Bool => {
-            return .Bool;
+            return BOOL_TYPE;
         },
         .Int64 => {
-            return .Int64;
+            return INT64_TYPE;
         },
         .Symbol => |symbol| {
             switch (symbol.*) {
@@ -1818,12 +1858,8 @@ fn typecheck_expr_allow_void(c: *Compiler, expr: *Expr) Type {
                     return parameter.typ;
                 },
                 .Function => |*function| {
-                    if (!function.is_type_typechecked) {
-                        function.is_type_typechecked = true;
-                        typecheck_type_function(c, &function.typ);
-                    }
-
-                    return .{ .Function = function.typ };
+                    typecheck_type(c, &function.typ);
+                    return function.typ;
                 },
             }
         },
@@ -1947,7 +1983,8 @@ fn generate_ir_symbol(c: *Compiler, symbol: *Symbol) void {
         .Parameter => unreachable,
         .Function => |*function| {
             {
-                var it = function.typ.params.iterator();
+                var typ = &function.typ.payload.Function;
+                var it = typ.params.iterator();
                 while (it.next()) |param| {
                     param.*.storage = .{ .Tmp = next_tmp(c) };
                 }
