@@ -1,9 +1,24 @@
 val00 := 0;
 
+// TODO: allow to assign constants to enumerators, e.g. "A = 2 + 2".
+Baz := enum
+{
+  A,
+  B,
+  C,
+}
+
+Faz := union
+{
+  x: int,
+  y: bool,
+}
+
 Foo := struct
 {
   x: int,
   y: bool,
+  z: Baz,
 }
 
 Bar := struct
@@ -13,9 +28,10 @@ Bar := struct
 
 bar := proc()
 {
-  x: Foo = { x = 2, y = false };
-  x = { x = 2 };
+  x: Foo = .{ x = 2, y = false };
+  x = .{ x = 2 };
   x.x.foo = 2;
+  x.z = .A;
 
   if false then {} else {}
 

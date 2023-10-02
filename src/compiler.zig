@@ -138,6 +138,8 @@ const Compiler = struct {
                 .{ .text = "do", .tag = .Do },
                 .{ .text = "return", .tag = .Return },
                 .{ .text = "struct", .tag = .Struct },
+                .{ .text = "union", .tag = .Union },
+                .{ .text = "enum", .tag = .Enum },
                 .{ .text = "proc", .tag = .Proc },
                 .{ .text = "void", .tag = .Void },
                 .{ .text = "bool", .tag = .Bool },
@@ -266,6 +268,8 @@ const TokenTag = enum {
     Return,
 
     Struct,
+    Union,
+    Enum,
     Proc,
     Void,
     Bool,
@@ -300,6 +304,8 @@ const TypeStruct = struct {
 
 const TypeTag = enum {
     Struct,
+    Union,
+    Enum,
     Function,
     Void,
     Bool,
@@ -310,6 +316,8 @@ const TypeTag = enum {
 
 const TypePayload = union(TypeTag) {
     Struct: TypeStruct,
+    Union: TypeStruct,
+    Enum: TypeStruct,
     Function: TypeFunction,
     Void: void,
     Bool: void,
@@ -350,10 +358,10 @@ const ExprTag = enum {
     Call,
     Field,
     Init_List,
+    Enum_Field,
     Bool,
     Int64,
     Symbol,
-    Identifier,
 };
 
 const ExprPayload = union(ExprTag) {
@@ -380,10 +388,10 @@ const ExprPayload = union(ExprTag) {
         id: Token,
     },
     Init_List: DesignatorList,
+    Enum_Field: []const u8,
     Bool: bool,
     Int64: i64,
-    Symbol: *Symbol,
-    Identifier: Token,
+    Symbol: []const u8,
 };
 
 const Expr = struct {
@@ -460,11 +468,15 @@ const SymbolFunction = struct {
     block: StmtBlock,
 };
 
-const SymbolStruct = struct {
+const SymbolStructField = struct {
     _type: *Type,
 };
 
-const SymbolStructField = struct {
+const SymbolUnionField = struct {
+    _type: *Type,
+};
+
+const SymbolEnumField = struct {
     _type: *Type,
 };
 
@@ -474,14 +486,22 @@ const SymbolTag = enum {
     Function,
     Struct,
     Struct_Field,
+    Union,
+    Union_Field,
+    Enum,
+    Enum_Field,
 };
 
 const SymbolPayload = union(SymbolTag) {
     Variable: SymbolVariable,
     Parameter: SymbolParameter,
     Function: SymbolFunction,
-    Struct: SymbolStruct,
+    Struct: *Type,
     Struct_Field: SymbolStructField,
+    Union: *Type,
+    Union_Field: SymbolUnionField,
+    Enum: *Type,
+    Enum_Field: SymbolEnumField,
 };
 
 const Symbol = struct {
@@ -549,6 +569,8 @@ fn token_tag_to_text(tag: TokenTag) []const u8 {
         .Do => "'do'",
         .Return => "'return'",
         .Struct => "'struct'",
+        .Union => "'union'",
+        .Enum => "'enum'",
         .Proc => "'proc'",
         .Void => "'void'",
         .Bool => "'bool'",
@@ -712,11 +734,27 @@ fn parse_type(c: *Compiler) Type {
         },
         .Struct => {
             c.advance();
+            var _struct = parse_struct_fields(c, true);
+
+            return .{
+                .payload = .{ .Struct = _struct },
+            };
+        },
+        .Union => {
+            c.advance();
+            var _union = parse_struct_fields(c, false);
+
+            return .{
+                .payload = .{ .Union = _union },
+            };
+        },
+        .Enum => {
+            c.advance();
             c.expect(.Open_Curly);
 
             push_scope(c);
 
-            var _struct = TypeStruct{
+            var _enum = TypeStruct{
                 .fields = .{},
                 .scope = grab_current_scope(),
             };
@@ -725,21 +763,17 @@ fn parse_type(c: *Compiler) Type {
             while (tt != .End_Of_File and tt != .Close_Curly) {
                 var id = c.grab();
                 c.expect(.Identifier);
-                c.expect(.Colon);
-
-                var _type = ast_create(c, Type);
-                _type.* = parse_type(c);
 
                 var symbol = insert_symbol(c, id);
-                symbol.payload = .{ .Struct_Field = .{
-                    ._type = _type,
+                symbol.payload = .{ .Enum_Field = .{
+                    ._type = undefined,
                 } };
 
                 var node = ast_create(c, SymbolList.Node);
                 node.* = .{
                     .payload = symbol,
                 };
-                _struct.fields.insert_last(node);
+                _enum.fields.insert_last(node);
 
                 tt = c.peek();
                 if (tt != .End_Of_File and tt != .Close_Curly) {
@@ -753,7 +787,7 @@ fn parse_type(c: *Compiler) Type {
             c.expect(.Close_Curly);
 
             return .{
-                .payload = .{ .Struct = _struct },
+                .payload = .{ .Enum = _enum },
             };
         },
         .Proc => {
@@ -847,6 +881,57 @@ fn parse_type_function(c: *Compiler, should_insert_symbol: bool) Type {
     };
 }
 
+fn parse_struct_fields(c: *Compiler, is_struct: bool) TypeStruct {
+    c.expect(.Open_Curly);
+
+    push_scope(c);
+
+    var _struct = TypeStruct{
+        .fields = .{},
+        .scope = grab_current_scope(),
+    };
+
+    var tt = c.peek();
+    while (tt != .End_Of_File and tt != .Close_Curly) {
+        var id = c.grab();
+        c.expect(.Identifier);
+        c.expect(.Colon);
+
+        var _type = ast_create(c, Type);
+        _type.* = parse_type(c);
+
+        var symbol = insert_symbol(c, id);
+
+        if (is_struct) {
+            symbol.payload = .{ .Struct_Field = .{
+                ._type = _type,
+            } };
+        } else {
+            symbol.payload = .{ .Union_Field = .{
+                ._type = _type,
+            } };
+        }
+
+        var node = ast_create(c, SymbolList.Node);
+        node.* = .{
+            .payload = symbol,
+        };
+        _struct.fields.insert_last(node);
+
+        tt = c.peek();
+        if (tt != .End_Of_File and tt != .Close_Curly) {
+            c.expect(.Comma);
+            tt = c.peek();
+        }
+    }
+
+    pop_scope();
+
+    c.expect(.Close_Curly);
+
+    return _struct;
+}
+
 fn is_def(c: *Compiler) bool {
     var fst = c.peek();
     var snd = c.peek_ahead(1);
@@ -868,9 +953,23 @@ fn parse_symbol(c: *Compiler) *Symbol {
                     var _type = ast_create(c, Type);
                     _type.* = parse_type(c);
 
-                    symbol.payload = .{ .Struct = .{
-                        ._type = _type,
-                    } };
+                    symbol.payload = .{ .Struct = _type };
+
+                    return symbol;
+                },
+                .Union => {
+                    var _type = ast_create(c, Type);
+                    _type.* = parse_type(c);
+
+                    symbol.payload = .{ .Union = _type };
+
+                    return symbol;
+                },
+                .Enum => {
+                    var _type = ast_create(c, Type);
+                    _type.* = parse_type(c);
+
+                    symbol.payload = .{ .Enum = _type };
 
                     return symbol;
                 },
@@ -1000,37 +1099,54 @@ fn parse_highest_prec(c: *Compiler) Expr {
 
                 break :payload expr.payload;
             },
-            .Open_Curly => {
-                var init_list = DesignatorList{};
+            .Dot => {
+                switch (c.peek()) {
+                    .Open_Curly => {
+                        c.advance();
+                        var init_list = DesignatorList{};
 
-                var tt = c.peek();
-                while (tt != .End_Of_File and tt != .Close_Curly) {
-                    var id = c.grab();
-                    c.expect(.Identifier);
-                    c.expect(.Equal);
+                        var tt = c.peek();
+                        while (tt != .End_Of_File and tt != .Close_Curly) {
+                            var id = c.grab();
+                            c.expect(.Identifier);
+                            c.expect(.Equal);
 
-                    var expr = ast_create(c, Expr);
-                    expr.* = parse_expr(c);
+                            var expr = ast_create(c, Expr);
+                            expr.* = parse_expr(c);
 
-                    var node = ast_create(c, DesignatorList.Node);
-                    node.* = .{
-                        .payload = .{
-                            .id = id,
-                            .expr = expr,
-                        },
-                    };
-                    init_list.insert_last(node);
+                            var node = ast_create(c, DesignatorList.Node);
+                            node.* = .{
+                                .payload = .{
+                                    .id = id,
+                                    .expr = expr,
+                                },
+                            };
+                            init_list.insert_last(node);
 
-                    tt = c.peek();
-                    if (tt != .End_Of_File and tt != .Close_Curly) {
-                        c.expect(.Comma);
-                        tt = c.peek();
-                    }
+                            tt = c.peek();
+                            if (tt != .End_Of_File and tt != .Close_Curly) {
+                                c.expect(.Comma);
+                                tt = c.peek();
+                            }
+                        }
+
+                        c.expect(.Close_Curly);
+
+                        break :payload .{ .Init_List = init_list };
+                    },
+                    .Identifier => {
+                        var id = c.grab();
+                        c.advance();
+
+                        break :payload .{ .Enum_Field = id.text };
+                    },
+                    else => {
+                        var _token = c.grab();
+                        print_error(c, _token.line_info, "unexpected '{s}' after '.' operator.", .{_token.text});
+                        print_note(c, _token.line_info, "expected designator list or identifier.", .{});
+                        std.os.exit(1);
+                    },
                 }
-
-                c.expect(.Close_Curly);
-
-                break :payload .{ .Init_List = init_list };
             },
             .If => {
                 var cond = ast_create(c, Expr);
@@ -1057,7 +1173,7 @@ fn parse_highest_prec(c: *Compiler) Expr {
                 break :payload .{ .Bool = token.tag == .True };
             },
             .Identifier => {
-                break :payload .{ .Identifier = token };
+                break :payload .{ .Symbol = token.text };
             },
             .Integer => {
                 var value: i64 = 0;
