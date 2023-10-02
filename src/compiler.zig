@@ -20,15 +20,12 @@ const LOWEST_PREC = -127;
 
 const VOID_TYPE: Type = .{
     .payload = .Void,
-    .size = 0,
 };
 const BOOL_TYPE: Type = .{
     .payload = .Bool,
-    .size = 1,
 };
 const INT64_TYPE: Type = .{
     .payload = .Int64,
-    .size = 8,
 };
 
 const Compiler = struct {
@@ -288,7 +285,7 @@ const Token = struct {
 const ScopeId = u32;
 
 const TypeFunction = struct {
-    params: ParameterList,
+    params: SymbolList,
     return_type: *Type,
 };
 
@@ -308,61 +305,6 @@ const TypePayload = union(TypeTag) {
 
 const Type = struct {
     payload: TypePayload,
-    size: u32,
-
-    pub fn eql(self: Type, other: Type) bool {
-        if (self.payload != @as(TypeTag, other.payload)) {
-            return false;
-        }
-
-        switch (self.payload) {
-            .Function => |sfunc| {
-                var ofunc = &other.payload.Function;
-
-                if (sfunc.params.count != ofunc.params.count) {
-                    return false;
-                }
-
-                var sit = sfunc.params.iterator();
-                var oit = ofunc.params.iterator();
-                while (sit.next()) |sparam_type| {
-                    var oparam_type = oit.next().?;
-
-                    if (!sparam_type.*.typ.eql(oparam_type.*.typ)) {
-                        return false;
-                    }
-                }
-
-                return sfunc.return_type.eql(ofunc.return_type.*);
-            },
-            .Void,
-            .Bool,
-            .Int64,
-            => return true,
-        }
-    }
-
-    pub fn format(typ: Type, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-        switch (typ.payload) {
-            .Function => |function| {
-                try writer.writeAll("proc(");
-
-                var it = function.params.iterator();
-                while (it.next()) |param| {
-                    try writer.print("{}", .{param.*.typ});
-
-                    if (it.has_next()) {
-                        try writer.writeAll(", ");
-                    }
-                }
-
-                try writer.print(") -> {}", .{function.return_type});
-            },
-            .Void => try writer.writeAll("void"),
-            .Bool => try writer.writeAll("bool"),
-            .Int64 => try writer.writeAll("int64"),
-        }
-    }
 };
 
 const ExprBinaryOpTag = enum {
@@ -476,25 +418,18 @@ const StmtBlock = struct {
     scope: ?ScopeId,
 };
 
-const ParameterList = notstd.DoublyLinkedList(*SymbolParameter);
-
 const SymbolVariable = struct {
-    typ: ?Type,
-    expr: ?Expr,
-    was_visited: bool = false,
-    line_info: LineInfo,
+    typ: ?*Type,
+    expr: ?*Expr,
 };
 
 const SymbolParameter = struct {
-    typ: Type,
-    line_info: LineInfo,
+    typ: *Type,
 };
 
 const SymbolFunction = struct {
-    typ: Type,
+    typ: *Type,
     block: StmtBlock,
-    line_info: LineInfo,
-    is_type_typechecked: bool = false,
 };
 
 const SymbolTag = enum {
@@ -503,10 +438,16 @@ const SymbolTag = enum {
     Function,
 };
 
-const Symbol = union(SymbolTag) {
+const SymbolPayload = union(SymbolTag) {
     Variable: SymbolVariable,
     Parameter: SymbolParameter,
     Function: SymbolFunction,
+};
+
+const Symbol = struct {
+    payload: SymbolPayload,
+    key: SymbolKey,
+    line_info: LineInfo,
 };
 
 const SymbolList = notstd.DoublyLinkedList(*Symbol);
@@ -557,8 +498,8 @@ fn token_tag_to_text(tag: TokenTag) []const u8 {
         .Colon_Equal => "':='",
         .Colon => "':'",
         .Semicolon => "';'",
-        .Equal => "'equal'",
-        .Comma => "'comma'",
+        .Equal => "'='",
+        .Comma => "','",
         .Print => "'print'",
         .If => "'if'",
         .Then => "'then'",
@@ -625,14 +566,6 @@ fn ast_create(c: *Compiler, comptime T: type) *T {
     };
 }
 
-fn grab_symbol_line_info(symbol: *Symbol) LineInfo {
-    switch (symbol.*) {
-        .Variable => |variable| return variable.line_info,
-        .Parameter => |parameter| return parameter.line_info,
-        .Function => |function| return function.line_info,
-    }
-}
-
 fn insert_symbol(c: *Compiler, id: Token) *Symbol {
     std.debug.assert(id.tag == .Identifier);
 
@@ -647,13 +580,31 @@ fn insert_symbol(c: *Compiler, id: Token) *Symbol {
 
     if (get_or_put_result.found_existing) {
         print_error(c, id.line_info, "symbol '{s}' is already defined.", .{id.text});
-        print_note(c, grab_symbol_line_info(get_or_put_result.value_ptr.*), "first defined here.", .{});
+        print_note(c, get_or_put_result.value_ptr.*.line_info, "first defined here.", .{});
         std.os.exit(1);
     }
 
     var symbol = ast_create(c, Symbol);
+    symbol.* = .{
+        .payload = undefined,
+        .key = get_or_put_result.key_ptr.*,
+        .line_info = id.line_info,
+    };
     get_or_put_result.value_ptr.* = symbol;
 
+    return symbol;
+}
+
+fn create_unnamed_symbol(c: *Compiler, line_info: LineInfo) *Symbol {
+    var symbol = ast_create(c, Symbol);
+    symbol.* = .{
+        .payload = undefined,
+        .key = .{
+            .text = "<no name>",
+            .scope = grab_current_scope(),
+        },
+        .line_info = line_info,
+    };
     return symbol;
 }
 
@@ -676,8 +627,7 @@ fn find_symbol(c: *Compiler, id: Token) *Symbol {
                 .Variable,
                 .Parameter,
                 => {
-                    var line_info = grab_symbol_line_info(symbol);
-                    if (line_info.offset < id.line_info.offset) {
+                    if (symbol.line_info.offset < id.line_info.offset) {
                         return symbol;
                     }
                 },
@@ -745,7 +695,7 @@ fn parse_type_function(c: *Compiler, should_insert_symbol: bool) Type {
     c.expect(.Proc);
     c.expect(.Open_Paren);
 
-    var params = ParameterList{};
+    var params = SymbolList{};
 
     var tt = c.peek();
     while (tt != .End_Of_File and tt != .Close_Paren) {
@@ -758,27 +708,19 @@ fn parse_type_function(c: *Compiler, should_insert_symbol: bool) Type {
             has_id = true;
         }
 
-        var typ = parse_type(c);
-        var symbol = symbol: {
-            if (has_id and should_insert_symbol) {
-                var symbol = insert_symbol(c, id);
-                symbol.* = .{ .Parameter = .{
-                    .typ = typ,
-                    .line_info = id.line_info,
-                } };
+        var typ = ast_create(c, Type);
+        typ.* = parse_type(c);
 
-                break :symbol &symbol.Parameter;
-            } else {
-                var symbol = ast_create(c, SymbolParameter);
-                symbol.* = .{
-                    .typ = typ,
-                    .line_info = id.line_info,
-                };
+        var symbol = if (has_id and should_insert_symbol)
+            insert_symbol(c, id)
+        else
+            create_unnamed_symbol(c, id.line_info);
 
-                break :symbol symbol;
-            }
-        };
-        var node = ast_create(c, ParameterList.Node);
+        symbol.payload = .{ .Parameter = .{
+            .typ = typ,
+        } };
+
+        var node = ast_create(c, SymbolList.Node);
         node.* = .{
             .payload = symbol,
         };
@@ -806,7 +748,6 @@ fn parse_type_function(c: *Compiler, should_insert_symbol: bool) Type {
             .params = params,
             .return_type = return_type,
         } },
-        .size = 8,
     };
 }
 
@@ -829,27 +770,27 @@ fn parse_symbol(c: *Compiler) *Symbol {
             switch (c.peek()) {
                 .Proc => {
                     push_scope(c);
-                    var typ = parse_type_function(c, true);
+                    var typ = ast_create(c, Type);
+                    typ.* = parse_type_function(c, true);
                     revert_scope();
 
                     var block = parse_scoped_block(c);
 
-                    symbol.* = .{ .Function = .{
+                    symbol.payload = .{ .Function = .{
                         .typ = typ,
                         .block = block,
-                        .line_info = id.line_info,
                     } };
 
                     return symbol;
                 },
                 else => {
-                    var expr = parse_expr(c);
+                    var expr = ast_create(c, Expr);
+                    expr.* = parse_expr(c);
                     c.expect(.Semicolon);
 
-                    symbol.* = .{ .Variable = .{
+                    symbol.payload = .{ .Variable = .{
                         .typ = null,
                         .expr = expr,
-                        .line_info = id.line_info,
                     } };
 
                     return symbol;
@@ -859,20 +800,21 @@ fn parse_symbol(c: *Compiler) *Symbol {
         .Colon => {
             c.advance();
 
-            var typ = parse_type(c);
-            var expr: ?Expr = null;
+            var expr: ?*Expr = null;
+            var typ = ast_create(c, Type);
+            typ.* = parse_type(c);
 
             if (c.peek() == .Equal) {
                 c.advance();
-                expr = parse_expr(c);
+                expr = ast_create(c, Expr);
+                expr.?.* = parse_expr(c);
             }
 
             c.expect(.Semicolon);
 
-            symbol.* = .{ .Variable = .{
+            symbol.payload = .{ .Variable = .{
                 .typ = typ,
                 .expr = expr,
-                .line_info = id.line_info,
             } };
 
             return symbol;
@@ -928,80 +870,73 @@ fn parse_highest_prec(c: *Compiler) Expr {
     var token = c.grab();
     c.advance();
 
-    switch (token.tag) {
-        .Sub,
-        .Not,
-        => {
-            var subexpr = ast_create(c, Expr);
-            subexpr.* = parse_highest_prec(c);
+    var result = Expr{
+        .payload = undefined,
+        .line_info = token.line_info,
+    };
 
-            return .{
-                .payload = .{ .Unary_Op = .{
+    result.payload = payload: {
+        switch (token.tag) {
+            .Sub,
+            .Not,
+            => {
+                var subexpr = ast_create(c, Expr);
+                subexpr.* = parse_highest_prec(c);
+
+                break :payload .{ .Unary_Op = .{
                     .tag = token_tag_to_expr_unary_op_tag(token.tag),
                     .subexpr = subexpr,
-                } },
-                .line_info = token.line_info,
-            };
-        },
-        .Open_Paren => {
-            var expr = parse_expr(c);
-            expr.line_info = token.line_info;
-            c.expect(.Close_Paren);
+                } };
+            },
+            .Open_Paren => {
+                var expr = parse_expr(c);
+                c.expect(.Close_Paren);
 
-            return expr;
-        },
-        .If => {
-            var cond = ast_create(c, Expr);
-            var if_true = ast_create(c, Expr);
-            var if_false = ast_create(c, Expr);
+                break :payload expr.payload;
+            },
+            .If => {
+                var cond = ast_create(c, Expr);
+                var if_true = ast_create(c, Expr);
+                var if_false = ast_create(c, Expr);
 
-            cond.* = parse_expr(c);
-            if (c.peek() == .Then) {
-                c.advance();
-            }
-            if_true.* = parse_expr(c);
-            c.expect(.Else);
-            if_false.* = parse_expr(c);
+                cond.* = parse_expr(c);
+                if (c.peek() == .Then) {
+                    c.advance();
+                }
+                if_true.* = parse_expr(c);
+                c.expect(.Else);
+                if_false.* = parse_expr(c);
 
-            return .{
-                .payload = .{ .If = .{
+                break :payload .{ .If = .{
                     .cond = cond,
                     .if_true = if_true,
                     .if_false = if_false,
-                } },
-                .line_info = token.line_info,
-            };
-        },
-        .False,
-        .True,
-        => {
-            return .{
-                .payload = .{ .Bool = token.tag == .True },
-                .line_info = token.line_info,
-            };
-        },
-        .Identifier => {
-            return .{
-                .payload = .{ .Identifier = token },
-                .line_info = token.line_info,
-            };
-        },
-        .Integer => {
-            var value: i64 = 0;
-            for (token.text) |ch| {
-                value = 10 * value + (ch - '0');
-            }
+                } };
+            },
+            .False,
+            .True,
+            => {
+                break :payload .{ .Bool = token.tag == .True };
+            },
+            .Identifier => {
+                break :payload .{ .Identifier = token };
+            },
+            .Integer => {
+                var value: i64 = 0;
+                for (token.text) |ch| {
+                    value = 10 * value + (ch - '0');
+                }
 
-            return .{
-                .payload = .{ .Int64 = value },
-                .line_info = token.line_info,
-            };
-        },
-        else => {
-            print_error(c, token.line_info, "'{s}' doesn't start expression.", .{token.text});
-            std.os.exit(1);
-        },
-    }
+                break :payload .{ .Int64 = value };
+            },
+            else => {
+                print_error(c, token.line_info, "'{s}' doesn't start expression.", .{token.text});
+                std.os.exit(1);
+            },
+        }
+    };
+
+    return result;
 }
 
 fn parse_postfix_unary_ops(c: *Compiler, inner: *Expr) void {
@@ -1099,145 +1034,120 @@ fn token_tag_to_expr_unary_op_tag(op: TokenTag) ExprUnaryOpTag {
 }
 
 fn parse_stmt(c: *Compiler) Stmt {
-    var line_info = c.grab().line_info;
+    var result: Stmt = .{
+        .payload = undefined,
+        .line_info = c.grab().line_info,
+    };
 
-    switch (c.peek()) {
-        .Print => {
-            c.advance();
-
-            var expr = ast_create(c, Expr);
-            expr.* = parse_expr(c);
-            c.expect(.Semicolon);
-
-            return .{
-                .payload = .{ .Print = expr },
-                .line_info = line_info,
-            };
-        },
-        .Open_Curly => {
-            return .{
-                .payload = .{ .Block = parse_scoped_block(c) },
-                .line_info = line_info,
-            };
-        },
-        .If => {
-            c.advance();
-
-            var cond = ast_create(c, Expr);
-            cond.* = parse_expr(c);
-
-            if (c.peek() == .Then) {
+    result.payload = payload: {
+        switch (c.peek()) {
+            .Print => {
                 c.advance();
-            }
 
-            var if_true = parse_stmt_or_scoped_block(c);
-            var if_false = StmtBlock{
-                .stmts = .{},
-                .scope = null,
-            };
+                var expr = ast_create(c, Expr);
+                expr.* = parse_expr(c);
+                c.expect(.Semicolon);
 
-            if (c.peek() == .Else) {
+                break :payload .{ .Print = expr };
+            },
+            .Open_Curly => {
+                break :payload .{ .Block = parse_scoped_block(c) };
+            },
+            .If => {
                 c.advance();
-                if_false = parse_stmt_or_scoped_block(c);
-            }
 
-            return .{
-                .payload = .{ .If = .{
+                var cond = ast_create(c, Expr);
+                cond.* = parse_expr(c);
+
+                if (c.peek() == .Then) {
+                    c.advance();
+                }
+
+                var if_true = parse_stmt_or_scoped_block(c);
+                var if_false = StmtBlock{
+                    .stmts = .{},
+                    .scope = null,
+                };
+
+                if (c.peek() == .Else) {
+                    c.advance();
+                    if_false = parse_stmt_or_scoped_block(c);
+                }
+
+                break :payload .{ .If = .{
                     .cond = cond,
                     .if_true = if_true,
                     .if_false = if_false,
-                } },
-                .line_info = line_info,
-            };
-        },
-        .While => {
-            c.advance();
-
-            var cond = ast_create(c, Expr);
-            cond.* = parse_expr(c);
-
-            if (c.peek() == .Do) {
+                } };
+            },
+            .While => {
                 c.advance();
-            }
 
-            var block = parse_stmt_or_scoped_block(c);
+                var cond = ast_create(c, Expr);
+                cond.* = parse_expr(c);
 
-            return .{
-                .payload = .{ .While = .{
+                if (c.peek() == .Do) {
+                    c.advance();
+                }
+
+                var block = parse_stmt_or_scoped_block(c);
+
+                break :payload .{ .While = .{
                     .cond = cond,
                     .block = block,
-                } },
-                .line_info = line_info,
-            };
-        },
-        .Return => {
-            c.advance();
-
-            if (c.peek() == .Semicolon) {
+                } };
+            },
+            .Return => {
                 c.advance();
 
-                return .{
-                    .payload = .Return,
-                    .line_info = line_info,
-                };
-            }
-
-            var expr = ast_create(c, Expr);
-            expr.* = parse_expr(c);
-            c.expect(.Semicolon);
-
-            return .{
-                .payload = .{ .Return_Expr = expr },
-                .line_info = line_info,
-            };
-        },
-        else => {
-            if (is_def(c)) {
-                var symbol = parse_symbol(c);
-
-                if (symbol.* != .Variable) {
-                    print_error(
-                        c,
-                        grab_symbol_line_info(symbol),
-                        "only variable definitions are allowed inside a function.",
-                        .{},
-                    );
-                    std.os.exit(1);
-                }
-
-                return .{
-                    .payload = .{ .Symbol = symbol },
-                    .line_info = line_info,
-                };
-            } else {
-                var lhs = ast_create(c, Expr);
-                lhs.* = parse_expr(c);
-
-                if (c.peek() == .Equal) {
+                if (c.peek() == .Semicolon) {
                     c.advance();
 
-                    var rhs = ast_create(c, Expr);
-                    rhs.* = parse_expr(c);
-                    c.expect(.Semicolon);
-
-                    return .{
-                        .payload = .{ .Assign = .{
-                            .lhs = lhs,
-                            .rhs = rhs,
-                        } },
-                        .line_info = line_info,
-                    };
+                    break :payload .Return;
                 }
 
+                var expr = ast_create(c, Expr);
+                expr.* = parse_expr(c);
                 c.expect(.Semicolon);
 
-                return .{
-                    .payload = .{ .Expr = lhs },
-                    .line_info = line_info,
-                };
-            }
-        },
-    }
+                break :payload .{ .Return_Expr = expr };
+            },
+            else => {
+                if (is_def(c)) {
+                    var symbol = parse_symbol(c);
+
+                    if (symbol.payload != .Variable) {
+                        print_error(c, symbol.line_info, "only variable definitions are allowed inside a function.", .{});
+                        std.os.exit(1);
+                    }
+
+                    break :payload .{ .Symbol = symbol };
+                } else {
+                    var lhs = ast_create(c, Expr);
+                    lhs.* = parse_expr(c);
+
+                    if (c.peek() == .Equal) {
+                        c.advance();
+
+                        var rhs = ast_create(c, Expr);
+                        rhs.* = parse_expr(c);
+                        c.expect(.Semicolon);
+
+                        break :payload .{ .Assign = .{
+                            .lhs = lhs,
+                            .rhs = rhs,
+                        } };
+                    }
+
+                    c.expect(.Semicolon);
+
+                    break :payload .{ .Expr = lhs };
+                }
+            },
+        }
+    };
+
+    return result;
 }
 
 fn parse_scoped_block(c: *Compiler) StmtBlock {
