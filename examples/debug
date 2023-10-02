@@ -1,7 +1,22 @@
 val00 := 0;
 
+Foo := struct
+{
+  x: int,
+  y: bool,
+}
+
+Bar := struct
+{
+  foo: Foo,
+}
+
 bar := proc()
 {
+  x: Foo = { x = 2, y = false };
+  x = { x = 2 };
+  x.x.foo = 2;
+
   if false then {} else {}
 
   val00 = val00 + 42;

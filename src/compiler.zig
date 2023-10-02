@@ -137,6 +137,7 @@ const Compiler = struct {
                 .{ .text = "while", .tag = .While },
                 .{ .text = "do", .tag = .Do },
                 .{ .text = "return", .tag = .Return },
+                .{ .text = "struct", .tag = .Struct },
                 .{ .text = "proc", .tag = .Proc },
                 .{ .text = "void", .tag = .Void },
                 .{ .text = "bool", .tag = .Bool },
@@ -181,6 +182,7 @@ const Compiler = struct {
                 .{ .text = ":", .tag = .Colon },
                 .{ .text = ";", .tag = .Semicolon },
                 .{ .text = "=", .tag = .Equal },
+                .{ .text = ".", .tag = .Dot },
                 .{ .text = ",", .tag = .Comma },
             };
 
@@ -252,6 +254,7 @@ const TokenTag = enum {
     Colon,
     Semicolon,
     Equal,
+    Dot,
     Comma,
 
     Print,
@@ -262,6 +265,7 @@ const TokenTag = enum {
     Do,
     Return,
 
+    Struct,
     Proc,
     Void,
     Bool,
@@ -289,18 +293,29 @@ const TypeFunction = struct {
     return_type: *Type,
 };
 
+const TypeStruct = struct {
+    fields: SymbolList,
+    scope: ScopeId,
+};
+
 const TypeTag = enum {
+    Struct,
     Function,
     Void,
     Bool,
     Int64,
+    Symbol,
+    Identifier,
 };
 
 const TypePayload = union(TypeTag) {
+    Struct: TypeStruct,
     Function: TypeFunction,
     Void: void,
     Bool: void,
     Int64: void,
+    Symbol: *Symbol,
+    Identifier: Token,
 };
 
 const Type = struct {
@@ -333,6 +348,8 @@ const ExprTag = enum {
     Unary_Op,
     If,
     Call,
+    Field,
+    Init_List,
     Bool,
     Int64,
     Symbol,
@@ -358,6 +375,11 @@ const ExprPayload = union(ExprTag) {
         lhs: *Expr,
         args: ExprList,
     },
+    Field: struct {
+        lhs: *Expr,
+        id: Token,
+    },
+    Init_List: DesignatorList,
     Bool: bool,
     Int64: i64,
     Symbol: *Symbol,
@@ -367,10 +389,16 @@ const ExprPayload = union(ExprTag) {
 const Expr = struct {
     payload: ExprPayload,
     line_info: LineInfo,
-    is_lvalue: bool = false,
 };
 
 const ExprList = notstd.DoublyLinkedList(Expr);
+
+const Designator = struct {
+    id: Token,
+    expr: *Expr,
+};
+
+const DesignatorList = notstd.DoublyLinkedList(Designator);
 
 const StmtTag = enum {
     Print,
@@ -419,29 +447,41 @@ const StmtBlock = struct {
 };
 
 const SymbolVariable = struct {
-    typ: ?*Type,
+    _type: ?*Type,
     expr: ?*Expr,
 };
 
 const SymbolParameter = struct {
-    typ: *Type,
+    _type: *Type,
 };
 
 const SymbolFunction = struct {
-    typ: *Type,
+    _type: *Type,
     block: StmtBlock,
+};
+
+const SymbolStruct = struct {
+    _type: *Type,
+};
+
+const SymbolStructField = struct {
+    _type: *Type,
 };
 
 const SymbolTag = enum {
     Variable,
     Parameter,
     Function,
+    Struct,
+    Struct_Field,
 };
 
 const SymbolPayload = union(SymbolTag) {
     Variable: SymbolVariable,
     Parameter: SymbolParameter,
     Function: SymbolFunction,
+    Struct: SymbolStruct,
+    Struct_Field: SymbolStructField,
 };
 
 const Symbol = struct {
@@ -499,6 +539,7 @@ fn token_tag_to_text(tag: TokenTag) []const u8 {
         .Colon => "':'",
         .Semicolon => "';'",
         .Equal => "'='",
+        .Dot => "'.'",
         .Comma => "','",
         .Print => "'print'",
         .If => "'if'",
@@ -507,6 +548,7 @@ fn token_tag_to_text(tag: TokenTag) []const u8 {
         .While => "'while'",
         .Do => "'do'",
         .Return => "'return'",
+        .Struct => "'struct'",
         .Proc => "'proc'",
         .Void => "'void'",
         .Bool => "'bool'",
@@ -663,10 +705,56 @@ fn parse_type(c: *Compiler) Type {
         .Open_Paren => {
             c.advance();
 
-            var typ = parse_type(c);
+            var _type = parse_type(c);
             c.expect(.Close_Paren);
 
-            return typ;
+            return _type;
+        },
+        .Struct => {
+            c.advance();
+            c.expect(.Open_Curly);
+
+            push_scope(c);
+
+            var _struct = TypeStruct{
+                .fields = .{},
+                .scope = grab_current_scope(),
+            };
+
+            var tt = c.peek();
+            while (tt != .End_Of_File and tt != .Close_Curly) {
+                var id = c.grab();
+                c.expect(.Identifier);
+                c.expect(.Colon);
+
+                var _type = ast_create(c, Type);
+                _type.* = parse_type(c);
+
+                var symbol = insert_symbol(c, id);
+                symbol.payload = .{ .Struct_Field = .{
+                    ._type = _type,
+                } };
+
+                var node = ast_create(c, SymbolList.Node);
+                node.* = .{
+                    .payload = symbol,
+                };
+                _struct.fields.insert_last(node);
+
+                tt = c.peek();
+                if (tt != .End_Of_File and tt != .Close_Curly) {
+                    c.expect(.Comma);
+                    tt = c.peek();
+                }
+            }
+
+            pop_scope();
+
+            c.expect(.Close_Curly);
+
+            return .{
+                .payload = .{ .Struct = _struct },
+            };
         },
         .Proc => {
             return parse_type_function(c, false);
@@ -682,6 +770,14 @@ fn parse_type(c: *Compiler) Type {
         .Int => {
             c.advance();
             return INT64_TYPE;
+        },
+        .Identifier => {
+            var id = c.grab();
+            c.advance();
+
+            return .{
+                .payload = .{ .Identifier = id },
+            };
         },
         else => {
             var token = c.grab();
@@ -708,8 +804,8 @@ fn parse_type_function(c: *Compiler, should_insert_symbol: bool) Type {
             has_id = true;
         }
 
-        var typ = ast_create(c, Type);
-        typ.* = parse_type(c);
+        var _type = ast_create(c, Type);
+        _type.* = parse_type(c);
 
         var symbol = if (has_id and should_insert_symbol)
             insert_symbol(c, id)
@@ -717,7 +813,7 @@ fn parse_type_function(c: *Compiler, should_insert_symbol: bool) Type {
             create_unnamed_symbol(c, id.line_info);
 
         symbol.payload = .{ .Parameter = .{
-            .typ = typ,
+            ._type = _type,
         } };
 
         var node = ast_create(c, SymbolList.Node);
@@ -768,16 +864,26 @@ fn parse_symbol(c: *Compiler) *Symbol {
             c.advance();
 
             switch (c.peek()) {
+                .Struct => {
+                    var _type = ast_create(c, Type);
+                    _type.* = parse_type(c);
+
+                    symbol.payload = .{ .Struct = .{
+                        ._type = _type,
+                    } };
+
+                    return symbol;
+                },
                 .Proc => {
                     push_scope(c);
-                    var typ = ast_create(c, Type);
-                    typ.* = parse_type_function(c, true);
+                    var _type = ast_create(c, Type);
+                    _type.* = parse_type_function(c, true);
                     revert_scope();
 
                     var block = parse_scoped_block(c);
 
                     symbol.payload = .{ .Function = .{
-                        .typ = typ,
+                        ._type = _type,
                         .block = block,
                     } };
 
@@ -789,7 +895,7 @@ fn parse_symbol(c: *Compiler) *Symbol {
                     c.expect(.Semicolon);
 
                     symbol.payload = .{ .Variable = .{
-                        .typ = null,
+                        ._type = null,
                         .expr = expr,
                     } };
 
@@ -801,8 +907,8 @@ fn parse_symbol(c: *Compiler) *Symbol {
             c.advance();
 
             var expr: ?*Expr = null;
-            var typ = ast_create(c, Type);
-            typ.* = parse_type(c);
+            var _type = ast_create(c, Type);
+            _type.* = parse_type(c);
 
             if (c.peek() == .Equal) {
                 c.advance();
@@ -813,7 +919,7 @@ fn parse_symbol(c: *Compiler) *Symbol {
             c.expect(.Semicolon);
 
             symbol.payload = .{ .Variable = .{
-                .typ = typ,
+                ._type = _type,
                 .expr = expr,
             } };
 
@@ -893,6 +999,38 @@ fn parse_highest_prec(c: *Compiler) Expr {
                 c.expect(.Close_Paren);
 
                 break :payload expr.payload;
+            },
+            .Open_Curly => {
+                var init_list = DesignatorList{};
+
+                var tt = c.peek();
+                while (tt != .End_Of_File and tt != .Close_Curly) {
+                    var id = c.grab();
+                    c.expect(.Identifier);
+                    c.expect(.Equal);
+
+                    var expr = ast_create(c, Expr);
+                    expr.* = parse_expr(c);
+
+                    var node = ast_create(c, DesignatorList.Node);
+                    node.* = .{
+                        .payload = .{
+                            .id = id,
+                            .expr = expr,
+                        },
+                    };
+                    init_list.insert_last(node);
+
+                    tt = c.peek();
+                    if (tt != .End_Of_File and tt != .Close_Curly) {
+                        c.expect(.Comma);
+                        tt = c.peek();
+                    }
+                }
+
+                c.expect(.Close_Curly);
+
+                break :payload .{ .Init_List = init_list };
             },
             .If => {
                 var cond = ast_create(c, Expr);
@@ -974,6 +1112,22 @@ fn parse_postfix_unary_ops(c: *Compiler, inner: *Expr) void {
                         .args = args,
                     } },
                     .line_info = line_info,
+                };
+            },
+            .Dot => {
+                c.advance();
+
+                var id = c.grab();
+                c.expect(.Identifier);
+
+                var lhs = ast_create(c, Expr);
+                lhs.* = inner.*;
+                inner.* = .{
+                    .payload = .{ .Field = .{
+                        .lhs = lhs,
+                        .id = id,
+                    } },
+                    .line_info = id.line_info,
                 };
             },
             else => {
