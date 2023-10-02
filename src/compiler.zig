@@ -48,6 +48,12 @@ const Compiler = struct {
         c.token_count -= 1;
     }
 
+    pub fn advance_many(c: *Compiler, count: u8) void {
+        c.token_start += count;
+        c.token_start %= LOOKAHEAD;
+        c.token_count -= count;
+    }
+
     pub fn grab(c: *Compiler) Token {
         if (c.token_count == 0) {
             c.buffer_token();
@@ -136,6 +142,8 @@ const Compiler = struct {
                 .{ .text = "else", .tag = .Else },
                 .{ .text = "while", .tag = .While },
                 .{ .text = "do", .tag = .Do },
+                .{ .text = "break", .tag = .Break },
+                .{ .text = "continue", .tag = .Continue },
                 .{ .text = "return", .tag = .Return },
                 .{ .text = "struct", .tag = .Struct },
                 .{ .text = "union", .tag = .Union },
@@ -144,8 +152,11 @@ const Compiler = struct {
                 .{ .text = "void", .tag = .Void },
                 .{ .text = "bool", .tag = .Bool },
                 .{ .text = "int", .tag = .Int },
+                .{ .text = "cast1", .tag = .Cast1 },
+                .{ .text = "cast2", .tag = .Cast2 },
                 .{ .text = "false", .tag = .False },
                 .{ .text = "true", .tag = .True },
+                .{ .text = "null", .tag = .Null },
             };
 
             for (keywords) |keyword| {
@@ -176,11 +187,14 @@ const Compiler = struct {
                 .{ .text = "*", .tag = .Mul },
                 .{ .text = "/", .tag = .Div },
                 .{ .text = "%", .tag = .Mod },
+                .{ .text = "&", .tag = .Ref },
                 .{ .text = "!", .tag = .Not },
                 .{ .text = "(", .tag = .Open_Paren },
                 .{ .text = ")", .tag = .Close_Paren },
                 .{ .text = "{", .tag = .Open_Curly },
                 .{ .text = "}", .tag = .Close_Curly },
+                .{ .text = "[", .tag = .Open_Bracket },
+                .{ .text = "]", .tag = .Close_Bracket },
                 .{ .text = ":", .tag = .Colon },
                 .{ .text = ";", .tag = .Semicolon },
                 .{ .text = "=", .tag = .Equal },
@@ -246,11 +260,14 @@ const TokenTag = enum {
     Div,
     Mod,
 
+    Ref,
     Not,
     Open_Paren,
     Close_Paren,
     Open_Curly,
     Close_Curly,
+    Open_Bracket,
+    Close_Bracket,
     Arrow,
     Colon_Equal,
     Colon,
@@ -265,6 +282,8 @@ const TokenTag = enum {
     Else,
     While,
     Do,
+    Break,
+    Continue,
     Return,
 
     Struct,
@@ -274,9 +293,13 @@ const TokenTag = enum {
     Void,
     Bool,
     Int,
+    Cast1,
+    Cast2,
 
     False,
     True,
+
+    Null,
 
     Identifier,
     Integer,
@@ -292,11 +315,6 @@ const Token = struct {
 
 const ScopeId = u32;
 
-const TypeFunction = struct {
-    params: SymbolList,
-    return_type: *Type,
-};
-
 const TypeStruct = struct {
     fields: SymbolList,
     scope: ScopeId,
@@ -307,6 +325,8 @@ const TypeTag = enum {
     Union,
     Enum,
     Function,
+    Array,
+    Pointer,
     Void,
     Bool,
     Int64,
@@ -318,7 +338,15 @@ const TypePayload = union(TypeTag) {
     Struct: TypeStruct,
     Union: TypeStruct,
     Enum: TypeStruct,
-    Function: TypeFunction,
+    Function: struct {
+        params: SymbolList,
+        return_type: *Type,
+    },
+    Array: struct {
+        size: ?*Expr,
+        subtype: *Type,
+    },
+    Pointer: *Type,
     Void: void,
     Bool: void,
     Int64: void,
@@ -349,6 +377,8 @@ const ExprBinaryOpTag = enum {
 const ExprUnaryOpTag = enum {
     Not,
     Neg,
+    Ref,
+    Deref,
 };
 
 const ExprTag = enum {
@@ -356,11 +386,16 @@ const ExprTag = enum {
     Unary_Op,
     If,
     Call,
+    Index,
     Field,
-    Init_List,
+    Expr_List,
+    Designator,
     Enum_Field,
+    Cast1,
+    Cast2,
     Bool,
     Int64,
+    Null,
     Symbol,
 };
 
@@ -383,14 +418,28 @@ const ExprPayload = union(ExprTag) {
         lhs: *Expr,
         args: ExprList,
     },
+    Index: struct {
+        lhs: *Expr,
+        index: *Expr,
+    },
     Field: struct {
         lhs: *Expr,
         id: Token,
     },
-    Init_List: DesignatorList,
+    Expr_List: ExprList,
+    Designator: struct {
+        id: Token,
+        expr: *Expr,
+    },
     Enum_Field: []const u8,
+    Cast1: *Expr,
+    Cast2: struct {
+        _type: *Type,
+        expr: *Expr,
+    },
     Bool: bool,
     Int64: i64,
+    Null: void,
     Symbol: []const u8,
 };
 
@@ -401,18 +450,14 @@ const Expr = struct {
 
 const ExprList = notstd.DoublyLinkedList(Expr);
 
-const Designator = struct {
-    id: Token,
-    expr: *Expr,
-};
-
-const DesignatorList = notstd.DoublyLinkedList(Designator);
-
 const StmtTag = enum {
     Print,
     Block,
     If,
     While,
+    Do_While,
+    Break,
+    Continue,
     Return,
     Return_Expr,
     Symbol,
@@ -432,6 +477,12 @@ const StmtPayload = union(StmtTag) {
         cond: *Expr,
         block: StmtBlock,
     },
+    Do_While: struct {
+        block: StmtBlock,
+        cond: *Expr,
+    },
+    Break: void,
+    Continue: void,
     Return: void,
     Return_Expr: *Expr,
     Symbol: *Symbol,
@@ -549,11 +600,14 @@ fn token_tag_to_text(tag: TokenTag) []const u8 {
         .Mul => "'*'",
         .Div => "'/'",
         .Mod => "'%'",
+        .Ref => "'&'",
         .Not => "'!'",
         .Open_Paren => "'('",
         .Close_Paren => "')'",
         .Open_Curly => "'{'",
         .Close_Curly => "'}'",
+        .Open_Bracket => "'['",
+        .Close_Bracket => "']'",
         .Arrow => "'->'",
         .Colon_Equal => "':='",
         .Colon => "':'",
@@ -567,6 +621,8 @@ fn token_tag_to_text(tag: TokenTag) []const u8 {
         .Else => "'else'",
         .While => "'while'",
         .Do => "'do'",
+        .Break => "'break'",
+        .Continue => "'continue'",
         .Return => "'return'",
         .Struct => "'struct'",
         .Union => "'union'",
@@ -575,8 +631,11 @@ fn token_tag_to_text(tag: TokenTag) []const u8 {
         .Void => "'void'",
         .Bool => "'bool'",
         .Int => "'int'",
+        .Cast1 => "'@cast1'",
+        .Cast2 => "'@cast2'",
         .False => "'false'",
         .True => "'true'",
+        .Null => "'null'",
         .Identifier => "identifier",
         .Integer => "integer",
         .End_Of_File => "EOF",
@@ -595,9 +654,15 @@ fn print_note(c: *Compiler, line_info: LineInfo, comptime format: []const u8, ar
     };
 }
 
-fn push_scope(c: *Compiler) void {
+fn grab_next_scope() ScopeId {
+    var result = next_scope;
+    next_scope += 1;
+    return result;
+}
+
+fn push_scope() void {
     if (scopes.len >= MAX_SCOPE_COUNT) {
-        print_error(c, c.line_info, "reached maximum amount of scopes ({}).", .{MAX_SCOPE_COUNT});
+        std.debug.print("error: reached maximum amount of scopes ({}).", .{MAX_SCOPE_COUNT});
         std.os.exit(1);
     }
 
@@ -613,11 +678,6 @@ fn push_given_scope(scope: ScopeId) void {
 
 fn pop_scope() void {
     scopes.len -= 1;
-}
-
-fn revert_scope() void {
-    scopes.len -= 1;
-    next_scope -= 1;
 }
 
 fn grab_current_scope() ScopeId {
@@ -707,7 +767,7 @@ fn find_symbol(c: *Compiler, id: Token) *Symbol {
 }
 
 fn parse_top_level(c: *Compiler) void {
-    push_scope(c);
+    push_scope();
 
     while (c.peek() != .End_Of_File) {
         var symbol = parse_symbol(c);
@@ -724,6 +784,16 @@ fn parse_top_level(c: *Compiler) void {
 
 fn parse_type(c: *Compiler) Type {
     switch (c.peek()) {
+        .Mul => {
+            c.advance();
+
+            var _type = ast_create(c, Type);
+            _type.* = parse_type(c);
+
+            return .{
+                .payload = .{ .Pointer = _type },
+            };
+        },
         .Open_Paren => {
             c.advance();
 
@@ -731,6 +801,28 @@ fn parse_type(c: *Compiler) Type {
             c.expect(.Close_Paren);
 
             return _type;
+        },
+        .Open_Bracket => {
+            c.advance();
+
+            var size: ?*Expr = null;
+
+            if (c.peek() != .Close_Bracket) {
+                size = ast_create(c, Expr);
+                size.?.* = parse_expr(c);
+            }
+
+            c.expect(.Close_Bracket);
+
+            var subtype = ast_create(c, Type);
+            subtype.* = parse_type(c);
+
+            return .{
+                .payload = .{ .Array = .{
+                    .size = size,
+                    .subtype = subtype,
+                } },
+            };
         },
         .Struct => {
             c.advance();
@@ -752,7 +844,7 @@ fn parse_type(c: *Compiler) Type {
             c.advance();
             c.expect(.Open_Curly);
 
-            push_scope(c);
+            push_scope();
 
             var _enum = TypeStruct{
                 .fields = .{},
@@ -884,7 +976,7 @@ fn parse_type_function(c: *Compiler, should_insert_symbol: bool) Type {
 fn parse_struct_fields(c: *Compiler, is_struct: bool) TypeStruct {
     c.expect(.Open_Curly);
 
-    push_scope(c);
+    push_scope();
 
     var _struct = TypeStruct{
         .fields = .{},
@@ -974,12 +1066,15 @@ fn parse_symbol(c: *Compiler) *Symbol {
                     return symbol;
                 },
                 .Proc => {
-                    push_scope(c);
+                    push_scope();
+
+                    var scope = grab_current_scope();
                     var _type = ast_create(c, Type);
                     _type.* = parse_type_function(c, true);
-                    revert_scope();
 
-                    var block = parse_scoped_block(c);
+                    pop_scope();
+
+                    var block = parse_block_given_scope(c, scope);
 
                     symbol.payload = .{ .Function = .{
                         ._type = _type,
@@ -1083,6 +1178,7 @@ fn parse_highest_prec(c: *Compiler) Expr {
     result.payload = payload: {
         switch (token.tag) {
             .Sub,
+            .Ref,
             .Not,
             => {
                 var subexpr = ast_create(c, Expr);
@@ -1092,6 +1188,10 @@ fn parse_highest_prec(c: *Compiler) Expr {
                     .tag = token_tag_to_expr_unary_op_tag(token.tag),
                     .subexpr = subexpr,
                 } };
+            },
+            .And => {
+                print_error(c, token.line_info, "can't take a reference of rvalue.", .{});
+                std.os.exit(1);
             },
             .Open_Paren => {
                 var expr = parse_expr(c);
@@ -1103,25 +1203,37 @@ fn parse_highest_prec(c: *Compiler) Expr {
                 switch (c.peek()) {
                     .Open_Curly => {
                         c.advance();
-                        var init_list = DesignatorList{};
+                        var expr_list = ExprList{};
 
                         var tt = c.peek();
                         while (tt != .End_Of_File and tt != .Close_Curly) {
-                            var id = c.grab();
-                            c.expect(.Identifier);
-                            c.expect(.Equal);
+                            var expr: Expr = expr: {
+                                if (c.peek() == .Identifier and
+                                    c.peek_ahead(1) == .Equal)
+                                {
+                                    var id = c.grab();
+                                    c.advance_many(2);
 
-                            var expr = ast_create(c, Expr);
-                            expr.* = parse_expr(c);
+                                    var value = ast_create(c, Expr);
+                                    value.* = parse_expr(c);
 
-                            var node = ast_create(c, DesignatorList.Node);
-                            node.* = .{
-                                .payload = .{
-                                    .id = id,
-                                    .expr = expr,
-                                },
+                                    break :expr .{
+                                        .payload = .{ .Designator = .{
+                                            .id = id,
+                                            .expr = value,
+                                        } },
+                                        .line_info = id.line_info,
+                                    };
+                                } else {
+                                    break :expr parse_expr(c);
+                                }
                             };
-                            init_list.insert_last(node);
+
+                            var node = ast_create(c, ExprList.Node);
+                            node.* = .{
+                                .payload = expr,
+                            };
+                            expr_list.insert_last(node);
 
                             tt = c.peek();
                             if (tt != .End_Of_File and tt != .Close_Curly) {
@@ -1132,7 +1244,7 @@ fn parse_highest_prec(c: *Compiler) Expr {
 
                         c.expect(.Close_Curly);
 
-                        break :payload .{ .Init_List = init_list };
+                        break :payload .{ .Expr_List = expr_list };
                     },
                     .Identifier => {
                         var id = c.grab();
@@ -1172,6 +1284,9 @@ fn parse_highest_prec(c: *Compiler) Expr {
             => {
                 break :payload .{ .Bool = token.tag == .True };
             },
+            .Null => {
+                break :payload .Null;
+            },
             .Identifier => {
                 break :payload .{ .Symbol = token.text };
             },
@@ -1182,6 +1297,32 @@ fn parse_highest_prec(c: *Compiler) Expr {
                 }
 
                 break :payload .{ .Int64 = value };
+            },
+            .Cast1 => {
+                c.expect(.Open_Paren);
+
+                var expr = ast_create(c, Expr);
+                expr.* = parse_expr(c);
+
+                c.expect(.Close_Paren);
+
+                break :payload .{ .Cast1 = expr };
+            },
+            .Cast2 => {
+                c.expect(.Open_Paren);
+
+                var _type = ast_create(c, Type);
+                _type.* = parse_type(c);
+                c.expect(.Comma);
+                var expr = ast_create(c, Expr);
+                expr.* = parse_expr(c);
+
+                c.expect(.Close_Paren);
+
+                break :payload .{ .Cast2 = .{
+                    ._type = _type,
+                    .expr = expr,
+                } };
             },
             else => {
                 print_error(c, token.line_info, "'{s}' doesn't start expression.", .{token.text});
@@ -1230,21 +1371,53 @@ fn parse_postfix_unary_ops(c: *Compiler, inner: *Expr) void {
                     .line_info = line_info,
                 };
             },
-            .Dot => {
+            .Open_Bracket => {
+                var line_info = c.grab().line_info;
                 c.advance();
 
-                var id = c.grab();
-                c.expect(.Identifier);
+                var expr = ast_create(c, Expr);
+                expr.* = parse_expr(c);
+                c.expect(.Close_Bracket);
 
                 var lhs = ast_create(c, Expr);
                 lhs.* = inner.*;
                 inner.* = .{
-                    .payload = .{ .Field = .{
+                    .payload = .{ .Index = .{
                         .lhs = lhs,
-                        .id = id,
+                        .index = expr,
                     } },
-                    .line_info = id.line_info,
+                    .line_info = line_info,
                 };
+            },
+            .Dot => {
+                c.advance();
+
+                if (c.peek() == .Mul) {
+                    c.advance();
+
+                    var lhs = ast_create(c, Expr);
+                    lhs.* = inner.*;
+                    inner.* = .{
+                        .payload = .{ .Unary_Op = .{
+                            .tag = .Deref,
+                            .subexpr = lhs,
+                        } },
+                        .line_info = lhs.line_info,
+                    };
+                } else {
+                    var id = c.grab();
+                    c.expect(.Identifier);
+
+                    var lhs = ast_create(c, Expr);
+                    lhs.* = inner.*;
+                    inner.* = .{
+                        .payload = .{ .Field = .{
+                            .lhs = lhs,
+                            .id = id,
+                        } },
+                        .line_info = id.line_info,
+                    };
+                }
             },
             else => {
                 break;
@@ -1298,6 +1471,7 @@ fn token_tag_to_expr_binary_op_tag(op: TokenTag) ExprBinaryOpTag {
 fn token_tag_to_expr_unary_op_tag(op: TokenTag) ExprUnaryOpTag {
     return switch (op) {
         .Sub => .Neg,
+        .Ref => .Ref,
         .Not => .Not,
         else => unreachable,
     };
@@ -1367,6 +1541,33 @@ fn parse_stmt(c: *Compiler) Stmt {
                     .block = block,
                 } };
             },
+            .Do => {
+                c.advance();
+
+                var block = parse_stmt_or_scoped_block(c);
+
+                c.expect(.While);
+
+                var cond = ast_create(c, Expr);
+                cond.* = parse_expr(c);
+
+                c.expect(.Semicolon);
+
+                break :payload .{ .Do_While = .{
+                    .block = block,
+                    .cond = cond,
+                } };
+            },
+            .Break => {
+                c.advance();
+                c.expect(.Semicolon);
+                break :payload .Break;
+            },
+            .Continue => {
+                c.advance();
+                c.expect(.Semicolon);
+                break :payload .Continue;
+            },
             .Return => {
                 c.advance();
 
@@ -1421,7 +1622,11 @@ fn parse_stmt(c: *Compiler) Stmt {
 }
 
 fn parse_scoped_block(c: *Compiler) StmtBlock {
-    push_scope(c);
+    return parse_block_given_scope(c, grab_next_scope());
+}
+
+fn parse_block_given_scope(c: *Compiler, scope: ScopeId) StmtBlock {
+    push_given_scope(scope);
 
     var block = StmtBlock{
         .stmts = .{},

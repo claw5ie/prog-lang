@@ -10,8 +10,8 @@ Baz := enum
 
 Faz := union
 {
-  x: int,
-  y: bool,
+  x: []int, // Also reject.
+  y: *bool,
 }
 
 Foo := struct
@@ -26,12 +26,30 @@ Bar := struct
   foo: Foo,
 }
 
-bar := proc()
+bar := proc(aa: struct { x: int }) // reject.
 {
+  while true break;
+  do continue; while false;
+
   x: Foo = .{ x = 2, y = false };
   x = .{ x = 2 };
   x.x.foo = 2;
   x.z = .A;
+
+  y: *Foo = &x;
+  z: **Foo = null;
+  x.* = 42;
+  z.  *.*;
+
+  b: [3]int;
+  a: [2][]int = .{ .{ 0, 1, 2 }, b };
+  c: []int; // Needs to be rejected. Can't infere the type.
+  d := .{ .{ 1, 2, 3 } };
+  a[0] = .{ 2, 3, 4 };
+  a[0][1] = 42;
+
+  e: bool = cast1(2);
+  f := cast2(bool, 2);
 
   if false then {} else {}
 
