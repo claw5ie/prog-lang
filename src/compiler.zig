@@ -10,12 +10,6 @@ const stderr = std.io.getStdErr().writer();
 var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
 var gpa = general_purpose_allocator.allocator();
 
-const GLOBAL_SCOPE_ID = 0;
-const MAX_SCOPE_COUNT = 256;
-var scopes_buffer: [MAX_SCOPE_COUNT]ScopeId = undefined;
-var scopes: []ScopeId = scopes_buffer[0..0];
-var next_scope: ScopeId = GLOBAL_SCOPE_ID;
-
 const LOWEST_PREC = -127;
 
 const VOID_TYPE: Type = .{
@@ -41,6 +35,8 @@ const Compiler = struct {
     ast_arena: ArenaAllocator,
     ast_arena_allocator: Allocator,
     symbols: SymbolTable,
+    current_scope: *Scope,
+    global_scope: *Scope,
 
     pub fn advance(c: *Compiler) void {
         c.token_start += 1;
@@ -315,11 +311,13 @@ const Token = struct {
     line_info: LineInfo,
 };
 
-const ScopeId = u32;
+const Scope = struct {
+    parent: ?*Scope,
+};
 
 const TypeStruct = struct {
     fields: SymbolList,
-    scope: ScopeId,
+    scope: *Scope,
 };
 
 const TypeTag = enum {
@@ -517,7 +515,7 @@ const SwitchCaseList = notstd.DoublyLinkedList(SwitchCase);
 
 const StmtBlock = struct {
     stmts: StmtList,
-    scope: ?ScopeId,
+    scope: ?*Scope,
 };
 
 const SymbolVariable = struct {
@@ -580,7 +578,7 @@ const SymbolList = notstd.DoublyLinkedList(*Symbol);
 
 const SymbolKey = struct {
     text: []const u8,
-    scope: ScopeId,
+    scope: *Scope,
 };
 
 const SymbolTableContext = struct {
@@ -588,7 +586,7 @@ const SymbolTableContext = struct {
         const MurMur = std.hash.Murmur2_64;
 
         var h0 = MurMur.hash(key.text);
-        var h1 = MurMur.hashUint32(key.scope);
+        var h1 = MurMur.hashUint64(@intFromPtr(key.scope));
 
         return h0 +% 33 *% h1;
     }
@@ -670,34 +668,25 @@ fn print_note(c: *Compiler, line_info: LineInfo, comptime format: []const u8, ar
     };
 }
 
-fn grab_next_scope() ScopeId {
-    var result = next_scope;
-    next_scope += 1;
+fn create_scope(c: *Compiler) *Scope {
+    var result = ast_create(c, Scope);
+    result.* = .{
+        .parent = c.current_scope,
+    };
     return result;
 }
 
-fn push_scope() void {
-    if (scopes.len >= MAX_SCOPE_COUNT) {
-        std.debug.print("error: reached maximum amount of scopes ({}).", .{MAX_SCOPE_COUNT});
-        std.os.exit(1);
-    }
-
-    scopes.len += 1;
-    scopes[scopes.len - 1] = next_scope;
-    next_scope += 1;
+fn push_scope(c: *Compiler) void {
+    var scope = create_scope(c);
+    c.current_scope = scope;
 }
 
-fn push_given_scope(scope: ScopeId) void {
-    scopes.len += 1;
-    scopes[scopes.len - 1] = scope;
+fn pop_scope(c: *Compiler) void {
+    c.current_scope = c.current_scope.parent.?;
 }
 
-fn pop_scope() void {
-    scopes.len -= 1;
-}
-
-fn grab_current_scope() ScopeId {
-    return scopes[scopes.len - 1];
+fn grab_current_scope(c: *Compiler) *Scope {
+    return c.current_scope;
 }
 
 fn ast_create(c: *Compiler, comptime T: type) *T {
@@ -712,7 +701,7 @@ fn insert_symbol(c: *Compiler, id: Token) *Symbol {
     // Should create arena with identifier strings?
     var key = SymbolKey{
         .text = id.text,
-        .scope = grab_current_scope(),
+        .scope = grab_current_scope(c),
     };
     var get_or_put_result = c.symbols.getOrPut(key) catch {
         std.os.exit(1);
@@ -741,7 +730,7 @@ fn create_unnamed_symbol(c: *Compiler, line_info: LineInfo) *Symbol {
         .payload = undefined,
         .key = .{
             .text = "<no name>",
-            .scope = grab_current_scope(),
+            .scope = grab_current_scope(c),
         },
         .line_info = line_info,
     };
@@ -753,14 +742,10 @@ fn find_symbol(c: *Compiler, id: Token) *Symbol {
 
     var key = SymbolKey{
         .text = id.text,
-        .scope = undefined,
+        .scope = c.current_scope,
     };
 
-    var i = scopes.len;
-    while (i > 0) {
-        i -= 1;
-        key.scope = scopes[i];
-
+    while (true) {
         var found_symbol = c.symbols.get(key);
         if (found_symbol) |symbol| {
             switch (symbol.*) {
@@ -776,6 +761,12 @@ fn find_symbol(c: *Compiler, id: Token) *Symbol {
                 },
             }
         }
+
+        if (key.scope.parent) |parent| {
+            key.scope = parent;
+        } else {
+            break;
+        }
     }
 
     print_error(c, id.line_info, "'{s}' is not defined.", .{id.text});
@@ -783,7 +774,11 @@ fn find_symbol(c: *Compiler, id: Token) *Symbol {
 }
 
 fn parse_top_level(c: *Compiler) void {
-    push_scope();
+    c.global_scope = ast_create(c, Scope);
+    c.global_scope.* = .{
+        .parent = null,
+    };
+    c.current_scope = c.global_scope;
 
     while (c.peek() != .End_Of_File) {
         var symbol = parse_symbol(c);
@@ -794,8 +789,7 @@ fn parse_top_level(c: *Compiler) void {
         c.globals.insert_last(node);
     }
 
-    pop_scope();
-    std.debug.assert(scopes.len == 0);
+    std.debug.assert(c.current_scope == c.global_scope);
 }
 
 fn parse_type(c: *Compiler) Type {
@@ -860,11 +854,11 @@ fn parse_type(c: *Compiler) Type {
             c.advance();
             c.expect(.Open_Curly);
 
-            push_scope();
+            push_scope(c);
 
             var _enum = TypeStruct{
                 .fields = .{},
-                .scope = grab_current_scope(),
+                .scope = grab_current_scope(c),
             };
 
             var tt = c.peek();
@@ -890,7 +884,7 @@ fn parse_type(c: *Compiler) Type {
                 }
             }
 
-            pop_scope();
+            pop_scope(c);
 
             c.expect(.Close_Curly);
 
@@ -992,11 +986,11 @@ fn parse_type_function(c: *Compiler, should_insert_symbol: bool) Type {
 fn parse_struct_fields(c: *Compiler, is_struct: bool) TypeStruct {
     c.expect(.Open_Curly);
 
-    push_scope();
+    push_scope(c);
 
     var _struct = TypeStruct{
         .fields = .{},
-        .scope = grab_current_scope(),
+        .scope = grab_current_scope(c),
     };
 
     var tt = c.peek();
@@ -1033,7 +1027,7 @@ fn parse_struct_fields(c: *Compiler, is_struct: bool) TypeStruct {
         }
     }
 
-    pop_scope();
+    pop_scope(c);
 
     c.expect(.Close_Curly);
 
@@ -1082,13 +1076,13 @@ fn parse_symbol(c: *Compiler) *Symbol {
                     return symbol;
                 },
                 .Proc => {
-                    push_scope();
+                    push_scope(c);
 
-                    var scope = grab_current_scope();
+                    var scope = grab_current_scope(c);
                     var _type = ast_create(c, Type);
                     _type.* = parse_type_function(c, true);
 
-                    pop_scope();
+                    pop_scope(c);
 
                     var block = parse_block_given_scope(c, scope);
 
@@ -1600,18 +1594,18 @@ fn parse_stmt(c: *Compiler) Stmt {
                         var value = ast_create(c, Expr);
                         value.* = parse_expr(c);
 
-                        push_scope();
+                        push_scope(c);
 
                         var case = SwitchCase{
                             .value = value,
                             .block = .{
                                 .stmts = .{},
-                                .scope = grab_current_scope(),
+                                .scope = grab_current_scope(c),
                             },
                             .should_fallthrough = true,
                         };
 
-                        pop_scope();
+                        pop_scope(c);
 
                         var node = ast_create(c, SwitchCaseList.Node);
                         node.* = .{
@@ -1700,15 +1694,17 @@ fn parse_stmt(c: *Compiler) Stmt {
 }
 
 fn parse_scoped_block(c: *Compiler) StmtBlock {
-    return parse_block_given_scope(c, grab_next_scope());
+    return parse_block_given_scope(c, create_scope(c));
 }
 
-fn parse_block_given_scope(c: *Compiler, scope: ScopeId) StmtBlock {
-    push_given_scope(scope);
+fn parse_block_given_scope(c: *Compiler, scope: *Scope) StmtBlock {
+    // Previous scope may not be its parent.
+    var previous_scope = c.current_scope;
+    c.current_scope = scope;
 
     var block = StmtBlock{
         .stmts = .{},
-        .scope = grab_current_scope(),
+        .scope = grab_current_scope(c),
     };
 
     c.expect(.Open_Curly);
@@ -1727,7 +1723,7 @@ fn parse_block_given_scope(c: *Compiler, scope: ScopeId) StmtBlock {
 
     c.expect(.Close_Curly);
 
-    pop_scope();
+    c.current_scope = previous_scope;
 
     return block;
 }
@@ -1785,6 +1781,8 @@ pub fn compile() void {
         .ast_arena = ast_arena,
         .ast_arena_allocator = ast_arena.allocator(),
         .symbols = SymbolTable.init(gpa),
+        .global_scope = undefined,
+        .current_scope = undefined,
     };
 
     parse_top_level(&compiler);
