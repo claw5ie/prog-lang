@@ -63,6 +63,15 @@ main := proc() -> void
   val1: int = 2;
   val2: bool = false;
 
+  switch val0
+  {
+    0, 1:
+    {
+      2 + 2;
+    }
+    2: {}
+  }
+
   val0 = 4;
   val3: proc() = main;
   val3();

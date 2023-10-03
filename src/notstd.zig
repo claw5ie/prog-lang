@@ -50,6 +50,10 @@ pub fn DoublyLinkedList(comptime T: type) type {
             return .{ .node = list.last };
         }
 
+        pub fn grab_last(list: Self) *T {
+            return &list.last.?.payload;
+        }
+
         pub fn insert_last(list: *Self, node: *Node) void {
             if (list.count != 0) {
                 list.last.?.next = node;

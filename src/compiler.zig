@@ -144,6 +144,7 @@ const Compiler = struct {
                 .{ .text = "do", .tag = .Do },
                 .{ .text = "break", .tag = .Break },
                 .{ .text = "continue", .tag = .Continue },
+                .{ .text = "switch", .tag = .Switch },
                 .{ .text = "return", .tag = .Return },
                 .{ .text = "struct", .tag = .Struct },
                 .{ .text = "union", .tag = .Union },
@@ -284,6 +285,7 @@ const TokenTag = enum {
     Do,
     Break,
     Continue,
+    Switch,
     Return,
 
     Struct,
@@ -458,6 +460,7 @@ const StmtTag = enum {
     Do_While,
     Break,
     Continue,
+    Switch,
     Return,
     Return_Expr,
     Symbol,
@@ -483,6 +486,10 @@ const StmtPayload = union(StmtTag) {
     },
     Break: void,
     Continue: void,
+    Switch: struct {
+        cond: *Expr,
+        cases: SwitchCaseList,
+    },
     Return: void,
     Return_Expr: *Expr,
     Symbol: *Symbol,
@@ -499,6 +506,14 @@ const Stmt = struct {
 };
 
 const StmtList = notstd.DoublyLinkedList(Stmt);
+
+const SwitchCase = struct {
+    value: *Expr,
+    block: StmtBlock,
+    should_fallthrough: bool,
+};
+
+const SwitchCaseList = notstd.DoublyLinkedList(SwitchCase);
 
 const StmtBlock = struct {
     stmts: StmtList,
@@ -623,6 +638,7 @@ fn token_tag_to_text(tag: TokenTag) []const u8 {
         .Do => "'do'",
         .Break => "'break'",
         .Continue => "'continue'",
+        .Switch => "'switch'",
         .Return => "'return'",
         .Struct => "'struct'",
         .Union => "'union'",
@@ -1567,6 +1583,68 @@ fn parse_stmt(c: *Compiler) Stmt {
                 c.advance();
                 c.expect(.Semicolon);
                 break :payload .Continue;
+            },
+            .Switch => {
+                c.advance();
+
+                var cond = ast_create(c, Expr);
+                cond.* = parse_expr(c);
+
+                c.expect(.Open_Curly);
+
+                var cases = SwitchCaseList{};
+
+                var tt = c.peek();
+                while (tt != .End_Of_File and tt != .Close_Curly) {
+                    while (true) {
+                        var value = ast_create(c, Expr);
+                        value.* = parse_expr(c);
+
+                        push_scope();
+
+                        var case = SwitchCase{
+                            .value = value,
+                            .block = .{
+                                .stmts = .{},
+                                .scope = grab_current_scope(),
+                            },
+                            .should_fallthrough = true,
+                        };
+
+                        pop_scope();
+
+                        var node = ast_create(c, SwitchCaseList.Node);
+                        node.* = .{
+                            .payload = case,
+                        };
+                        cases.insert_last(node);
+
+                        tt = c.peek();
+                        if (tt != .End_Of_File and tt != .Colon) {
+                            c.expect(.Comma);
+                            tt = c.peek();
+                        }
+
+                        if (tt == .End_Of_File or tt == .Colon) {
+                            break;
+                        }
+                    }
+
+                    c.expect(.Colon);
+
+                    var case = cases.grab_last();
+                    case.should_fallthrough = false;
+                    case.block = parse_block_given_scope(c, case.block.scope.?);
+
+                    tt = c.peek();
+                }
+
+                c.expect(.Close_Curly);
+
+                break :payload .{ .Switch = .{
+                    .cond = cond,
+                    .cases = cases,
+                } };
             },
             .Return => {
                 c.advance();
