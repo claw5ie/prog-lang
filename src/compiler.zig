@@ -12,16 +12,6 @@ var gpa = general_purpose_allocator.allocator();
 
 const LOWEST_PREC = -127;
 
-const VOID_TYPE: Type = .{
-    .payload = .Void,
-};
-const BOOL_TYPE: Type = .{
-    .payload = .Bool,
-};
-const INT64_TYPE: Type = .{
-    .payload = .Int64,
-};
-
 const Compiler = struct {
     const LOOKAHEAD = 2;
     tokens: [LOOKAHEAD]Token = undefined,
@@ -326,6 +316,7 @@ const TypeTag = enum {
     Enum,
     Function,
     Array,
+    Array_Ref,
     Pointer,
     Void,
     Bool,
@@ -343,9 +334,10 @@ const TypePayload = union(TypeTag) {
         return_type: *Type,
     },
     Array: struct {
-        size: ?*Expr,
+        size: *Expr,
         subtype: *Type,
     },
+    Array_Ref: *Type,
     Pointer: *Type,
     Void: void,
     Bool: void,
@@ -356,6 +348,7 @@ const TypePayload = union(TypeTag) {
 
 const Type = struct {
     payload: TypePayload,
+    line_info: LineInfo,
 };
 
 const ExprBinaryOpTag = enum {
@@ -396,7 +389,9 @@ const ExprTag = enum {
     Bool,
     Int64,
     Null,
+    Type,
     Symbol,
+    Identifier,
 };
 
 const ExprPayload = union(ExprTag) {
@@ -440,7 +435,9 @@ const ExprPayload = union(ExprTag) {
     Bool: bool,
     Int64: i64,
     Null: void,
-    Symbol: []const u8,
+    Type: TypePayload,
+    Symbol: *Symbol,
+    Identifier: Token,
 };
 
 const Expr = struct {
@@ -525,6 +522,7 @@ const SymbolVariable = struct {
 
 const SymbolParameter = struct {
     _type: *Type,
+    has_id: bool,
 };
 
 const SymbolFunction = struct {
@@ -544,28 +542,30 @@ const SymbolEnumField = struct {
     _type: *Type,
 };
 
+const SymbolDefinition = struct {
+    expr: *Expr,
+};
+
 const SymbolTag = enum {
     Variable,
     Parameter,
     Function,
-    Struct,
     Struct_Field,
-    Union,
     Union_Field,
-    Enum,
     Enum_Field,
+    Type,
+    Definition,
 };
 
 const SymbolPayload = union(SymbolTag) {
     Variable: SymbolVariable,
     Parameter: SymbolParameter,
     Function: SymbolFunction,
-    Struct: *Type,
     Struct_Field: SymbolStructField,
-    Union: *Type,
     Union_Field: SymbolUnionField,
-    Enum: *Type,
     Enum_Field: SymbolEnumField,
+    Type: *Type,
+    Definition: SymbolDefinition,
 };
 
 const Symbol = struct {
@@ -695,82 +695,41 @@ fn ast_create(c: *Compiler, comptime T: type) *T {
     };
 }
 
-fn insert_symbol(c: *Compiler, id: Token) *Symbol {
-    std.debug.assert(id.tag == .Identifier);
-
-    // Should create arena with identifier strings?
-    var key = SymbolKey{
-        .text = id.text,
-        .scope = grab_current_scope(c),
-    };
-    var get_or_put_result = c.symbols.getOrPut(key) catch {
-        std.os.exit(1);
-    };
-
-    if (get_or_put_result.found_existing) {
-        print_error(c, id.line_info, "symbol '{s}' is already defined.", .{id.text});
-        print_note(c, get_or_put_result.value_ptr.*.line_info, "first defined here.", .{});
-        std.os.exit(1);
-    }
-
-    var symbol = ast_create(c, Symbol);
-    symbol.* = .{
-        .payload = undefined,
-        .key = get_or_put_result.key_ptr.*,
-        .line_info = id.line_info,
-    };
-    get_or_put_result.value_ptr.* = symbol;
-
-    return symbol;
-}
-
-fn create_unnamed_symbol(c: *Compiler, line_info: LineInfo) *Symbol {
+fn create_symbol(c: *Compiler, token: Token) *Symbol {
     var symbol = ast_create(c, Symbol);
     symbol.* = .{
         .payload = undefined,
         .key = .{
-            .text = "<no name>",
+            .text = token.text,
             .scope = grab_current_scope(c),
         },
-        .line_info = line_info,
+        .line_info = token.line_info,
     };
     return symbol;
 }
 
-fn find_symbol(c: *Compiler, id: Token) *Symbol {
+fn insert_symbol(c: *Compiler, id: Token) *Symbol {
     std.debug.assert(id.tag == .Identifier);
 
-    var key = SymbolKey{
-        .text = id.text,
-        .scope = c.current_scope,
+    // Should create arena with identifier strings?
+    var symbol = create_symbol(c, id);
+    insert_existing_symbol(c, symbol);
+
+    return symbol;
+}
+
+fn insert_existing_symbol(c: *Compiler, symbol: *Symbol) void {
+    var get_or_put_result = c.symbols.getOrPut(symbol.key) catch {
+        std.os.exit(1);
     };
 
-    while (true) {
-        var found_symbol = c.symbols.get(key);
-        if (found_symbol) |symbol| {
-            switch (symbol.*) {
-                .Variable,
-                .Parameter,
-                => {
-                    if (symbol.line_info.offset < id.line_info.offset) {
-                        return symbol;
-                    }
-                },
-                .Function => {
-                    return symbol;
-                },
-            }
-        }
-
-        if (key.scope.parent) |parent| {
-            key.scope = parent;
-        } else {
-            break;
-        }
+    if (get_or_put_result.found_existing) {
+        print_error(c, symbol.line_info, "symbol '{s}' is already defined.", .{symbol.key.text});
+        print_note(c, get_or_put_result.value_ptr.*.line_info, "first defined here.", .{});
+        std.os.exit(1);
     }
 
-    print_error(c, id.line_info, "'{s}' is not defined.", .{id.text});
-    std.os.exit(1);
+    get_or_put_result.value_ptr.* = symbol;
 }
 
 fn parse_top_level(c: *Compiler) void {
@@ -793,138 +752,29 @@ fn parse_top_level(c: *Compiler) void {
 }
 
 fn parse_type(c: *Compiler) Type {
-    switch (c.peek()) {
-        .Mul => {
-            c.advance();
+    var expr = parse_expr(c);
+    var payload: TypePayload = payload: {
+        switch (expr.payload) {
+            .Type => |_type| {
+                break :payload _type;
+            },
+            .Identifier => |id| {
+                break :payload .{ .Identifier = id };
+            },
+            else => {
+                print_error(c, expr.line_info, "expression doesn't look like a type.", .{});
+                std.os.exit(1);
+            },
+        }
+    };
 
-            var _type = ast_create(c, Type);
-            _type.* = parse_type(c);
-
-            return .{
-                .payload = .{ .Pointer = _type },
-            };
-        },
-        .Open_Paren => {
-            c.advance();
-
-            var _type = parse_type(c);
-            c.expect(.Close_Paren);
-
-            return _type;
-        },
-        .Open_Bracket => {
-            c.advance();
-
-            var size: ?*Expr = null;
-
-            if (c.peek() != .Close_Bracket) {
-                size = ast_create(c, Expr);
-                size.?.* = parse_expr(c);
-            }
-
-            c.expect(.Close_Bracket);
-
-            var subtype = ast_create(c, Type);
-            subtype.* = parse_type(c);
-
-            return .{
-                .payload = .{ .Array = .{
-                    .size = size,
-                    .subtype = subtype,
-                } },
-            };
-        },
-        .Struct => {
-            c.advance();
-            var _struct = parse_struct_fields(c, true);
-
-            return .{
-                .payload = .{ .Struct = _struct },
-            };
-        },
-        .Union => {
-            c.advance();
-            var _union = parse_struct_fields(c, false);
-
-            return .{
-                .payload = .{ .Union = _union },
-            };
-        },
-        .Enum => {
-            c.advance();
-            c.expect(.Open_Curly);
-
-            push_scope(c);
-
-            var _enum = TypeStruct{
-                .fields = .{},
-                .scope = grab_current_scope(c),
-            };
-
-            var tt = c.peek();
-            while (tt != .End_Of_File and tt != .Close_Curly) {
-                var id = c.grab();
-                c.expect(.Identifier);
-
-                var symbol = insert_symbol(c, id);
-                symbol.payload = .{ .Enum_Field = .{
-                    ._type = undefined,
-                } };
-
-                var node = ast_create(c, SymbolList.Node);
-                node.* = .{
-                    .payload = symbol,
-                };
-                _enum.fields.insert_last(node);
-
-                tt = c.peek();
-                if (tt != .End_Of_File and tt != .Close_Curly) {
-                    c.expect(.Comma);
-                    tt = c.peek();
-                }
-            }
-
-            pop_scope(c);
-
-            c.expect(.Close_Curly);
-
-            return .{
-                .payload = .{ .Enum = _enum },
-            };
-        },
-        .Proc => {
-            return parse_type_function(c, false);
-        },
-        .Void => {
-            c.advance();
-            return VOID_TYPE;
-        },
-        .Bool => {
-            c.advance();
-            return BOOL_TYPE;
-        },
-        .Int => {
-            c.advance();
-            return INT64_TYPE;
-        },
-        .Identifier => {
-            var id = c.grab();
-            c.advance();
-
-            return .{
-                .payload = .{ .Identifier = id },
-            };
-        },
-        else => {
-            var token = c.grab();
-            print_error(c, token.line_info, "'{s}' doesn't start a type.", .{token.text});
-            std.os.exit(1);
-        },
-    }
+    return .{
+        .payload = payload,
+        .line_info = expr.line_info,
+    };
 }
 
-fn parse_type_function(c: *Compiler, should_insert_symbol: bool) Type {
-    c.expect(.Proc);
+fn parse_type_function(c: *Compiler) TypePayload {
     c.expect(.Open_Paren);
 
     var params = SymbolList{};
@@ -943,13 +793,10 @@ fn parse_type_function(c: *Compiler, should_insert_symbol: bool) Type {
         var _type = ast_create(c, Type);
         _type.* = parse_type(c);
 
-        var symbol = if (has_id and should_insert_symbol)
-            insert_symbol(c, id)
-        else
-            create_unnamed_symbol(c, id.line_info);
-
+        var symbol = create_symbol(c, id);
         symbol.payload = .{ .Parameter = .{
             ._type = _type,
+            .has_id = has_id,
         } };
 
         var node = ast_create(c, SymbolList.Node);
@@ -968,19 +815,20 @@ fn parse_type_function(c: *Compiler, should_insert_symbol: bool) Type {
     c.expect(.Close_Paren);
 
     var return_type = ast_create(c, Type);
-    return_type.* = VOID_TYPE;
+    return_type.* = .{
+        .payload = .Void,
+        .line_info = c.grab().line_info,
+    };
 
     if (c.peek() == .Arrow) {
         c.advance();
         return_type.* = parse_type(c);
     }
 
-    return .{
-        .payload = .{ .Function = .{
-            .params = params,
-            .return_type = return_type,
-        } },
-    };
+    return .{ .Function = .{
+        .params = params,
+        .return_type = return_type,
+    } };
 }
 
 fn parse_struct_fields(c: *Compiler, is_struct: bool) TypeStruct {
@@ -1050,41 +898,26 @@ fn parse_symbol(c: *Compiler) *Symbol {
         .Colon_Equal => {
             c.advance();
 
-            switch (c.peek()) {
-                .Struct => {
-                    var _type = ast_create(c, Type);
-                    _type.* = parse_type(c);
+            if (c.peek() == .Proc) {
+                var _type = ast_create(c, Type);
+                _type.* = parse_type(c);
 
-                    symbol.payload = .{ .Struct = _type };
-
-                    return symbol;
-                },
-                .Union => {
-                    var _type = ast_create(c, Type);
-                    _type.* = parse_type(c);
-
-                    symbol.payload = .{ .Union = _type };
-
-                    return symbol;
-                },
-                .Enum => {
-                    var _type = ast_create(c, Type);
-                    _type.* = parse_type(c);
-
-                    symbol.payload = .{ .Enum = _type };
-
-                    return symbol;
-                },
-                .Proc => {
+                if (c.peek() == .Open_Curly) {
                     push_scope(c);
 
-                    var scope = grab_current_scope(c);
-                    var _type = ast_create(c, Type);
-                    _type.* = parse_type_function(c, true);
+                    var it = _type.payload.Function.params.iterator();
+                    while (it.next()) |param| {
+                        // TODO: if parameter has unnamed enum
+                        // type, we should insert it in parent scope.
+                        if (param.*.payload.Parameter.has_id) {
+                            param.*.key.scope = c.current_scope;
+                            insert_existing_symbol(c, param.*);
+                        }
+                    }
+
+                    var block = parse_block_given_scope(c, c.current_scope);
 
                     pop_scope(c);
-
-                    var block = parse_block_given_scope(c, scope);
 
                     symbol.payload = .{ .Function = .{
                         ._type = _type,
@@ -1092,19 +925,23 @@ fn parse_symbol(c: *Compiler) *Symbol {
                     } };
 
                     return symbol;
-                },
-                else => {
-                    var expr = ast_create(c, Expr);
-                    expr.* = parse_expr(c);
+                } else {
                     c.expect(.Semicolon);
 
-                    symbol.payload = .{ .Variable = .{
-                        ._type = null,
-                        .expr = expr,
-                    } };
+                    symbol.payload = .{ .Type = _type };
 
                     return symbol;
-                },
+                }
+            } else {
+                var expr = ast_create(c, Expr);
+                expr.* = parse_expr(c);
+                c.expect(.Semicolon);
+
+                symbol.payload = .{ .Definition = .{
+                    .expr = expr,
+                } };
+
+                return symbol;
             }
         },
         .Colon => {
@@ -1194,10 +1031,28 @@ fn parse_highest_prec(c: *Compiler) Expr {
                 var subexpr = ast_create(c, Expr);
                 subexpr.* = parse_highest_prec(c);
 
-                break :payload .{ .Unary_Op = .{
-                    .tag = token_tag_to_expr_unary_op_tag(token.tag),
-                    .subexpr = subexpr,
-                } };
+                if (subexpr.payload != .Type) {
+                    break :payload .{ .Unary_Op = .{
+                        .tag = token_tag_to_expr_unary_op_tag(token.tag),
+                        .subexpr = subexpr,
+                    } };
+                } else {
+                    var _type = &subexpr.payload.Type;
+                    if (token.tag != .Ref or _type.* != .Array) {
+                        print_error(c, subexpr.line_info, "can only take a reference to array type.", .{});
+                        std.os.exit(1);
+                    }
+
+                    var subtype = ast_create(c, Type);
+                    subtype.* = .{
+                        .payload = _type.*,
+                        .line_info = subexpr.line_info,
+                    };
+
+                    break :payload .{ .Type = .{
+                        .Array_Ref = subtype,
+                    } };
+                }
             },
             .And => {
                 print_error(c, token.line_info, "can't take a reference of rvalue.", .{});
@@ -1298,7 +1153,7 @@ fn parse_highest_prec(c: *Compiler) Expr {
                 break :payload .Null;
             },
             .Identifier => {
-                break :payload .{ .Symbol = token.text };
+                break :payload .{ .Identifier = token };
             },
             .Integer => {
                 var value: i64 = 0;
@@ -1307,6 +1162,96 @@ fn parse_highest_prec(c: *Compiler) Expr {
                 }
 
                 break :payload .{ .Int64 = value };
+            },
+            .Mul => {
+                var _type = ast_create(c, Type);
+                _type.* = parse_type(c);
+
+                break :payload .{ .Type = .{
+                    .Pointer = _type,
+                } };
+            },
+            .Open_Bracket => {
+                var size = ast_create(c, Expr);
+                size.* = parse_expr(c);
+                c.expect(.Close_Bracket);
+
+                var subtype = ast_create(c, Type);
+                subtype.* = parse_type(c);
+
+                break :payload .{ .Type = .{ .Array = .{
+                    .size = size,
+                    .subtype = subtype,
+                } } };
+            },
+            .Struct => {
+                var _struct = parse_struct_fields(c, true);
+
+                break :payload .{ .Type = .{
+                    .Struct = _struct,
+                } };
+            },
+            .Union => {
+                var _union = parse_struct_fields(c, false);
+
+                break :payload .{ .Type = .{
+                    .Union = _union,
+                } };
+            },
+            .Enum => {
+                c.expect(.Open_Curly);
+
+                push_scope(c);
+
+                var _enum = TypeStruct{
+                    .fields = .{},
+                    .scope = grab_current_scope(c),
+                };
+
+                var tt = c.peek();
+                while (tt != .End_Of_File and tt != .Close_Curly) {
+                    var id = c.grab();
+                    c.expect(.Identifier);
+
+                    var symbol = insert_symbol(c, id);
+                    symbol.payload = .{ .Enum_Field = .{
+                        ._type = undefined,
+                    } };
+
+                    var node = ast_create(c, SymbolList.Node);
+                    node.* = .{
+                        .payload = symbol,
+                    };
+                    _enum.fields.insert_last(node);
+
+                    tt = c.peek();
+                    if (tt != .End_Of_File and tt != .Close_Curly) {
+                        c.expect(.Comma);
+                        tt = c.peek();
+                    }
+                }
+
+                pop_scope(c);
+
+                c.expect(.Close_Curly);
+
+                break :payload .{ .Type = .{
+                    .Enum = _enum,
+                } };
+            },
+            .Proc => {
+                break :payload .{
+                    .Type = parse_type_function(c),
+                };
+            },
+            .Void => {
+                break :payload .{ .Type = .Void };
+            },
+            .Bool => {
+                break :payload .{ .Type = .Bool };
+            },
+            .Int => {
+                break :payload .{ .Type = .Int64 };
             },
             .Cast1 => {
                 c.expect(.Open_Paren);
@@ -1659,8 +1604,8 @@ fn parse_stmt(c: *Compiler) Stmt {
                 if (is_def(c)) {
                     var symbol = parse_symbol(c);
 
-                    if (symbol.payload != .Variable) {
-                        print_error(c, symbol.line_info, "only variable definitions are allowed inside a function.", .{});
+                    if (symbol.payload == .Function) {
+                        print_error(c, symbol.line_info, "nested functions are not allowed.", .{});
                         std.os.exit(1);
                     }
 

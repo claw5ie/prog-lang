@@ -1,4 +1,14 @@
+e := a;
+a := b;
+b := struct { x: *e };
+
 val00 := 0;
+
+BazBaz := struct
+{
+  x: int,
+  // y: enum { X = x };
+};
 
 // TODO: allow to assign constants to enumerators, e.g. "A = 2 + 2".
 Baz := enum
@@ -6,27 +16,28 @@ Baz := enum
   A,
   B,
   C,
-}
+};
 
 Faz := union
 {
-  x: []int, // Also reject.
-  y: *bool,
-}
+  x: [2]int,
+  y: *[2]Faz,
+  z: *enum { A },
+};
 
 Foo := struct
 {
   x: int,
   y: bool,
   z: Baz,
-}
+};
 
 Bar := struct
 {
   foo: Foo,
-}
+};
 
-bar := proc(aa: struct { x: int }) // reject.
+bar := proc(aa: struct { x: int }) -> void
 {
   while true break;
   do continue; while false;
@@ -41,9 +52,9 @@ bar := proc(aa: struct { x: int }) // reject.
   x.* = 42;
   z.  *.*;
 
-  b: [3]int;
-  a: [2][]int = .{ .{ 0, 1, 2 }, b };
-  c: []int; // Needs to be rejected. Can't infere the type.
+  b: [3]int = .{ 3, 4, 5 };
+  a: [2][3]int = .{ .{ 0, 1, 2 }, b };
+  c: [2]int;
   d := .{ .{ 1, 2, 3 } };
   a[0] = .{ 2, 3, 4 };
   a[0][1] = 42;
@@ -51,10 +62,24 @@ bar := proc(aa: struct { x: int }) // reject.
   e: bool = cast1(2);
   f := cast2(bool, 2);
 
+  g := &a[0];      // &[3]int
+  h: *[3]int = &g;
+  i := &a;         // &[2][3]int
+
   if false then {} else {}
 
   val00 = val00 + 42;
   return;
+}
+
+FazBaz := struct
+{
+  x: &[2]FazBaz,
+};
+
+foo := proc() -> Foo
+{
+  x = .{ x = 2 };
 }
 
 main := proc() -> void
@@ -89,7 +114,20 @@ main := proc() -> void
   return;
 }
 
-foo := proc(a: int, b: int,) -> int
+foofaz := proc(a: int, b: int,) -> int
 {
   return a + b;
+
+
+  {
+    i := 0;
+
+    {
+      {
+        j := i;
+      }
+
+      i := 1;
+    }
+  }
 }
