@@ -1791,10 +1791,15 @@ fn is_symbol_a_type(c: *Compiler, symbol: *Symbol) bool {
             definition.was_visited = true;
 
             if (is_expr_a_type(c, definition.expr)) {
-                var _type = ast_create(c, Type);
-                _type.* = extract_type(c, definition.expr.*);
+                var subtype = &definition.expr.payload.Type;
+                if (subtype.* == .Symbol) {
+                    symbol.payload = .{ .Type = subtype.Symbol.payload.Type };
+                } else {
+                    var _type = ast_create(c, Type);
+                    _type.* = extract_type(c, definition.expr.*);
 
-                symbol.payload = .{ .Type = _type };
+                    symbol.payload = .{ .Type = _type };
+                }
 
                 return true;
             } else {
