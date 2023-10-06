@@ -139,8 +139,7 @@ const Compiler = struct {
                 .{ .text = "void", .tag = .Void },
                 .{ .text = "bool", .tag = .Bool },
                 .{ .text = "int", .tag = .Int },
-                .{ .text = "cast1", .tag = .Cast1 },
-                .{ .text = "cast2", .tag = .Cast2 },
+                .{ .text = "cast", .tag = .Cast },
                 .{ .text = "false", .tag = .False },
                 .{ .text = "true", .tag = .True },
                 .{ .text = "null", .tag = .Null },
@@ -281,8 +280,7 @@ const TokenTag = enum {
     Void,
     Bool,
     Int,
-    Cast1,
-    Cast2,
+    Cast,
 
     False,
     True,
@@ -303,6 +301,11 @@ const Token = struct {
 
 const Scope = struct {
     parent: ?*Scope,
+};
+
+const Identifier = struct {
+    token: Token,
+    scope: *Scope,
 };
 
 const TypeStruct = struct {
@@ -343,7 +346,7 @@ const TypePayload = union(TypeTag) {
     Bool: void,
     Int64: void,
     Symbol: *Symbol,
-    Identifier: Token,
+    Identifier: Identifier,
 };
 
 const Type = struct {
@@ -437,7 +440,7 @@ const ExprPayload = union(ExprTag) {
     Null: void,
     Type: TypePayload,
     Symbol: *Symbol,
-    Identifier: Token,
+    Identifier: Identifier,
 };
 
 const Expr = struct {
@@ -452,7 +455,6 @@ const StmtTag = enum {
     Block,
     If,
     While,
-    Do_While,
     Break,
     Continue,
     Switch,
@@ -474,10 +476,7 @@ const StmtPayload = union(StmtTag) {
     While: struct {
         cond: *Expr,
         block: StmtBlock,
-    },
-    Do_While: struct {
-        block: StmtBlock,
-        cond: *Expr,
+        is_do_while: bool = false,
     },
     Break: void,
     Continue: void,
@@ -518,6 +517,7 @@ const StmtBlock = struct {
 const SymbolVariable = struct {
     _type: ?*Type,
     expr: ?*Expr,
+    was_visited: bool = false,
 };
 
 const SymbolParameter = struct {
@@ -527,7 +527,8 @@ const SymbolParameter = struct {
 
 const SymbolFunction = struct {
     _type: *Type,
-    block: StmtBlock,
+    block: StmtList,
+    scope: *Scope,
 };
 
 const SymbolStructField = struct {
@@ -544,6 +545,7 @@ const SymbolEnumField = struct {
 
 const SymbolDefinition = struct {
     expr: *Expr,
+    was_visited: bool = false,
 };
 
 const SymbolTag = enum {
@@ -645,8 +647,7 @@ fn token_tag_to_text(tag: TokenTag) []const u8 {
         .Void => "'void'",
         .Bool => "'bool'",
         .Int => "'int'",
-        .Cast1 => "'@cast1'",
-        .Cast2 => "'@cast2'",
+        .Cast => "'@cast'",
         .False => "'false'",
         .True => "'true'",
         .Null => "'null'",
@@ -685,10 +686,6 @@ fn pop_scope(c: *Compiler) void {
     c.current_scope = c.current_scope.parent.?;
 }
 
-fn grab_current_scope(c: *Compiler) *Scope {
-    return c.current_scope;
-}
-
 fn ast_create(c: *Compiler, comptime T: type) *T {
     return c.ast_arena_allocator.create(T) catch {
         std.os.exit(1);
@@ -701,7 +698,7 @@ fn create_symbol(c: *Compiler, token: Token) *Symbol {
         .payload = undefined,
         .key = .{
             .text = token.text,
-            .scope = grab_current_scope(c),
+            .scope = c.current_scope,
         },
         .line_info = token.line_info,
     };
@@ -732,6 +729,31 @@ fn insert_existing_symbol(c: *Compiler, symbol: *Symbol) void {
     get_or_put_result.value_ptr.* = symbol;
 }
 
+fn find_symbol_from_scope(c: *Compiler, id: Token, scope: *Scope) *Symbol {
+    std.debug.assert(id.tag == .Identifier);
+
+    var key = SymbolKey{
+        .text = id.text,
+        .scope = scope,
+    };
+
+    while (true) {
+        var found_symbol = c.symbols.get(key);
+        if (found_symbol) |symbol| {
+            return symbol;
+        }
+
+        if (key.scope.parent) |parent| {
+            key.scope = parent;
+        } else {
+            break;
+        }
+    }
+
+    print_error(c, id.line_info, "'{s}' is not defined.", .{id.text});
+    std.os.exit(1);
+}
+
 fn parse_top_level(c: *Compiler) void {
     c.global_scope = ast_create(c, Scope);
     c.global_scope.* = .{
@@ -751,8 +773,7 @@ fn parse_top_level(c: *Compiler) void {
     std.debug.assert(c.current_scope == c.global_scope);
 }
 
-fn parse_type(c: *Compiler) Type {
-    var expr = parse_expr(c);
+fn extract_type(c: *Compiler, expr: Expr) Type {
     var payload: TypePayload = payload: {
         switch (expr.payload) {
             .Type => |_type| {
@@ -772,6 +793,10 @@ fn parse_type(c: *Compiler) Type {
         .payload = payload,
         .line_info = expr.line_info,
     };
+}
+
+fn parse_type(c: *Compiler) Type {
+    return extract_type(c, parse_expr(c));
 }
 
 fn parse_type_function(c: *Compiler) TypePayload {
@@ -838,7 +863,7 @@ fn parse_struct_fields(c: *Compiler, is_struct: bool) TypeStruct {
 
     var _struct = TypeStruct{
         .fields = .{},
-        .scope = grab_current_scope(c),
+        .scope = c.current_scope,
     };
 
     var tt = c.peek();
@@ -906,23 +931,23 @@ fn parse_symbol(c: *Compiler) *Symbol {
                     push_scope(c);
 
                     var it = _type.payload.Function.params.iterator();
-                    while (it.next()) |param| {
-                        // TODO: if parameter has unnamed enum
-                        // type, we should insert it in parent scope.
-                        if (param.*.payload.Parameter.has_id) {
-                            param.*.key.scope = c.current_scope;
-                            insert_existing_symbol(c, param.*);
+                    while (it.next()) |param_ptr| {
+                        var param = &param_ptr.*.payload.Parameter;
+                        if (param.has_id) {
+                            param_ptr.*.key.scope = c.current_scope;
+                            insert_existing_symbol(c, param_ptr.*);
                         }
                     }
 
                     var block = parse_block_given_scope(c, c.current_scope);
 
-                    pop_scope(c);
-
                     symbol.payload = .{ .Function = .{
                         ._type = _type,
                         .block = block,
+                        .scope = c.current_scope,
                     } };
+
+                    pop_scope(c);
 
                     return symbol;
                 } else {
@@ -1021,7 +1046,6 @@ fn parse_highest_prec(c: *Compiler) Expr {
         .payload = undefined,
         .line_info = token.line_info,
     };
-
     result.payload = payload: {
         switch (token.tag) {
             .Sub,
@@ -1153,7 +1177,10 @@ fn parse_highest_prec(c: *Compiler) Expr {
                 break :payload .Null;
             },
             .Identifier => {
-                break :payload .{ .Identifier = token };
+                break :payload .{ .Identifier = .{
+                    .token = token,
+                    .scope = c.current_scope,
+                } };
             },
             .Integer => {
                 var value: i64 = 0;
@@ -1205,7 +1232,7 @@ fn parse_highest_prec(c: *Compiler) Expr {
 
                 var _enum = TypeStruct{
                     .fields = .{},
-                    .scope = grab_current_scope(c),
+                    .scope = c.current_scope,
                 };
 
                 var tt = c.peek();
@@ -1253,31 +1280,39 @@ fn parse_highest_prec(c: *Compiler) Expr {
             .Int => {
                 break :payload .{ .Type = .Int64 };
             },
-            .Cast1 => {
+            .Cast => {
                 c.expect(.Open_Paren);
 
-                var expr = ast_create(c, Expr);
-                expr.* = parse_expr(c);
+                var lhs = parse_expr(c);
 
-                c.expect(.Close_Paren);
+                if (c.peek() == .Comma) {
+                    c.advance();
+                }
 
-                break :payload .{ .Cast1 = expr };
-            },
-            .Cast2 => {
-                c.expect(.Open_Paren);
+                if (c.peek() == .Close_Paren) {
+                    c.advance();
 
-                var _type = ast_create(c, Type);
-                _type.* = parse_type(c);
-                c.expect(.Comma);
-                var expr = ast_create(c, Expr);
-                expr.* = parse_expr(c);
+                    var expr = ast_create(c, Expr);
+                    expr.* = lhs;
+                    break :payload .{ .Cast1 = expr };
+                } else {
+                    var _type = ast_create(c, Type);
+                    _type.* = extract_type(c, lhs);
 
-                c.expect(.Close_Paren);
+                    var rhs = ast_create(c, Expr);
+                    rhs.* = parse_expr(c);
 
-                break :payload .{ .Cast2 = .{
-                    ._type = _type,
-                    .expr = expr,
-                } };
+                    if (c.peek() == .Comma) {
+                        c.advance();
+                    }
+
+                    c.expect(.Close_Paren);
+
+                    break :payload .{ .Cast2 = .{
+                        ._type = _type,
+                        .expr = rhs,
+                    } };
+                }
             },
             else => {
                 print_error(c, token.line_info, "'{s}' doesn't start expression.", .{token.text});
@@ -1508,9 +1543,10 @@ fn parse_stmt(c: *Compiler) Stmt {
 
                 c.expect(.Semicolon);
 
-                break :payload .{ .Do_While = .{
+                break :payload .{ .While = .{
                     .block = block,
                     .cond = cond,
+                    .is_do_while = true,
                 } };
             },
             .Break => {
@@ -1545,7 +1581,7 @@ fn parse_stmt(c: *Compiler) Stmt {
                             .value = value,
                             .block = .{
                                 .stmts = .{},
-                                .scope = grab_current_scope(c),
+                                .scope = c.current_scope,
                             },
                             .should_fallthrough = true,
                         };
@@ -1573,7 +1609,7 @@ fn parse_stmt(c: *Compiler) Stmt {
 
                     var case = cases.grab_last();
                     case.should_fallthrough = false;
-                    case.block = parse_block_given_scope(c, case.block.scope.?);
+                    case.block.stmts = parse_block_given_scope(c, case.block.scope.?);
 
                     tt = c.peek();
                 }
@@ -1639,18 +1675,20 @@ fn parse_stmt(c: *Compiler) Stmt {
 }
 
 fn parse_scoped_block(c: *Compiler) StmtBlock {
-    return parse_block_given_scope(c, create_scope(c));
+    var scope = create_scope(c);
+    var stmts = parse_block_given_scope(c, scope);
+    return .{
+        .stmts = stmts,
+        .scope = scope,
+    };
 }
 
-fn parse_block_given_scope(c: *Compiler, scope: *Scope) StmtBlock {
+fn parse_block_given_scope(c: *Compiler, scope: *Scope) StmtList {
     // Previous scope may not be its parent.
     var previous_scope = c.current_scope;
     c.current_scope = scope;
 
-    var block = StmtBlock{
-        .stmts = .{},
-        .scope = grab_current_scope(c),
-    };
+    var block = StmtList{};
 
     c.expect(.Open_Curly);
 
@@ -1661,7 +1699,7 @@ fn parse_block_given_scope(c: *Compiler, scope: *Scope) StmtBlock {
         node.* = .{
             .payload = stmt,
         };
-        block.stmts.insert_last(node);
+        block.insert_last(node);
 
         tt = c.peek();
     }
@@ -1704,6 +1742,321 @@ fn parse_stmt_or_scoped_block(c: *Compiler) StmtBlock {
     return result;
 }
 
+fn is_expr_a_type(c: *Compiler, expr: *Expr) bool {
+    switch (expr.payload) {
+        .Type => {
+            return true;
+        },
+        .Identifier => |ident| {
+            var scope = ident.scope;
+            while (true) {
+                var symbol = find_symbol_from_scope(c, ident.token, scope);
+
+                if (is_symbol_a_type(c, symbol)) {
+                    expr.payload = .{ .Type = .{
+                        .Symbol = symbol,
+                    } };
+
+                    return true;
+                } else {
+                    if (symbol.line_info.offset >= ident.token.line_info.offset) {
+                        if (symbol.key.scope.parent) |parent| {
+                            scope = parent;
+                        } else {
+                            print_error(c, ident.token.line_info, "'{s}' was not previously defined.", .{ident.token.text});
+                            std.os.exit(1);
+                        }
+                    } else {
+                        expr.payload = .{ .Symbol = symbol };
+
+                        return false;
+                    }
+                }
+            }
+        },
+        else => {
+            return false;
+        },
+    }
+}
+
+fn is_symbol_a_type(c: *Compiler, symbol: *Symbol) bool {
+    switch (symbol.payload) {
+        .Definition => |*definition| {
+            if (definition.was_visited) {
+                print_error(c, symbol.line_info, "cyclic reference detected.", .{});
+                std.os.exit(1);
+            }
+
+            definition.was_visited = true;
+
+            if (is_expr_a_type(c, definition.expr)) {
+                var _type = ast_create(c, Type);
+                _type.* = extract_type(c, definition.expr.*);
+
+                symbol.payload = .{ .Type = _type };
+
+                return true;
+            } else {
+                symbol.payload = .{ .Variable = .{
+                    ._type = null,
+                    .expr = definition.expr,
+                } };
+
+                return false;
+            }
+        },
+        .Type => {
+            return true;
+        },
+        else => {
+            return false;
+        },
+    }
+}
+
+fn resolve_identifiers(c: *Compiler) void {
+    var it = c.globals.iterator();
+    while (it.next()) |symbol| {
+        resolve_identifiers_symbol(c, symbol.*);
+    }
+}
+
+fn resolve_identifiers_symbol(c: *Compiler, symbol: *Symbol) void {
+    _ = is_symbol_a_type(c, symbol);
+    switch (symbol.payload) {
+        .Variable => |*variable| {
+            if (variable._type) |_type| {
+                resolve_identifiers_type(c, _type);
+            }
+
+            if (variable.expr) |expr| {
+                resolve_identifiers_expr(c, expr);
+            }
+        },
+        .Parameter => |parameter| {
+            resolve_identifiers_type(c, parameter._type);
+        },
+        .Function => |function| {
+            resolve_identifiers_type(c, function._type);
+
+            var it = function.block.iterator();
+            while (it.next()) |stmt| {
+                resolve_identifiers_stmt(c, stmt);
+            }
+        },
+        .Struct_Field => |field| {
+            resolve_identifiers_type(c, field._type);
+        },
+        .Union_Field => |field| {
+            resolve_identifiers_type(c, field._type);
+        },
+        .Enum_Field => {},
+        .Type => |_type| {
+            resolve_identifiers_type(c, _type);
+        },
+        .Definition => unreachable,
+    }
+}
+
+fn resolve_identifiers_type(c: *Compiler, _type: *Type) void {
+    switch (_type.payload) {
+        .Struct => |_struct| {
+            var it = _struct.fields.iterator();
+            while (it.next()) |field| {
+                resolve_identifiers_type(c, field.*.payload.Struct_Field._type);
+            }
+        },
+        .Union => |_union| {
+            var it = _union.fields.iterator();
+            while (it.next()) |field| {
+                resolve_identifiers_type(c, field.*.payload.Union_Field._type);
+            }
+        },
+        .Enum => |_enum| {
+            var it = _enum.fields.iterator();
+            while (it.next()) |field| {
+                field.*.payload.Enum_Field._type = _type;
+            }
+        },
+        .Function => |function| {
+            var it = function.params.iterator();
+            while (it.next()) |param| {
+                resolve_identifiers_type(c, param.*.payload.Parameter._type);
+            }
+
+            resolve_identifiers_type(c, function.return_type);
+        },
+        .Array => |array| {
+            resolve_identifiers_expr(c, array.size);
+            resolve_identifiers_type(c, array.subtype);
+        },
+        .Array_Ref => |subtype| {
+            resolve_identifiers_type(c, subtype);
+        },
+        .Pointer => |subtype| {
+            resolve_identifiers_type(c, subtype);
+        },
+        .Void,
+        .Bool,
+        .Int64,
+        .Symbol,
+        => {},
+        .Identifier => |ident| {
+            var scope = ident.scope;
+            while (true) {
+                var symbol = find_symbol_from_scope(c, ident.token, scope);
+
+                if (is_symbol_a_type(c, symbol)) {
+                    _type.payload = .{ .Symbol = symbol };
+                    break;
+                } else {
+                    if (symbol.key.scope.parent) |parent| {
+                        scope = parent;
+                    } else {
+                        print_error(c, ident.token.line_info, "'{s}' was not defined anywhere.", .{ident.token.text});
+                        std.os.exit(1);
+                    }
+                }
+            }
+        },
+    }
+}
+
+fn resolve_identifiers_block(c: *Compiler, block: StmtBlock) void {
+    var it = block.stmts.iterator();
+    while (it.next()) |stmt| {
+        resolve_identifiers_stmt(c, stmt);
+    }
+}
+
+fn resolve_identifiers_stmt(c: *Compiler, stmt: *Stmt) void {
+    switch (stmt.payload) {
+        .Print => |expr| {
+            resolve_identifiers_expr(c, expr);
+        },
+        .Block => |block| {
+            resolve_identifiers_block(c, block);
+        },
+        .If => |_if| {
+            resolve_identifiers_expr(c, _if.cond);
+            resolve_identifiers_block(c, _if.if_true);
+            resolve_identifiers_block(c, _if.if_false);
+        },
+        .While => |_while| {
+            resolve_identifiers_expr(c, _while.cond);
+            resolve_identifiers_block(c, _while.block);
+        },
+        .Break => {},
+        .Continue => {},
+        .Switch => |_switch| {
+            resolve_identifiers_expr(c, _switch.cond);
+
+            var it = _switch.cases.iterator();
+            while (it.next()) |case| {
+                resolve_identifiers_expr(c, case.value);
+                resolve_identifiers_block(c, case.block);
+            }
+        },
+        .Return => {},
+        .Return_Expr => |expr| {
+            resolve_identifiers_expr(c, expr);
+        },
+        .Symbol => |symbol| {
+            resolve_identifiers_symbol(c, symbol);
+        },
+        .Assign => |assign| {
+            resolve_identifiers_expr(c, assign.lhs);
+            resolve_identifiers_expr(c, assign.rhs);
+        },
+        .Expr => |expr| {
+            resolve_identifiers_expr(c, expr);
+        },
+    }
+}
+
+fn resolve_identifiers_expr(c: *Compiler, expr: *Expr) void {
+    switch (expr.payload) {
+        .Binary_Op => |op| {
+            resolve_identifiers_expr(c, op.lhs);
+            resolve_identifiers_expr(c, op.rhs);
+        },
+        .Unary_Op => |op| {
+            resolve_identifiers_expr(c, op.subexpr);
+        },
+        .If => |_if| {
+            resolve_identifiers_expr(c, _if.cond);
+            resolve_identifiers_expr(c, _if.if_true);
+            resolve_identifiers_expr(c, _if.if_false);
+        },
+        .Call => |call| {
+            resolve_identifiers_expr(c, call.lhs);
+
+            var it = call.args.iterator();
+            while (it.next()) |arg| {
+                resolve_identifiers_expr(c, arg);
+            }
+        },
+        .Index => |index| {
+            resolve_identifiers_expr(c, index.lhs);
+            resolve_identifiers_expr(c, index.index);
+        },
+        .Field => |field| {
+            resolve_identifiers_expr(c, field.lhs);
+        },
+        .Expr_List => |list| {
+            var it = list.iterator();
+            while (it.next()) |subexpr| {
+                resolve_identifiers_expr(c, subexpr);
+            }
+        },
+        .Designator => |designator| {
+            resolve_identifiers_expr(c, designator.expr);
+        },
+        .Enum_Field => {},
+        .Cast1 => |subexpr| {
+            if (is_expr_a_type(c, subexpr)) {
+                print_error(c, subexpr.line_info, "expected expression, not a type.", .{});
+                std.os.exit(1);
+            }
+
+            resolve_identifiers_expr(c, subexpr);
+        },
+        .Cast2 => |cast| {
+            resolve_identifiers_type(c, cast._type);
+            resolve_identifiers_expr(c, cast.expr);
+        },
+        .Bool => {},
+        .Int64 => {},
+        .Null => {},
+        .Type => |payload| {
+            var _type: Type = undefined;
+            _type.payload = payload;
+
+            resolve_identifiers_type(c, &_type);
+        },
+        .Symbol => {},
+        .Identifier => |ident| {
+            var scope = ident.scope;
+            while (true) {
+                var symbol = find_symbol_from_scope(c, ident.token, scope);
+
+                if (!is_symbol_a_type(c, symbol) and symbol.line_info.offset < ident.token.line_info.offset) {
+                    expr.payload = .{ .Symbol = symbol };
+                    break;
+                } else {
+                    if (symbol.key.scope.parent) |parent| {
+                        scope = parent;
+                    } else {
+                        print_error(c, ident.token.line_info, "'{s}' was not previously defined.", .{ident.token.text});
+                        std.os.exit(1);
+                    }
+                }
+            }
+        },
+    }
+}
+
 pub fn compile() void {
     var args = std.process.args();
     var filepath: [:0]const u8 = "examples/debug";
@@ -1731,6 +2084,7 @@ pub fn compile() void {
     };
 
     parse_top_level(&compiler);
+    resolve_identifiers(&compiler);
 
     gpa.free(source_code);
     compiler.symbols.deinit();
