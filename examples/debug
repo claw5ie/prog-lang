@@ -81,7 +81,7 @@ bar := proc(aa: struct { x: int }) -> void
 
 FazBaz := struct
 {
-  x: &[2]FazBaz,
+  x: *[2]FazBaz,
 };
 
 foo := proc() -> Foo

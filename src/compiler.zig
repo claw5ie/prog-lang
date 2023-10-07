@@ -319,7 +319,6 @@ const TypeTag = enum {
     Enum,
     Function,
     Array,
-    Array_Ref,
     Pointer,
     Void,
     Bool,
@@ -340,7 +339,6 @@ const TypePayload = union(TypeTag) {
         size: *Expr,
         subtype: *Type,
     },
-    Array_Ref: *Type,
     Pointer: *Type,
     Void: void,
     Bool: void,
@@ -1055,28 +1053,10 @@ fn parse_highest_prec(c: *Compiler) Expr {
                 var subexpr = ast_create(c, Expr);
                 subexpr.* = parse_highest_prec(c);
 
-                if (subexpr.payload != .Type) {
-                    break :payload .{ .Unary_Op = .{
-                        .tag = token_tag_to_expr_unary_op_tag(token.tag),
-                        .subexpr = subexpr,
-                    } };
-                } else {
-                    var _type = &subexpr.payload.Type;
-                    if (token.tag != .Ref or _type.* != .Array) {
-                        print_error(c, subexpr.line_info, "can only take a reference to array type.", .{});
-                        std.os.exit(1);
-                    }
-
-                    var subtype = ast_create(c, Type);
-                    subtype.* = .{
-                        .payload = _type.*,
-                        .line_info = subexpr.line_info,
-                    };
-
-                    break :payload .{ .Type = .{
-                        .Array_Ref = subtype,
-                    } };
-                }
+                break :payload .{ .Unary_Op = .{
+                    .tag = token_tag_to_expr_unary_op_tag(token.tag),
+                    .subexpr = subexpr,
+                } };
             },
             .And => {
                 print_error(c, token.line_info, "can't take a reference of rvalue.", .{});
@@ -1850,17 +1830,14 @@ fn resolve_identifiers_symbol(c: *Compiler, symbol: *Symbol) void {
                 resolve_identifiers_stmt(c, stmt);
             }
         },
-        .Struct_Field => |field| {
-            resolve_identifiers_type(c, field._type);
-        },
-        .Union_Field => |field| {
-            resolve_identifiers_type(c, field._type);
-        },
-        .Enum_Field => {},
         .Type => |_type| {
             resolve_identifiers_type(c, _type);
         },
-        .Definition => unreachable,
+        .Struct_Field,
+        .Union_Field,
+        .Enum_Field,
+        .Definition,
+        => unreachable,
     }
 }
 
@@ -1895,9 +1872,6 @@ fn resolve_identifiers_type(c: *Compiler, _type: *Type) void {
         .Array => |array| {
             resolve_identifiers_expr(c, array.size);
             resolve_identifiers_type(c, array.subtype);
-        },
-        .Array_Ref => |subtype| {
-            resolve_identifiers_type(c, subtype);
         },
         .Pointer => |subtype| {
             resolve_identifiers_type(c, subtype);
