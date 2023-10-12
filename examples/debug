@@ -123,7 +123,6 @@ main := proc() -> void
   val5: Faz = .{ x = .{ 4, 2 } };
   val6: *void = null;
   val7: *void = &val6;
-  val6 + 1;
 
   main();
 

@@ -581,8 +581,10 @@ const ExprTag = enum {
     Call,
     Index,
     Field,
+    Initializer,
     Expr_List,
     Designator,
+    Enum_Field_From_Type,
     Enum_Field,
     Cast1,
     Cast2,
@@ -621,10 +623,18 @@ const ExprPayload = union(ExprTag) {
         lhs: *Expr,
         id: Token,
     },
+    Initializer: struct {
+        _type: *Type,
+        expr_list: ExprList,
+    },
     Expr_List: ExprList,
     Designator: struct {
         id: Token,
         expr: *Expr,
+    },
+    Enum_Field_From_Type: struct {
+        _type: *Type,
+        id: Token,
     },
     Enum_Field: []const u8,
     Cast1: *Expr,
@@ -947,18 +957,25 @@ fn insert_existing_symbol(c: *Compiler, symbol: *Symbol) void {
     get_or_put_result.value_ptr.* = symbol;
 }
 
-fn find_symbol_from_scope(c: *Compiler, id: Token, scope: *Scope) *Symbol {
-    std.debug.assert(id.tag == .Identifier);
+fn find_symbol(c: *Compiler, id: Identifier, is_type: *bool) *Symbol {
+    std.debug.assert(id.token.tag == .Identifier);
 
     var key = SymbolKey{
-        .text = id.text,
-        .scope = scope,
+        .text = id.token.text,
+        .scope = id.scope,
     };
 
     while (true) {
         var found_symbol = c.symbols.get(key);
+
         if (found_symbol) |symbol| {
-            return symbol;
+            if (is_symbol_a_type(c, symbol)) {
+                is_type.* = true;
+                return symbol;
+            } else if (symbol.line_info.offset < id.token.line_info.offset) {
+                is_type.* = false;
+                return symbol;
+            }
         }
 
         if (key.scope.parent) |parent| {
@@ -968,7 +985,7 @@ fn find_symbol_from_scope(c: *Compiler, id: Token, scope: *Scope) *Symbol {
         }
     }
 
-    print_error(c, id.line_info, "'{s}' is not defined.", .{id.text});
+    print_error(c, id.token.line_info, "'{s}' is not defined.", .{id.token.text});
     std.os.exit(1);
 }
 
@@ -1226,6 +1243,54 @@ fn parse_symbol(c: *Compiler) *Symbol {
     }
 }
 
+fn parse_expr_list(c: *Compiler) ExprList {
+    c.expect(.Open_Curly);
+
+    var result = ExprList{};
+
+    var tt = c.peek();
+    while (tt != .End_Of_File and tt != .Close_Curly) {
+        var expr: Expr = expr: {
+            if (c.peek() == .Identifier and
+                c.peek_ahead(1) == .Equal)
+            {
+                var id = c.grab();
+                c.advance_many(2);
+
+                var value = ast_create(c, Expr);
+                value.* = parse_expr(c);
+
+                break :expr .{
+                    .payload = .{ .Designator = .{
+                        .id = id,
+                        .expr = value,
+                    } },
+                    .size = undefined,
+                    .line_info = id.line_info,
+                };
+            } else {
+                break :expr parse_expr(c);
+            }
+        };
+
+        var node = ast_create(c, ExprList.Node);
+        node.* = .{
+            .payload = expr,
+        };
+        result.insert_last(node);
+
+        tt = c.peek();
+        if (tt != .End_Of_File and tt != .Close_Curly) {
+            c.expect(.Comma);
+            tt = c.peek();
+        }
+    }
+
+    c.expect(.Close_Curly);
+
+    return result;
+}
+
 fn parse_expr(c: *Compiler) Expr {
     return parse_prec(c, LOWEST_PREC);
 }
@@ -1301,52 +1366,7 @@ fn parse_highest_prec(c: *Compiler) Expr {
             },
             .Dot => {
                 switch (c.peek()) {
-                    .Open_Curly => {
-                        c.advance();
-                        var expr_list = ExprList{};
-
-                        var tt = c.peek();
-                        while (tt != .End_Of_File and tt != .Close_Curly) {
-                            var expr: Expr = expr: {
-                                if (c.peek() == .Identifier and
-                                    c.peek_ahead(1) == .Equal)
-                                {
-                                    var id = c.grab();
-                                    c.advance_many(2);
-
-                                    var value = ast_create(c, Expr);
-                                    value.* = parse_expr(c);
-
-                                    break :expr .{
-                                        .payload = .{ .Designator = .{
-                                            .id = id,
-                                            .expr = value,
-                                        } },
-                                        .size = undefined,
-                                        .line_info = id.line_info,
-                                    };
-                                } else {
-                                    break :expr parse_expr(c);
-                                }
-                            };
-
-                            var node = ast_create(c, ExprList.Node);
-                            node.* = .{
-                                .payload = expr,
-                            };
-                            expr_list.insert_last(node);
-
-                            tt = c.peek();
-                            if (tt != .End_Of_File and tt != .Close_Curly) {
-                                c.expect(.Comma);
-                                tt = c.peek();
-                            }
-                        }
-
-                        c.expect(.Close_Curly);
-
-                        break :payload .{ .Expr_List = expr_list };
-                    },
+                    .Open_Curly => break :payload .{ .Expr_List = parse_expr_list(c) },
                     .Identifier => {
                         var id = c.grab();
                         c.advance();
@@ -1609,6 +1629,18 @@ fn parse_postfix_unary_ops(c: *Compiler, inner: *Expr) void {
                         } },
                         .size = undefined,
                         .line_info = lhs.line_info,
+                    };
+                } else if (c.peek() == .Open_Curly) {
+                    var expr_list = parse_expr_list(c);
+                    var _type = ast_create(c, Type);
+                    _type.* = extract_type(c, inner.*);
+                    inner.* = .{
+                        .payload = .{ .Initializer = .{
+                            ._type = _type,
+                            .expr_list = expr_list,
+                        } },
+                        .size = undefined,
+                        .line_info = _type.line_info,
                     };
                 } else {
                     var id = c.grab();
@@ -1965,31 +1997,17 @@ fn is_expr_a_type(c: *Compiler, expr: *Expr) bool {
             return true;
         },
         .Identifier => |ident| {
-            var scope = ident.scope;
-            while (true) {
-                var symbol = find_symbol_from_scope(c, ident.token, scope);
-
-                if (is_symbol_a_type(c, symbol)) {
-                    expr.payload = .{ .Type = .{
-                        .Symbol = symbol,
-                    } };
-
-                    return true;
-                } else {
-                    if (symbol.line_info.offset >= ident.token.line_info.offset) {
-                        if (symbol.key.scope.parent) |parent| {
-                            scope = parent;
-                        } else {
-                            print_error(c, ident.token.line_info, "'{s}' was not previously defined.", .{ident.token.text});
-                            std.os.exit(1);
-                        }
-                    } else {
-                        expr.payload = .{ .Symbol = symbol };
-
-                        return false;
-                    }
-                }
+            var is_type = false;
+            var symbol = find_symbol(c, ident, &is_type);
+            if (is_type) {
+                expr.payload = .{ .Type = .{
+                    .Symbol = symbol,
+                } };
+            } else {
+                expr.payload = .{ .Symbol = symbol };
             }
+
+            return is_type;
         },
         else => {
             return false;
@@ -2126,21 +2144,14 @@ fn resolve_identifiers_type(c: *Compiler, _type: *Type) void {
         .Symbol,
         => {},
         .Identifier => |ident| {
-            var scope = ident.scope;
-            while (true) {
-                var symbol = find_symbol_from_scope(c, ident.token, scope);
+            var is_type = false;
+            var symbol = find_symbol(c, ident, &is_type);
 
-                if (is_symbol_a_type(c, symbol)) {
-                    _type.payload = .{ .Symbol = symbol };
-                    break;
-                } else {
-                    if (symbol.key.scope.parent) |parent| {
-                        scope = parent;
-                    } else {
-                        print_error(c, ident.token.line_info, "'{s}' was not defined anywhere.", .{ident.token.text});
-                        std.os.exit(1);
-                    }
-                }
+            if (is_type) {
+                _type.payload = .{ .Symbol = symbol };
+            } else {
+                print_error(c, ident.token.line_info, "'{s}' is not a type.", .{ident.token.text});
+                std.os.exit(1);
             }
         },
     }
@@ -2226,6 +2237,28 @@ fn resolve_identifiers_expr(c: *Compiler, expr: *Expr) void {
         },
         .Field => |field| {
             resolve_identifiers_expr(c, field.lhs);
+
+            if (field.lhs.payload == .Type) {
+                var _type = ast_create(c, Type);
+                _type.* = .{
+                    .payload = field.lhs.payload.Type,
+                    .size = undefined,
+                    .is_resolved = true,
+                    .line_info = expr.line_info,
+                };
+                expr.payload = .{ .Enum_Field_From_Type = .{
+                    ._type = _type,
+                    .id = field.id,
+                } };
+            }
+        },
+        .Initializer => |init| {
+            resolve_identifiers_type(c, init._type);
+
+            var it = init.expr_list.iterator();
+            while (it.next()) |subexpr| {
+                resolve_identifiers_expr(c, subexpr);
+            }
         },
         .Expr_List => |list| {
             var it = list.iterator();
@@ -2236,6 +2269,7 @@ fn resolve_identifiers_expr(c: *Compiler, expr: *Expr) void {
         .Designator => |designator| {
             resolve_identifiers_expr(c, designator.expr);
         },
+        .Enum_Field_From_Type => unreachable,
         .Enum_Field => {},
         .Cast1 => |subexpr| {
             if (is_expr_a_type(c, subexpr)) {
@@ -2260,21 +2294,15 @@ fn resolve_identifiers_expr(c: *Compiler, expr: *Expr) void {
         },
         .Symbol => {},
         .Identifier => |ident| {
-            var scope = ident.scope;
-            while (true) {
-                var symbol = find_symbol_from_scope(c, ident.token, scope);
+            var is_type = false;
+            var symbol = find_symbol(c, ident, &is_type);
 
-                if (!is_symbol_a_type(c, symbol) and symbol.line_info.offset < ident.token.line_info.offset) {
-                    expr.payload = .{ .Symbol = symbol };
-                    break;
-                } else {
-                    if (symbol.key.scope.parent) |parent| {
-                        scope = parent;
-                    } else {
-                        print_error(c, ident.token.line_info, "'{s}' was not previously defined.", .{ident.token.text});
-                        std.os.exit(1);
-                    }
-                }
+            if (is_type) {
+                expr.payload = .{ .Type = .{
+                    .Symbol = symbol,
+                } };
+            } else {
+                expr.payload = .{ .Symbol = symbol };
             }
         },
     }
@@ -2919,6 +2947,19 @@ fn typecheck_expr_allow_void(c: *Compiler, type_hint: ?*Type, expr: *Expr) *Type
                 std.os.exit(1);
             }
         },
+        .Initializer => |init| {
+            typecheck_type(c, init._type);
+
+            var _type = init._type.extract_ptr();
+            var subexpr = Expr{
+                .payload = .{ .Expr_List = init.expr_list },
+                .size = undefined,
+                .line_info = expr.line_info,
+            };
+            _ = typecheck_expr_allow_void(c, _type, &subexpr);
+
+            result = _type;
+        },
         .Expr_List => |list| {
             if (type_hint == null) {
                 print_error(c, expr.line_info, "can't infere the type of expression list.", .{});
@@ -2991,6 +3032,19 @@ fn typecheck_expr_allow_void(c: *Compiler, type_hint: ?*Type, expr: *Expr) *Type
             result = hint;
         },
         .Designator => unreachable,
+        .Enum_Field_From_Type => |field| {
+            typecheck_type(c, field._type);
+
+            var _type = field._type.extract_ptr();
+            var subexpr = Expr{
+                .payload = .{ .Enum_Field = field.id.text },
+                .size = undefined,
+                .line_info = field.id.line_info,
+            };
+            _ = typecheck_expr_allow_void(c, _type, &subexpr);
+
+            result = _type;
+        },
         .Enum_Field => |text| {
             if (type_hint == null) {
                 print_error(c, expr.line_info, "can't infere the type of enumerator.", .{});
