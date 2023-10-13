@@ -652,7 +652,7 @@ const ExprPayload = union(ExprTag) {
 
 const Expr = struct {
     payload: ExprPayload,
-    size: usize,
+    _type: *Type,
     is_lvalue: bool = false,
     line_info: LineInfo,
 };
@@ -1260,7 +1260,7 @@ fn parse_expr_list(c: *Compiler) ExprList {
                         .id = id,
                         .expr = value,
                     } },
-                    .size = undefined,
+                    ._type = undefined,
                     .line_info = id.line_info,
                 };
             } else {
@@ -1312,7 +1312,7 @@ fn parse_prec(c: *Compiler, min_prec: i32) Expr {
                     .lhs = lhs_ptr,
                     .rhs = rhs_ptr,
                 } },
-                .size = undefined,
+                ._type = undefined,
                 .line_info = lhs_ptr.line_info,
             };
 
@@ -1332,7 +1332,7 @@ fn parse_highest_prec(c: *Compiler) Expr {
 
     var result = Expr{
         .payload = undefined,
-        .size = undefined,
+        ._type = undefined,
         .line_info = token.line_info,
     };
     result.payload = payload: {
@@ -1628,7 +1628,7 @@ fn parse_postfix_unary_ops(c: *Compiler, inner: *Expr) void {
                         .lhs = lhs,
                         .args = args,
                     } },
-                    .size = undefined,
+                    ._type = undefined,
                     .line_info = line_info,
                 };
             },
@@ -1647,7 +1647,7 @@ fn parse_postfix_unary_ops(c: *Compiler, inner: *Expr) void {
                         .lhs = lhs,
                         .index = expr,
                     } },
-                    .size = undefined,
+                    ._type = undefined,
                     .line_info = line_info,
                 };
             },
@@ -1664,7 +1664,7 @@ fn parse_postfix_unary_ops(c: *Compiler, inner: *Expr) void {
                             .tag = .Deref,
                             .subexpr = lhs,
                         } },
-                        .size = undefined,
+                        ._type = undefined,
                         .line_info = lhs.line_info,
                     };
                 } else if (c.peek() == .Open_Curly) {
@@ -1675,7 +1675,7 @@ fn parse_postfix_unary_ops(c: *Compiler, inner: *Expr) void {
                             ._type = _type,
                             .expr_list = expr_list,
                         } },
-                        .size = undefined,
+                        ._type = undefined,
                         .line_info = _type.line_info,
                     };
                 } else {
@@ -1689,7 +1689,7 @@ fn parse_postfix_unary_ops(c: *Compiler, inner: *Expr) void {
                             .lhs = lhs,
                             .id = id,
                         } },
-                        .size = undefined,
+                        ._type = undefined,
                         .line_info = id.line_info,
                     };
                 }
@@ -2689,8 +2689,6 @@ fn typecheck_expr(c: *Compiler, type_hint: ?*Type, expr: *Expr) *Type {
 }
 
 fn typecheck_expr_allow_void(c: *Compiler, type_hint: ?*Type, expr: *Expr) *Type {
-    var result: *Type = undefined;
-
     switch (expr.payload) {
         .Binary_Op => |op| {
             switch (op.tag) {
@@ -2705,7 +2703,7 @@ fn typecheck_expr_allow_void(c: *Compiler, type_hint: ?*Type, expr: *Expr) *Type
                         std.os.exit(1);
                     }
 
-                    result = &BOOL_TYPE_HINT;
+                    expr._type = &BOOL_TYPE_HINT;
                 },
                 .Eq,
                 .Neq,
@@ -2722,7 +2720,7 @@ fn typecheck_expr_allow_void(c: *Compiler, type_hint: ?*Type, expr: *Expr) *Type
                         std.os.exit(1);
                     }
 
-                    result = &BOOL_TYPE_HINT;
+                    expr._type = &BOOL_TYPE_HINT;
                 },
                 .Lt,
                 .Leq,
@@ -2741,7 +2739,7 @@ fn typecheck_expr_allow_void(c: *Compiler, type_hint: ?*Type, expr: *Expr) *Type
                         std.os.exit(1);
                     }
 
-                    result = &BOOL_TYPE_HINT;
+                    expr._type = &BOOL_TYPE_HINT;
                 },
                 .Add => {
                     var lhs_type = typecheck_expr(c, null, op.lhs);
@@ -2753,11 +2751,11 @@ fn typecheck_expr_allow_void(c: *Compiler, type_hint: ?*Type, expr: *Expr) *Type
                         print_error(c, op.lhs.line_info, "can't add 'void' pointers.", .{});
                         std.os.exit(1);
                     } else if (check_flags(lhs_flags, Type.Is_Ptr) and check_flags(rhs_flags, Type.Is_Integer)) {
-                        result = lhs_type;
+                        expr._type = lhs_type;
                     } else if (check_flags(lhs_flags, Type.Is_Integer) and check_flags(rhs_flags, Type.Is_Ptr)) {
-                        result = rhs_type;
+                        expr._type = rhs_type;
                     } else if (check_flags(lhs_flags, Type.Is_Integer) and lhs_type.eql(rhs_type)) {
-                        result = lhs_type;
+                        expr._type = lhs_type;
                     } else {
                         print_error(c, op.lhs.line_info, "expected integer/pointer: '{}' and '{}'", .{ lhs_type, rhs_type });
                         std.os.exit(1);
@@ -2773,9 +2771,9 @@ fn typecheck_expr_allow_void(c: *Compiler, type_hint: ?*Type, expr: *Expr) *Type
                         print_error(c, op.lhs.line_info, "can't subtract 'void' pointer.", .{});
                         std.os.exit(1);
                     } else if (check_flags(lhs_flags, Type.Is_Ptr) and check_flags(rhs_flags, Type.Is_Integer)) {
-                        result = lhs_type;
+                        expr._type = lhs_type;
                     } else if (check_flags(lhs_flags, Type.Is_Integer) and lhs_type.eql(rhs_type)) {
-                        result = lhs_type;
+                        expr._type = lhs_type;
                     } else {
                         print_error(c, op.lhs.line_info, "expected integer/pointer: '{}' and '{}'", .{ lhs_type, rhs_type });
                         std.os.exit(1);
@@ -2794,7 +2792,7 @@ fn typecheck_expr_allow_void(c: *Compiler, type_hint: ?*Type, expr: *Expr) *Type
                         std.os.exit(1);
                     }
 
-                    result = lhs_type;
+                    expr._type = lhs_type;
                 },
             }
         },
@@ -2808,7 +2806,7 @@ fn typecheck_expr_allow_void(c: *Compiler, type_hint: ?*Type, expr: *Expr) *Type
                         std.os.exit(1);
                     }
 
-                    result = &BOOL_TYPE_HINT;
+                    expr._type = &BOOL_TYPE_HINT;
                 },
                 .Neg => {
                     var subexpr_type = typecheck_expr(c, null, op.subexpr);
@@ -2819,7 +2817,7 @@ fn typecheck_expr_allow_void(c: *Compiler, type_hint: ?*Type, expr: *Expr) *Type
                         std.os.exit(1);
                     }
 
-                    result = subexpr_type;
+                    expr._type = subexpr_type;
                 },
                 .Ref => {
                     var subexpr_type = typecheck_expr(c, null, op.subexpr);
@@ -2829,8 +2827,8 @@ fn typecheck_expr_allow_void(c: *Compiler, type_hint: ?*Type, expr: *Expr) *Type
                         std.os.exit(1);
                     }
 
-                    result = ast_create(c, Type);
-                    result.* = .{
+                    expr._type = ast_create(c, Type);
+                    expr._type.* = .{
                         .payload = .{ .Pointer = subexpr_type },
                         .size = 8,
                         .typechecking_stage = .Fully_Typechecked,
@@ -2848,7 +2846,7 @@ fn typecheck_expr_allow_void(c: *Compiler, type_hint: ?*Type, expr: *Expr) *Type
 
                     expr.is_lvalue = true;
 
-                    result = subexpr_type.payload.Pointer.extract_ptr();
+                    expr._type = subexpr_type.payload.Pointer.extract_ptr();
                 },
             }
         },
@@ -2867,7 +2865,7 @@ fn typecheck_expr_allow_void(c: *Compiler, type_hint: ?*Type, expr: *Expr) *Type
                 std.os.exit(1);
             }
 
-            result = if_true_type;
+            expr._type = if_true_type;
         },
         .Call => |call| {
             var lhs_type = typecheck_expr(c, null, call.lhs);
@@ -2897,7 +2895,7 @@ fn typecheck_expr_allow_void(c: *Compiler, type_hint: ?*Type, expr: *Expr) *Type
                 }
             }
 
-            result = function.return_type.extract_ptr();
+            expr._type = function.return_type.extract_ptr();
         },
         .Index => |index| {
             var lhs_type = typecheck_expr(c, null, index.lhs);
@@ -2913,14 +2911,14 @@ fn typecheck_expr_allow_void(c: *Compiler, type_hint: ?*Type, expr: *Expr) *Type
 
             switch (lhs_type.payload) {
                 .Array => |array| {
-                    result = array.subtype.extract_ptr();
+                    expr._type = array.subtype.extract_ptr();
                 },
                 .Pointer => {
                     var subtype = lhs_type.payload.Pointer.extract_ptr();
                     if (subtype.payload == .Array) {
-                        result = subtype.payload.Array.subtype.extract_ptr();
+                        expr._type = subtype.payload.Array.subtype.extract_ptr();
                     } else {
-                        result = subtype;
+                        expr._type = subtype;
                     }
                 },
                 else => {
@@ -2969,10 +2967,10 @@ fn typecheck_expr_allow_void(c: *Compiler, type_hint: ?*Type, expr: *Expr) *Type
             if (found_symbol) |symbol| {
                 switch (symbol.payload) {
                     .Struct_Field => |struct_field| {
-                        result = struct_field._type.extract_ptr();
+                        expr._type = struct_field._type.extract_ptr();
                     },
                     .Union_Field => |struct_field| {
-                        result = struct_field._type.extract_ptr();
+                        expr._type = struct_field._type.extract_ptr();
                     },
                     else => unreachable,
                 }
@@ -2987,12 +2985,12 @@ fn typecheck_expr_allow_void(c: *Compiler, type_hint: ?*Type, expr: *Expr) *Type
             var _type = init._type.extract_ptr();
             var subexpr = Expr{
                 .payload = .{ .Expr_List = init.expr_list },
-                .size = undefined,
+                ._type = undefined,
                 .line_info = expr.line_info,
             };
             _ = typecheck_expr_allow_void(c, _type, &subexpr);
 
-            result = _type;
+            expr._type = _type;
         },
         .Expr_List => |list| {
             if (type_hint == null) {
@@ -3063,7 +3061,7 @@ fn typecheck_expr_allow_void(c: *Compiler, type_hint: ?*Type, expr: *Expr) *Type
                 },
             }
 
-            result = hint;
+            expr._type = hint;
         },
         .Designator => unreachable,
         .Enum_Field_From_Type => |field| {
@@ -3072,12 +3070,12 @@ fn typecheck_expr_allow_void(c: *Compiler, type_hint: ?*Type, expr: *Expr) *Type
             var _type = field._type.extract_ptr();
             var subexpr = Expr{
                 .payload = .{ .Enum_Field = field.id.text },
-                .size = undefined,
+                ._type = undefined,
                 .line_info = field.id.line_info,
             };
             _ = typecheck_expr_allow_void(c, _type, &subexpr);
 
-            result = _type;
+            expr._type = _type;
         },
         .Enum_Field => |text| {
             if (type_hint == null) {
@@ -3096,7 +3094,7 @@ fn typecheck_expr_allow_void(c: *Compiler, type_hint: ?*Type, expr: *Expr) *Type
 
                     if (found_symbol != null) {
                         // TODO: store pointer to a enum field symbol in 'Enum_Field'.
-                        result = hint;
+                        expr._type = hint;
                     } else {
                         print_error(c, expr.line_info, "enumerator '{s}' is not defined.", .{text});
                         std.os.exit(1);
@@ -3120,13 +3118,13 @@ fn typecheck_expr_allow_void(c: *Compiler, type_hint: ?*Type, expr: *Expr) *Type
             unreachable;
         },
         .Bool => {
-            result = &BOOL_TYPE_HINT;
+            expr._type = &BOOL_TYPE_HINT;
         },
         .Int64 => {
-            result = &INT64_TYPE_HINT;
+            expr._type = &INT64_TYPE_HINT;
         },
         .Null => {
-            result = &VOID_PTR_TYPE_HINT;
+            expr._type = &VOID_PTR_TYPE_HINT;
         },
         .Type => {
             print_error(c, expr.line_info, "unexpected type.", .{});
@@ -3142,15 +3140,15 @@ fn typecheck_expr_allow_void(c: *Compiler, type_hint: ?*Type, expr: *Expr) *Type
 
                     expr.is_lvalue = true;
 
-                    result = variable._type.?;
+                    expr._type = variable._type.?;
                 },
                 .Parameter => |parameter| {
                     expr.is_lvalue = true;
-                    result = parameter._type;
+                    expr._type = parameter._type;
                 },
                 .Function => |function| {
                     typecheck_type(c, function._type);
-                    result = function._type;
+                    expr._type = function._type;
                 },
                 .Type,
                 .Struct_Field,
@@ -3163,9 +3161,9 @@ fn typecheck_expr_allow_void(c: *Compiler, type_hint: ?*Type, expr: *Expr) *Type
         .Identifier => unreachable,
     }
 
-    expr.size = result.size;
+    expr._type = expr._type.extract_ptr();
 
-    return result.extract_ptr();
+    return expr._type;
 }
 
 pub fn compile() void {
