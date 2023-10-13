@@ -645,7 +645,7 @@ const ExprPayload = union(ExprTag) {
     Bool: bool,
     Int64: i64,
     Null: void,
-    Type: TypePayload,
+    Type: *Type,
     Symbol: *Symbol,
     Identifier: Identifier,
 };
@@ -1008,30 +1008,29 @@ fn parse_top_level(c: *Compiler) void {
     std.debug.assert(c.current_scope == c.global_scope);
 }
 
-fn extract_type(c: *Compiler, expr: Expr) Type {
-    var payload: TypePayload = payload: {
-        switch (expr.payload) {
-            .Type => |_type| {
-                break :payload _type;
-            },
-            .Identifier => |id| {
-                break :payload .{ .Identifier = id };
-            },
-            else => {
-                print_error(c, expr.line_info, "expression doesn't look like a type.", .{});
-                std.os.exit(1);
-            },
-        }
-    };
+fn extract_type(c: *Compiler, expr: Expr) *Type {
+    switch (expr.payload) {
+        .Type => |_type| {
+            return _type;
+        },
+        .Identifier => |id| {
+            var _type = ast_create(c, Type);
+            _type.* = .{
+                .payload = .{ .Identifier = id },
+                .size = undefined,
+                .line_info = expr.line_info,
+            };
 
-    return .{
-        .payload = payload,
-        .size = undefined,
-        .line_info = expr.line_info,
-    };
+            return _type;
+        },
+        else => {
+            print_error(c, expr.line_info, "expression doesn't look like a type.", .{});
+            std.os.exit(1);
+        },
+    }
 }
 
-fn parse_type(c: *Compiler) Type {
+fn parse_type(c: *Compiler) *Type {
     return extract_type(c, parse_expr(c));
 }
 
@@ -1053,9 +1052,7 @@ fn parse_type_function(c: *Compiler) TypePayload {
             has_id = true;
         }
 
-        var _type = ast_create(c, Type);
-        _type.* = parse_type(c);
-
+        var _type = parse_type(c);
         var symbol = create_symbol(c, id);
         symbol.payload = .{ .Parameter = .{
             ._type = _type,
@@ -1077,16 +1074,18 @@ fn parse_type_function(c: *Compiler) TypePayload {
 
     c.expect(.Close_Paren);
 
-    var return_type = ast_create(c, Type);
-    return_type.* = .{
-        .payload = .Void,
-        .size = undefined,
-        .line_info = c.grab().line_info,
-    };
+    var return_type: *Type = undefined;
 
     if (c.peek() == .Arrow) {
         c.advance();
-        return_type.* = parse_type(c);
+        return_type = parse_type(c);
+    } else {
+        return_type = ast_create(c, Type);
+        return_type.* = .{
+            .payload = .Void,
+            .size = undefined,
+            .line_info = c.grab().line_info,
+        };
     }
 
     var scope = c.current_scope;
@@ -1116,9 +1115,7 @@ fn parse_struct_fields(c: *Compiler, is_struct: bool) TypeStruct {
         c.expect(.Identifier);
         c.expect(.Colon);
 
-        var _type = ast_create(c, Type);
-        _type.* = parse_type(c);
-
+        var _type = parse_type(c);
         var symbol = insert_symbol(c, id);
 
         if (is_struct) {
@@ -1168,8 +1165,7 @@ fn parse_symbol(c: *Compiler) *Symbol {
             c.advance();
 
             if (c.peek() == .Proc) {
-                var _type = ast_create(c, Type);
-                _type.* = parse_type(c);
+                var _type = parse_type(c);
 
                 if (c.peek() == .Open_Curly) {
                     var previous_scope = c.current_scope;
@@ -1217,8 +1213,7 @@ fn parse_symbol(c: *Compiler) *Symbol {
             c.advance();
 
             var expr: ?*Expr = null;
-            var _type = ast_create(c, Type);
-            _type.* = parse_type(c);
+            var _type = parse_type(c);
 
             if (c.peek() == .Equal) {
                 c.advance();
@@ -1423,40 +1418,56 @@ fn parse_highest_prec(c: *Compiler) Expr {
                 break :payload .{ .Int64 = value };
             },
             .Mul => {
+                var subtype = parse_type(c);
                 var _type = ast_create(c, Type);
-                _type.* = parse_type(c);
+                _type.* = .{
+                    .payload = .{ .Pointer = subtype },
+                    .size = undefined,
+                    .line_info = token.line_info,
+                };
 
-                break :payload .{ .Type = .{
-                    .Pointer = _type,
-                } };
+                break :payload .{ .Type = _type };
             },
             .Open_Bracket => {
                 var expr = ast_create(c, Expr);
                 expr.* = parse_expr(c);
                 c.expect(.Close_Bracket);
 
-                var subtype = ast_create(c, Type);
-                subtype.* = parse_type(c);
+                var subtype = parse_type(c);
+                var _type = ast_create(c, Type);
+                _type.* = .{
+                    .payload = .{ .Array = .{
+                        .expr = expr,
+                        .count = undefined,
+                        .subtype = subtype,
+                    } },
+                    .size = undefined,
+                    .line_info = token.line_info,
+                };
 
-                break :payload .{ .Type = .{ .Array = .{
-                    .expr = expr,
-                    .count = undefined,
-                    .subtype = subtype,
-                } } };
+                break :payload .{ .Type = _type };
             },
             .Struct => {
                 var _struct = parse_struct_fields(c, true);
+                var _type = ast_create(c, Type);
+                _type.* = .{
+                    .payload = .{ .Struct = _struct },
+                    .size = undefined,
+                    .line_info = token.line_info,
+                };
 
-                break :payload .{ .Type = .{
-                    .Struct = _struct,
-                } };
+                break :payload .{ .Type = _type };
             },
             .Union => {
                 var _union = parse_struct_fields(c, false);
+                var _type = ast_create(c, Type);
+                _type.* = .{
+                    .payload = .{ .Union = _union },
+                    .size = undefined,
+                    .line_info = token.line_info,
+                };
 
-                break :payload .{ .Type = .{
-                    .Union = _union,
-                } };
+                break :payload .{ .Type = _type };
             },
             .Enum => {
                 c.expect(.Open_Curly);
@@ -1495,23 +1506,51 @@ fn parse_highest_prec(c: *Compiler) Expr {
 
                 c.expect(.Close_Curly);
 
-                break :payload .{ .Type = .{
-                    .Enum = _enum,
-                } };
+                var _type = ast_create(c, Type);
+                _type.* = .{
+                    .payload = .{ .Enum = _enum },
+                    .size = undefined,
+                    .line_info = token.line_info,
+                };
+
+                break :payload .{ .Type = _type };
             },
             .Proc => {
-                break :payload .{
-                    .Type = parse_type_function(c),
+                var _type = ast_create(c, Type);
+                _type.* = .{
+                    .payload = parse_type_function(c),
+                    .size = undefined,
+                    .line_info = token.line_info,
                 };
+
+                break :payload .{ .Type = _type };
             },
             .Void => {
-                break :payload .{ .Type = .Void };
+                var _type = ast_create(c, Type);
+                _type.* = .{
+                    .payload = .Void,
+                    .size = undefined,
+                    .line_info = token.line_info,
+                };
+                break :payload .{ .Type = _type };
             },
             .Bool => {
-                break :payload .{ .Type = .Bool };
+                var _type = ast_create(c, Type);
+                _type.* = .{
+                    .payload = .Bool,
+                    .size = undefined,
+                    .line_info = token.line_info,
+                };
+                break :payload .{ .Type = _type };
             },
             .Int => {
-                break :payload .{ .Type = .Int64 };
+                var _type = ast_create(c, Type);
+                _type.* = .{
+                    .payload = .Int64,
+                    .size = undefined,
+                    .line_info = token.line_info,
+                };
+                break :payload .{ .Type = _type };
             },
             .Cast => {
                 c.expect(.Open_Paren);
@@ -1529,9 +1568,7 @@ fn parse_highest_prec(c: *Compiler) Expr {
                     expr.* = lhs;
                     break :payload .{ .Cast1 = expr };
                 } else {
-                    var _type = ast_create(c, Type);
-                    _type.* = extract_type(c, lhs);
-
+                    var _type = extract_type(c, lhs);
                     var rhs = ast_create(c, Expr);
                     rhs.* = parse_expr(c);
 
@@ -1632,8 +1669,7 @@ fn parse_postfix_unary_ops(c: *Compiler, inner: *Expr) void {
                     };
                 } else if (c.peek() == .Open_Curly) {
                     var expr_list = parse_expr_list(c);
-                    var _type = ast_create(c, Type);
-                    _type.* = extract_type(c, inner.*);
+                    var _type = extract_type(c, inner.*);
                     inner.* = .{
                         .payload = .{ .Initializer = .{
                             ._type = _type,
@@ -2000,9 +2036,13 @@ fn is_expr_a_type(c: *Compiler, expr: *Expr) bool {
             var is_type = false;
             var symbol = find_symbol(c, ident, &is_type);
             if (is_type) {
-                expr.payload = .{ .Type = .{
-                    .Symbol = symbol,
-                } };
+                var _type = ast_create(c, Type);
+                _type.* = .{
+                    .payload = .{ .Symbol = symbol },
+                    .size = undefined,
+                    .line_info = ident.token.line_info,
+                };
+                expr.payload = .{ .Type = _type };
             } else {
                 expr.payload = .{ .Symbol = symbol };
             }
@@ -2026,12 +2066,11 @@ fn is_symbol_a_type(c: *Compiler, symbol: *Symbol) bool {
             definition.was_visited = true;
 
             if (is_expr_a_type(c, definition.expr)) {
-                var subtype = &definition.expr.payload.Type;
-                if (subtype.* == .Symbol) {
-                    symbol.payload = .{ .Type = subtype.Symbol.payload.Type };
+                var subtype = definition.expr.payload.Type;
+                if (subtype.payload == .Symbol) {
+                    symbol.payload = .{ .Type = subtype.payload.Symbol.payload.Type };
                 } else {
-                    var _type = ast_create(c, Type);
-                    _type.* = extract_type(c, definition.expr.*);
+                    var _type = extract_type(c, definition.expr.*);
 
                     symbol.payload = .{ .Type = _type };
                 }
@@ -2239,13 +2278,7 @@ fn resolve_identifiers_expr(c: *Compiler, expr: *Expr) void {
             resolve_identifiers_expr(c, field.lhs);
 
             if (field.lhs.payload == .Type) {
-                var _type = ast_create(c, Type);
-                _type.* = .{
-                    .payload = field.lhs.payload.Type,
-                    .size = undefined,
-                    .is_resolved = true,
-                    .line_info = expr.line_info,
-                };
+                var _type = field.lhs.payload.Type;
                 expr.payload = .{ .Enum_Field_From_Type = .{
                     ._type = _type,
                     .id = field.id,
@@ -2286,11 +2319,8 @@ fn resolve_identifiers_expr(c: *Compiler, expr: *Expr) void {
         .Bool => {},
         .Int64 => {},
         .Null => {},
-        .Type => |payload| {
-            var _type: Type = undefined;
-            _type.payload = payload;
-
-            resolve_identifiers_type(c, &_type);
+        .Type => |_type| {
+            resolve_identifiers_type(c, _type);
         },
         .Symbol => {},
         .Identifier => |ident| {
@@ -2298,9 +2328,13 @@ fn resolve_identifiers_expr(c: *Compiler, expr: *Expr) void {
             var symbol = find_symbol(c, ident, &is_type);
 
             if (is_type) {
-                expr.payload = .{ .Type = .{
-                    .Symbol = symbol,
-                } };
+                var _type = ast_create(c, Type);
+                _type.* = .{
+                    .payload = .{ .Symbol = symbol },
+                    .size = undefined,
+                    .line_info = ident.token.line_info,
+                };
+                expr.payload = .{ .Type = _type };
             } else {
                 expr.payload = .{ .Symbol = symbol };
             }
