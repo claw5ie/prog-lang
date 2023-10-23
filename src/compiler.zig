@@ -4155,85 +4155,94 @@ fn debug_print_ir(c: *Compiler) void {
     }
 }
 
+inline fn cast_ptr(comptime dst: type, src: anytype) dst {
+    return @alignCast(@ptrCast(src));
+}
+
 fn ir_grab_pointer_from_tmp(c: *Compiler, tmp: IrTmp) u64 {
     switch (tmp.tag) {
         .Global => return tmp.payload.Global,
-        .Local => return if (tmp.payload.Local < 0)
-            c.rbp - @as(u64, @intCast(-tmp.payload.Local))
-        else
-            c.rbp + @as(u64, @intCast(tmp.payload.Local)),
+        .Local => {
+            var rbp: i64 = @bitCast(c.rbp);
+            return @bitCast(rbp + tmp.payload.Local);
+        },
     }
+}
+
+fn ir_grab_pointer_from_address(c: *Compiler, address: IrAddress) u64 {
+    var offset: i64 = 0;
+
+    if (address.choose & 0x1 == 0x1) {
+        var base: i64 = @bitCast(ir_grab_value_from_tmp(c, address.base));
+        offset += base;
+    }
+
+    if (address.choose & 0x2 == 0x2) {
+        offset += address.disp;
+    }
+
+    return @bitCast(offset);
 }
 
 fn ir_grab_pointer_from_lvalue(c: *Compiler, lvalue: IrLvalue) u64 {
     switch (lvalue) {
-        .Tmp => |tmp| {
-            return ir_grab_pointer_from_tmp(c, tmp);
-        },
-        .Address => |address| {
-            var offset: i64 = 0;
-
-            if (address.choose & 0x1 == 0x1) {
-                var base: i64 = @bitCast(ir_grab_value_from_operand(c, .{ .Tmp = address.base }));
-                offset += base;
-            }
-
-            if (address.choose & 0x2 == 0x2) {
-                offset += address.disp;
-            }
-
-            return @bitCast(offset);
-        },
+        .Tmp => |tmp| return ir_grab_pointer_from_tmp(c, tmp),
+        .Address => |address| return ir_grab_pointer_from_address(c, address),
     }
+}
+
+fn ir_grab_value_from_tmp(c: *Compiler, tmp: IrTmp) u64 {
+    var pointer = ir_grab_pointer_from_tmp(c, tmp);
+    return ir_stack_read_u64(c, pointer);
 }
 
 fn ir_grab_value_from_operand(c: *Compiler, operand: IrOperand) u64 {
     switch (operand) {
         .Tmp => |tmp| {
-            var pointer = ir_grab_pointer_from_lvalue(c, .{ .Tmp = tmp });
-            return ir_read_u64_from_stack(c, pointer);
+            var pointer = ir_grab_pointer_from_tmp(c, tmp);
+            return ir_stack_read_u64(c, pointer);
         },
         .Address => |address| {
-            var pointer = ir_grab_pointer_from_lvalue(c, .{ .Address = address });
-            return ir_read_u64_from_stack(c, pointer);
+            var pointer = ir_grab_pointer_from_address(c, address);
+            return ir_stack_read_u64(c, pointer);
         },
         .Label => |label| return label,
         .Imm => |imm| return @bitCast(imm),
     }
 }
 
-fn ir_read_u64_from_stack(c: *Compiler, pointer: u64) u64 {
-    if (pointer % 8 != 0 or pointer + 8 > c.rsp) {
+fn ir_stack_read_u64(c: *Compiler, pointer: u64) u64 {
+    if (pointer + 8 > c.rsp) {
+        std.debug.print("error: address 0x{x} is outside of current stack pointer (0x{x}).\n", .{ pointer, c.rsp });
         std.os.exit(1);
     }
-
-    return @as(*u64, @alignCast(@ptrCast(&c.stack[pointer]))).*;
+    return ir_stack_read_u64_no_check(c, pointer);
 }
 
-fn ir_read_u64_from_stack_no_check(c: *Compiler, pointer: u64) u64 {
-    return @as(*u64, @alignCast(@ptrCast(&c.stack[pointer]))).*;
+inline fn ir_stack_read_u64_no_check(c: *Compiler, pointer: u64) u64 {
+    return cast_ptr(*u64, &c.stack[pointer]).*;
 }
 
-fn ir_write_u64_to_stack(c: *Compiler, pointer: u64, value: u64) void {
-    if (pointer % 8 != 0 or pointer + 8 > c.rsp) {
+fn ir_stack_write_u64(c: *Compiler, pointer: u64, value: u64) void {
+    if (pointer + 8 > c.rsp) {
+        std.debug.print("error: address 0x{x} is outside of current stack pointer (0x{x}).\n", .{ pointer, c.rsp });
         std.os.exit(1);
     }
-
-    @as(*u64, @alignCast(@ptrCast(&c.stack[pointer]))).* = value;
+    ir_stack_write_u64_no_check(c, pointer, value);
 }
 
-fn ir_write_u64_to_stack_no_check(c: *Compiler, pointer: u64, value: u64) void {
-    @as(*u64, @alignCast(@ptrCast(&c.stack[pointer]))).* = value;
+inline fn ir_stack_write_u64_no_check(c: *Compiler, pointer: u64, value: u64) void {
+    cast_ptr(*u64, &c.stack[pointer]).* = value;
 }
 
 fn ir_stack_push(c: *Compiler, value: u64) void {
-    @as(*u64, @alignCast(@ptrCast(&c.stack[c.rsp]))).* = value;
+    ir_stack_write_u64_no_check(c, c.rsp, value);
     c.rsp += 8;
 }
 
 fn ir_stack_pop(c: *Compiler) u64 {
     c.rsp -= 8;
-    return @as(*u64, @alignCast(@ptrCast(&c.stack[c.rsp]))).*;
+    return ir_stack_read_u64_no_check(c, c.rsp);
 }
 
 fn interpret(c: *Compiler) void {
@@ -4275,7 +4284,7 @@ fn interpret(c: *Compiler) void {
         switch (c.ir_instrs.items[ip]) {
             .Binary_Op => |op| {
                 var dst = ir_grab_pointer_from_lvalue(c, op.dst);
-                var lhs = ir_read_u64_from_stack(c, dst);
+                var lhs = ir_stack_read_u64(c, dst);
                 var rhs = ir_grab_value_from_operand(c, op.src);
 
                 switch (op.tag) {
@@ -4294,18 +4303,18 @@ fn interpret(c: *Compiler) void {
                     .Mod => lhs = @bitCast(@rem(@as(i64, @intCast(lhs)), @as(i64, @intCast(rhs)))),
                 }
 
-                ir_write_u64_to_stack(c, dst, lhs);
+                ir_stack_write_u64(c, dst, lhs);
             },
             .Unary_Op => |op| {
                 var dst = ir_grab_pointer_from_lvalue(c, op.dst);
-                var src = ir_read_u64_from_stack(c, dst);
+                var src = ir_stack_read_u64(c, dst);
 
                 switch (op.tag) {
                     .Not => src = @intFromBool(src == 0),
                     .Neg => src = @bitCast(-@as(i64, @bitCast(src))),
                 }
 
-                ir_write_u64_to_stack(c, dst, src);
+                ir_stack_write_u64(c, dst, src);
             },
             .Instr => |instr| {
                 switch (instr) {
@@ -4317,7 +4326,7 @@ fn interpret(c: *Compiler) void {
                         var dst = ir_grab_pointer_from_lvalue(c, mov.dst);
                         var src = ir_grab_value_from_operand(c, mov.src);
 
-                        ir_write_u64_to_stack(c, dst, src);
+                        ir_stack_write_u64(c, dst, src);
                     },
                     .Jmp => |label| {
                         ip = labels[label];
@@ -4391,8 +4400,8 @@ fn interpret(c: *Compiler) void {
                         ip = ir_stack_pop(c);
 
                         if (return_src != 0xFFFF_FFFF_FFFF_FFFF) {
-                            var value = ir_read_u64_from_stack_no_check(c, return_src);
-                            ir_write_u64_to_stack(c, dst, value);
+                            var value = ir_stack_read_u64_no_check(c, return_src);
+                            ir_stack_write_u64(c, dst, value);
                         }
                     },
                     .Label => {},
