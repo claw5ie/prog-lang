@@ -52,6 +52,26 @@ const Compiler = struct {
     symbols: SymbolTable,
     current_scope: *Scope,
     global_scope: *Scope,
+    main_function: *Symbol,
+
+    ir_instrs: IrInstrList,
+    next_global: IrTmp = .{
+        .payload = .{ .Global = 0 },
+        .tag = .Global,
+    },
+    next_local: IrTmp = .{
+        .payload = .{ .Local = 0 },
+        .tag = .Local,
+    },
+    next_label: IrLabel = 0,
+    biggest_local_so_far: IrTmp = .{
+        .payload = .{ .Local = 0 },
+        .tag = .Local,
+    },
+
+    stack: []u8,
+    rsp: u64 = 0,
+    rbp: u64 = 0,
 
     pub fn advance(c: *Compiler) void {
         c.token_start += 1;
@@ -247,6 +267,41 @@ const Compiler = struct {
             c.line_info.line += 1;
             c.line_info.column = 1;
         }
+    }
+
+    pub fn grab_global(c: *Compiler) IrTmp {
+        var result = c.next_global;
+        c.next_global.payload.Global += 8;
+        return result;
+    }
+
+    pub fn grab_local(c: *Compiler) IrTmp {
+        var result = c.next_local;
+        c.next_local.payload.Local += 8;
+
+        if (c.biggest_local_so_far.payload.Local < c.next_local.payload.Local) {
+            c.biggest_local_so_far.payload.Local = c.next_local.payload.Local;
+        }
+
+        return result;
+    }
+
+    pub fn return_local(c: *Compiler, tmp: IrTmp) void {
+        std.debug.assert(tmp.tag == .Local);
+        c.next_local.payload.Local -= 8;
+        std.debug.assert(c.next_local.payload.Local == tmp.payload.Local);
+    }
+
+    pub fn grab_label(c: *Compiler) IrLabel {
+        var result = c.next_label;
+        c.next_label += 1;
+        return result;
+    }
+
+    pub fn grab_buncha_labels(c: *Compiler, count: u32) IrLabel {
+        var result = c.next_label;
+        c.next_label += count;
+        return result;
     }
 };
 
@@ -636,7 +691,7 @@ const ExprPayload = union(ExprTag) {
         _type: *Type,
         id: Token,
     },
-    Enum_Field: []const u8,
+    Enum_Field: Token,
     Cast1: *Expr,
     Cast2: struct {
         _type: *Type,
@@ -727,16 +782,19 @@ const SymbolVariable = struct {
     _type: ?*Type,
     expr: ?*Expr,
     was_visited: bool = false,
+    tmp: IrTmp,
 };
 
 const SymbolParameter = struct {
     _type: *Type,
     has_id: bool,
+    tmp: IrTmp,
 };
 
 const SymbolFunction = struct {
     _type: *Type,
     block: StmtList,
+    label: IrLabel,
 };
 
 const SymbolStructField = struct {
@@ -749,6 +807,7 @@ const SymbolUnionField = struct {
 
 const SymbolEnumField = struct {
     _type: *Type,
+    value: u64,
 };
 
 const SymbolDefinition = struct {
@@ -818,6 +877,164 @@ const TypecheckingStage = enum {
 const TypecheckerStmtContext = struct {
     return_type: *Type,
     is_in_loop: bool,
+};
+
+const IrLabelList = std.ArrayList(u64);
+const IrInstrList = std.ArrayList(IrInstr);
+const IrTmpTag = enum {
+    Global,
+    Local,
+};
+
+const IrTmp = packed struct {
+    payload: packed union {
+        Global: u31,
+        Local: i31,
+    },
+    tag: IrTmpTag,
+};
+
+const IrLvalueTag = enum {
+    Tmp,
+    Address,
+};
+
+const IrLvalue = union(IrLvalueTag) {
+    Tmp: IrTmp,
+    Address: IrAddress,
+};
+
+const IrOperandTag = enum {
+    Tmp,
+    Address,
+    Label,
+    Imm,
+};
+
+const IrOperand = union(IrOperandTag) {
+    Tmp: IrTmp,
+    Address: IrAddress,
+    Label: IrLabel,
+    Imm: i64,
+};
+
+const IrAddress = struct {
+    choose: u2,
+    base: IrTmp,
+    disp: i64,
+};
+
+const IrLabel = u32;
+
+const IrInstrBinaryOpTag = enum {
+    Or,
+    And,
+    Eq,
+    Neq,
+    Lt,
+    Leq,
+    Gt,
+    Geq,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+};
+
+const IrInstrUnaryOpTag = enum {
+    Not,
+    Neg,
+};
+
+const IrInstrOpcode = enum {
+    Print,
+    Mov,
+    Jmp,
+    Jnz,
+    Jz,
+    Je,
+    Push,
+    Pop,
+    Call,
+    Ret1,
+    Ret2,
+    Exit,
+};
+
+const IrInstrMetaTag = enum {
+    GFB,
+    GFE,
+    Label,
+};
+
+const IrInstrType = enum {
+    Binary_Op,
+    Unary_Op,
+    Instr,
+    Meta,
+};
+
+const IrInstr = union(IrInstrType) {
+    Binary_Op: struct {
+        tag: IrInstrBinaryOpTag,
+        dst: IrLvalue,
+        src: IrOperand,
+    },
+    Unary_Op: struct {
+        tag: IrInstrUnaryOpTag,
+        dst: IrLvalue,
+    },
+    Instr: union(IrInstrOpcode) {
+        Print: IrOperand,
+        Mov: struct {
+            dst: IrLvalue,
+            src: IrOperand,
+        },
+        Jmp: IrLabel,
+        Jnz: struct {
+            src: IrOperand,
+            label: IrLabel,
+        },
+        Jz: struct {
+            src: IrOperand,
+            label: IrLabel,
+        },
+        Je: struct {
+            src0: IrOperand,
+            src1: IrOperand,
+            label: IrLabel,
+        },
+        Push: IrOperand,
+        Pop: u64,
+        Call: struct {
+            dst: IrLvalue,
+            src: IrOperand,
+        },
+        Ret1: IrLabel,
+        Ret2: struct {
+            src: IrLvalue,
+            label: IrLabel,
+        },
+        Exit: void,
+    },
+    Meta: union(IrInstrMetaTag) {
+        GFB: struct {
+            stack_space_used: u32,
+            label: IrLabel,
+        },
+        GFE: struct {
+            stack_space_used: u32,
+            label: IrLabel,
+        },
+        Label: IrLabel,
+    },
+};
+
+const IrStmtContext = struct {
+    loop_cond_label: IrLabel,
+    loop_end_label: IrLabel,
+    function_end_label: IrLabel,
 };
 
 inline fn min_enum(x: anytype, y: @TypeOf(x)) @TypeOf(x) {
@@ -972,6 +1189,8 @@ fn find_symbol(c: *Compiler, id: Identifier, is_type: *bool) *Symbol {
             if (is_symbol_a_type(c, symbol)) {
                 is_type.* = true;
                 return symbol;
+            } else if (symbol.payload == .Function) {
+                return symbol;
             } else if (symbol.line_info.offset < id.token.line_info.offset) {
                 is_type.* = false;
                 return symbol;
@@ -1057,6 +1276,7 @@ fn parse_type_function(c: *Compiler) TypePayload {
         symbol.payload = .{ .Parameter = .{
             ._type = _type,
             .has_id = has_id,
+            .tmp = undefined,
         } };
 
         var node = ast_create(c, SymbolList.Node);
@@ -1185,6 +1405,7 @@ fn parse_symbol(c: *Compiler) *Symbol {
                     symbol.payload = .{ .Function = .{
                         ._type = _type,
                         .block = block,
+                        .label = c.grab_label(),
                     } };
 
                     c.current_scope = previous_scope;
@@ -1226,6 +1447,7 @@ fn parse_symbol(c: *Compiler) *Symbol {
             symbol.payload = .{ .Variable = .{
                 ._type = _type,
                 .expr = expr,
+                .tmp = undefined,
             } };
 
             return symbol;
@@ -1366,7 +1588,7 @@ fn parse_highest_prec(c: *Compiler) Expr {
                         var id = c.grab();
                         c.advance();
 
-                        break :payload .{ .Enum_Field = id.text };
+                        break :payload .{ .Enum_Field = id };
                     },
                     else => {
                         var _token = c.grab();
@@ -1487,6 +1709,7 @@ fn parse_highest_prec(c: *Compiler) Expr {
                     var symbol = insert_symbol(c, id);
                     symbol.payload = .{ .Enum_Field = .{
                         ._type = undefined,
+                        .value = undefined,
                     } };
 
                     var node = ast_create(c, SymbolList.Node);
@@ -2081,6 +2304,7 @@ fn is_symbol_a_type(c: *Compiler, symbol: *Symbol) bool {
                 symbol.payload = .{ .Variable = .{
                     ._type = null,
                     .expr = expr,
+                    .tmp = undefined,
                 } };
 
                 return false;
@@ -2354,6 +2578,39 @@ pub fn typecheck(c: *Compiler) void {
     while (it.next()) |symbol| {
         typecheck_symbol(c, symbol.*);
     }
+
+    var is_type = false;
+    var symbol = find_symbol(c, .{
+        .token = .{
+            .tag = .Identifier,
+            .text = "main",
+            .line_info = .{},
+        },
+        .scope = c.global_scope,
+    }, &is_type);
+    switch (symbol.payload) {
+        .Function => |function| {
+            var _type = &function._type.payload.Function;
+
+            if (_type.params.count != 0) {
+                print_error(c, function._type.line_info, "expected 0 arguments, but got {}.", .{_type.params.count});
+                std.os.exit(1);
+            }
+
+            var return_type = _type.return_type.extract_ptr();
+
+            if (!return_type.is(.Void)) {
+                print_error(c, _type.return_type.line_info, "expected 'void', but got '{}'.", .{_type.return_type});
+                std.os.exit(1);
+            }
+        },
+        else => {
+            print_error(c, symbol.line_info, "'main' should be a function.", .{});
+            std.os.exit(1);
+        },
+    }
+
+    c.main_function = symbol;
 }
 
 fn typecheck_symbol(c: *Compiler, symbol: *Symbol) void {
@@ -2398,7 +2655,7 @@ fn typecheck_symbol(c: *Compiler, symbol: *Symbol) void {
             }
         },
         .Type => |_type| {
-            typecheck_type(c, _type);
+            typecheck_type_flags(c, _type, 0);
         },
         .Struct_Field,
         .Union_Field,
@@ -2411,9 +2668,13 @@ fn typecheck_symbol(c: *Compiler, symbol: *Symbol) void {
 const REJECT_VOID_TYPE: u8 = 0x1;
 const DO_SHALLOW_TYPECHECK: u8 = 0x2;
 
-fn typecheck_type(c: *Compiler, _type: *Type) void {
-    _ = typecheck_type_aux(c, _type, REJECT_VOID_TYPE | DO_SHALLOW_TYPECHECK);
-    _ = typecheck_type_aux(c, _type, REJECT_VOID_TYPE);
+inline fn typecheck_type(c: *Compiler, _type: *Type) void {
+    typecheck_type_flags(c, _type, REJECT_VOID_TYPE);
+}
+
+fn typecheck_type_flags(c: *Compiler, _type: *Type, flags: u8) void {
+    _ = typecheck_type_aux(c, _type, flags | DO_SHALLOW_TYPECHECK);
+    _ = typecheck_type_aux(c, _type, flags & ~DO_SHALLOW_TYPECHECK);
 }
 
 fn typecheck_type_aux(c: *Compiler, _type: *Type, flags: u8) TypecheckingStage {
@@ -2469,7 +2730,16 @@ fn typecheck_type_aux(c: *Compiler, _type: *Type, flags: u8) TypecheckingStage {
 
             _type.size = size;
         },
-        .Enum => {
+        .Enum => |_enum| {
+            var enum_value: u64 = 0;
+
+            var it = _enum.fields.iterator();
+            while (it.next()) |field_ptr| {
+                var field = &field_ptr.*.payload.Enum_Field;
+                field.value = enum_value;
+                enum_value += 1;
+            }
+
             _type.size = 8;
         },
         .Function => |function| {
@@ -3069,15 +3339,15 @@ fn typecheck_expr_allow_void(c: *Compiler, type_hint: ?*Type, expr: *Expr) *Type
 
             var _type = field._type.extract_ptr();
             var subexpr = Expr{
-                .payload = .{ .Enum_Field = field.id.text },
+                .payload = .{ .Enum_Field = field.id },
                 ._type = undefined,
                 .line_info = field.id.line_info,
             };
             _ = typecheck_expr_allow_void(c, _type, &subexpr);
-
+            expr.payload = subexpr.payload;
             expr._type = _type;
         },
-        .Enum_Field => |text| {
+        .Enum_Field => |id| {
             if (type_hint == null) {
                 print_error(c, expr.line_info, "can't infere the type of enumerator.", .{});
                 std.os.exit(1);
@@ -3087,16 +3357,16 @@ fn typecheck_expr_allow_void(c: *Compiler, type_hint: ?*Type, expr: *Expr) *Type
             switch (hint.payload) {
                 .Enum => |_enum| {
                     var key = SymbolKey{
-                        .text = text,
+                        .text = id.text,
                         .scope = _enum.scope,
                     };
                     var found_symbol = c.symbols.get(key);
 
-                    if (found_symbol != null) {
-                        // TODO: store pointer to a enum field symbol in 'Enum_Field'.
+                    if (found_symbol) |symbol| {
+                        expr.payload = .{ .Symbol = symbol };
                         expr._type = hint;
                     } else {
-                        print_error(c, expr.line_info, "enumerator '{s}' is not defined.", .{text});
+                        print_error(c, expr.line_info, "enumerator '{s}' is not defined.", .{id.text});
                         std.os.exit(1);
                     }
                 },
@@ -3166,6 +3436,974 @@ fn typecheck_expr_allow_void(c: *Compiler, type_hint: ?*Type, expr: *Expr) *Type
     return expr._type;
 }
 
+fn generate_ir_instr(c: *Compiler, instr: IrInstr) void {
+    c.ir_instrs.append(instr) catch {
+        std.os.exit(1);
+    };
+}
+
+fn generate_ir(c: *Compiler) void {
+    {
+        var dst = c.grab_global();
+        generate_ir_instr(c, .{ .Instr = .{
+            .Call = .{
+                .dst = .{ .Tmp = dst },
+                .src = .{ .Label = c.main_function.payload.Function.label },
+            },
+        } });
+        generate_ir_instr(c, .{ .Instr = .Exit });
+    }
+
+    var it = c.globals.iterator();
+    while (it.next()) |symbol| {
+        generate_ir_symbol(c, symbol.*);
+    }
+}
+
+fn generate_ir_symbol(c: *Compiler, symbol: *Symbol) void {
+    switch (symbol.payload) {
+        .Variable => |*variable| {
+            var tmp = c.grab_global();
+            variable.tmp = tmp;
+
+            if (variable.expr) |expr| {
+                generate_ir_expr(c, expr, tmp);
+            }
+        },
+        .Function => |function| {
+            {
+                // Account for ip, rbp and return address.
+                var param_tmp = IrTmp{
+                    .payload = .{ .Local = -24 },
+                    .tag = .Local,
+                };
+                var it = function._type.payload.Function.params.iterator();
+                while (it.next()) |param_ptr| {
+                    var param = &param_ptr.*.payload.Parameter;
+                    param_tmp.payload.Local -= 8;
+                    param.tmp = param_tmp;
+                }
+            }
+
+            var function_end_label = c.grab_label();
+            var index = c.ir_instrs.items.len;
+            generate_ir_instr(c, undefined);
+
+            {
+                var ctx = IrStmtContext{
+                    .loop_cond_label = undefined,
+                    .loop_end_label = undefined,
+                    .function_end_label = function_end_label,
+                };
+                var it = function.block.iterator();
+                while (it.next()) |stmt| {
+                    generate_ir_stmt(c, &ctx, stmt);
+                }
+            }
+
+            {
+                var stack_space_used: u32 = @intCast(c.biggest_local_so_far.payload.Local);
+                c.ir_instrs.items[index] = .{ .Meta = .{
+                    .GFB = .{
+                        .stack_space_used = stack_space_used,
+                        .label = function.label,
+                    },
+                } };
+
+                generate_ir_instr(c, .{ .Meta = .{
+                    .GFE = .{
+                        .stack_space_used = stack_space_used,
+                        .label = function_end_label,
+                    },
+                } });
+            }
+
+            c.next_local.payload.Local = 0;
+            c.biggest_local_so_far.payload.Local = 0;
+        },
+        .Type => {},
+        .Parameter,
+        .Definition,
+        .Struct_Field,
+        .Union_Field,
+        .Enum_Field,
+        => unreachable,
+    }
+}
+
+fn generate_ir_block(c: *Compiler, ctx: *const IrStmtContext, block: StmtBlock) void {
+    var old_next_local = c.next_local;
+
+    var it = block.stmts.iterator();
+    while (it.next()) |stmt| {
+        generate_ir_stmt(c, ctx, stmt);
+    }
+
+    if (block.scope != null) {
+        c.next_local = old_next_local;
+    }
+}
+
+fn generate_ir_stmt(c: *Compiler, ctx: *const IrStmtContext, stmt: *Stmt) void {
+    switch (stmt.payload) {
+        .Print => |expr| {
+            var tmp = c.grab_local();
+            generate_ir_expr(c, expr, tmp);
+            generate_ir_instr(c, .{ .Instr = .{
+                .Print = .{ .Tmp = tmp },
+            } });
+            c.return_local(tmp);
+        },
+        .Block => |block| {
+            generate_ir_block(c, ctx, block);
+        },
+        .If => |_if| {
+            var cond_tmp = c.grab_local();
+            generate_ir_expr(c, _if.cond, cond_tmp);
+
+            var is_if_true_there: u2 = @intFromBool(_if.if_true.stmts.count != 0);
+            var is_if_false_there: u2 = @intFromBool(_if.if_false.stmts.count != 0);
+            switch ((is_if_true_there << 1) | is_if_false_there) {
+                0b00 => {
+                    c.return_local(cond_tmp);
+                },
+                0b01 => {
+                    var end_label = c.grab_label();
+
+                    generate_ir_instr(c, .{ .Instr = .{
+                        .Jnz = .{
+                            .src = .{ .Tmp = cond_tmp },
+                            .label = end_label,
+                        },
+                    } });
+                    c.return_local(cond_tmp);
+                    generate_ir_block(c, ctx, _if.if_false);
+                    generate_ir_instr(c, .{ .Meta = .{
+                        .Label = end_label,
+                    } });
+                },
+                0b10 => {
+                    var end_label = c.grab_label();
+
+                    generate_ir_instr(c, .{ .Instr = .{
+                        .Jz = .{
+                            .src = .{ .Tmp = cond_tmp },
+                            .label = end_label,
+                        },
+                    } });
+                    c.return_local(cond_tmp);
+                    generate_ir_block(c, ctx, _if.if_true);
+                    generate_ir_instr(c, .{ .Meta = .{
+                        .Label = end_label,
+                    } });
+                },
+                0b11 => {
+                    var false_label = c.grab_label();
+                    var end_label = c.grab_label();
+
+                    generate_ir_instr(c, .{ .Instr = .{
+                        .Jz = .{
+                            .src = .{ .Tmp = cond_tmp },
+                            .label = false_label,
+                        },
+                    } });
+                    c.return_local(cond_tmp);
+                    generate_ir_block(c, ctx, _if.if_true);
+                    generate_ir_instr(c, .{ .Instr = .{
+                        .Jmp = end_label,
+                    } });
+                    generate_ir_instr(c, .{ .Meta = .{
+                        .Label = false_label,
+                    } });
+                    generate_ir_block(c, ctx, _if.if_false);
+                    generate_ir_instr(c, .{ .Meta = .{
+                        .Label = end_label,
+                    } });
+                },
+            }
+        },
+        .While => |_while| {
+            var block_label = c.grab_label();
+            var cond_label = c.grab_label();
+            var end_label = c.grab_label();
+
+            if (!_while.is_do_while) {
+                generate_ir_instr(c, .{ .Instr = .{
+                    .Jmp = cond_label,
+                } });
+            }
+
+            generate_ir_instr(c, .{ .Meta = .{
+                .Label = block_label,
+            } });
+
+            var new_ctx = IrStmtContext{
+                .loop_cond_label = cond_label,
+                .loop_end_label = end_label,
+                .function_end_label = ctx.function_end_label,
+            };
+            generate_ir_block(c, &new_ctx, _while.block);
+
+            var cond_tmp = c.grab_local();
+            generate_ir_instr(c, .{ .Meta = .{
+                .Label = cond_label,
+            } });
+            generate_ir_expr(c, _while.cond, cond_tmp);
+            generate_ir_instr(c, .{ .Instr = .{
+                .Jnz = .{
+                    .src = .{ .Tmp = cond_tmp },
+                    .label = block_label,
+                },
+            } });
+            c.return_local(cond_tmp);
+        },
+        .Break => {
+            generate_ir_instr(c, .{ .Instr = .{
+                .Jmp = ctx.loop_end_label,
+            } });
+        },
+        .Continue => {
+            generate_ir_instr(c, .{ .Instr = .{
+                .Jmp = ctx.loop_cond_label,
+            } });
+        },
+        .Switch => |_switch| {
+            var cond_tmp = c.grab_local();
+            generate_ir_expr(c, _switch.cond, cond_tmp);
+
+            var first_case_label = c.grab_buncha_labels(@intCast(_switch.cases.count));
+            var end_label = c.grab_label();
+
+            {
+                var label = first_case_label;
+                var it = _switch.cases.iterator();
+                while (it.next()) |case| {
+                    var case_tmp = c.grab_local();
+                    generate_ir_expr(c, case.value, case_tmp);
+                    generate_ir_instr(c, .{ .Instr = .{
+                        .Je = .{
+                            .src0 = .{ .Tmp = cond_tmp },
+                            .src1 = .{ .Tmp = case_tmp },
+                            .label = label,
+                        },
+                    } });
+                    label += 1;
+                    c.return_local(case_tmp);
+                }
+            }
+
+            generate_ir_instr(c, .{ .Instr = .{
+                .Jmp = end_label,
+            } });
+
+            {
+                var label = first_case_label;
+                var it = _switch.cases.iterator();
+                while (it.next()) |case| {
+                    generate_ir_instr(c, .{ .Meta = .{
+                        .Label = label,
+                    } });
+                    label += 1;
+                    generate_ir_block(c, ctx, case.block);
+
+                    if (!case.should_fallthrough) {
+                        generate_ir_instr(c, .{ .Instr = .{
+                            .Jmp = end_label,
+                        } });
+                    }
+                }
+            }
+
+            generate_ir_instr(c, .{ .Meta = .{
+                .Label = end_label,
+            } });
+        },
+        .Return => {
+            generate_ir_instr(c, .{ .Instr = .{
+                .Ret1 = ctx.function_end_label,
+            } });
+        },
+        .Return_Expr => |expr| {
+            var tmp = c.grab_local();
+            generate_ir_expr(c, expr, tmp);
+            generate_ir_instr(c, .{ .Instr = .{
+                .Ret2 = .{
+                    .src = .{ .Tmp = tmp },
+                    .label = ctx.function_end_label,
+                },
+            } });
+            c.return_local(tmp);
+        },
+        .Symbol => |symbol| {
+            switch (symbol.payload) {
+                .Variable => |*variable| {
+                    var tmp = c.grab_local();
+                    variable.tmp = tmp;
+
+                    if (variable.expr) |expr| {
+                        generate_ir_expr(c, expr, tmp);
+                    }
+                },
+                .Type => {},
+                .Function,
+                .Parameter,
+                .Definition,
+                .Struct_Field,
+                .Union_Field,
+                .Enum_Field,
+                => unreachable,
+            }
+        },
+        .Assign => |assign| {
+            var tmp = generate_ir_lvalue(assign.lhs);
+            generate_ir_expr(c, assign.rhs, tmp);
+        },
+        .Expr => |expr| {
+            var tmp = c.grab_local();
+            generate_ir_expr(c, expr, tmp);
+            c.return_local(tmp);
+        },
+    }
+}
+
+fn generate_ir_expr(c: *Compiler, expr: *Expr, dst_tmp: IrTmp) void {
+    switch (expr.payload) {
+        .Binary_Op => |op| {
+            var rhs_tmp = c.grab_local();
+            generate_ir_expr(c, op.rhs, rhs_tmp);
+            generate_ir_expr(c, op.lhs, dst_tmp);
+
+            var tag: IrInstrBinaryOpTag = switch (op.tag) {
+                .Or => .Or,
+                .And => .And,
+                .Eq => .Eq,
+                .Neq => .Neq,
+                .Lt => .Lt,
+                .Leq => .Leq,
+                .Gt => .Gt,
+                .Geq => .Geq,
+                .Add => .Add,
+                .Sub => .Sub,
+                .Mul => .Mul,
+                .Div => .Div,
+                .Mod => .Mod,
+            };
+
+            generate_ir_instr(c, .{ .Binary_Op = .{
+                .tag = tag,
+                .dst = .{ .Tmp = dst_tmp },
+                .src = .{ .Tmp = rhs_tmp },
+            } });
+            c.return_local(rhs_tmp);
+        },
+        .Unary_Op => |op| {
+            switch (op.tag) {
+                .Not => {
+                    generate_ir_expr(c, op.subexpr, dst_tmp);
+                    generate_ir_instr(c, .{ .Unary_Op = .{
+                        .tag = .Not,
+                        .dst = .{ .Tmp = dst_tmp },
+                    } });
+                },
+                .Neg => {
+                    generate_ir_expr(c, op.subexpr, dst_tmp);
+                    generate_ir_instr(c, .{ .Unary_Op = .{
+                        .tag = .Neg,
+                        .dst = .{ .Tmp = dst_tmp },
+                    } });
+                },
+                .Ref => {
+                    unreachable;
+                },
+                .Deref => {
+                    unreachable;
+                },
+            }
+        },
+        .If => |_if| {
+            var false_label = c.grab_label();
+            var end_label = c.grab_label();
+
+            var cond_tmp = c.grab_local();
+            generate_ir_expr(c, _if.cond, cond_tmp);
+            generate_ir_instr(c, .{ .Instr = .{
+                .Jz = .{
+                    .src = .{ .Tmp = cond_tmp },
+                    .label = false_label,
+                },
+            } });
+            c.return_local(cond_tmp);
+            generate_ir_expr(c, _if.if_true, dst_tmp);
+            generate_ir_instr(c, .{ .Instr = .{
+                .Jmp = end_label,
+            } });
+            generate_ir_instr(c, .{ .Meta = .{
+                .Label = false_label,
+            } });
+            generate_ir_expr(c, _if.if_false, dst_tmp);
+            generate_ir_instr(c, .{ .Meta = .{
+                .Label = end_label,
+            } });
+        },
+        .Call => |call| {
+            if (call.lhs.payload == .Symbol and call.lhs.payload.Symbol.payload == .Function) {
+                var function = &call.lhs.payload.Symbol.payload.Function;
+
+                var it = call.args.reverse_iterator();
+                while (it.prev()) |arg| {
+                    var arg_tmp = c.grab_local();
+                    generate_ir_expr(c, arg, arg_tmp);
+                    generate_ir_instr(c, .{ .Instr = .{
+                        .Push = .{ .Tmp = arg_tmp },
+                    } });
+                    c.return_local(arg_tmp);
+                }
+
+                generate_ir_instr(c, .{ .Instr = .{
+                    .Call = .{
+                        .dst = .{ .Tmp = dst_tmp },
+                        .src = .{ .Label = function.label },
+                    },
+                } });
+                generate_ir_instr(c, .{ .Instr = .{
+                    .Pop = @intCast(call.args.count * 8),
+                } });
+            } else {
+                var lhs_tmp = c.grab_local();
+                generate_ir_expr(c, call.lhs, lhs_tmp);
+
+                var it = call.args.iterator();
+                while (it.next()) |arg| {
+                    var arg_tmp = c.grab_local();
+                    generate_ir_expr(c, arg, arg_tmp);
+                    generate_ir_instr(c, .{ .Instr = .{
+                        .Push = .{ .Tmp = arg_tmp },
+                    } });
+                    c.return_local(arg_tmp);
+                }
+
+                generate_ir_instr(c, .{ .Instr = .{
+                    .Call = .{
+                        .dst = .{ .Tmp = dst_tmp },
+                        .src = .{ .Tmp = lhs_tmp },
+                    },
+                } });
+                generate_ir_instr(c, .{ .Instr = .{
+                    .Pop = @intCast(call.args.count * 8),
+                } });
+                c.return_local(lhs_tmp);
+            }
+        },
+        .Index,
+        .Field,
+        .Initializer,
+        .Expr_List,
+        .Designator,
+        .Cast1,
+        .Cast2,
+        => unreachable,
+        .Bool => |value| {
+            generate_ir_instr(c, .{ .Instr = .{
+                .Mov = .{
+                    .dst = .{ .Tmp = dst_tmp },
+                    .src = .{ .Imm = @intFromBool(value) },
+                },
+            } });
+        },
+        .Int64 => |value| {
+            generate_ir_instr(c, .{ .Instr = .{
+                .Mov = .{
+                    .dst = .{ .Tmp = dst_tmp },
+                    .src = .{ .Imm = value },
+                },
+            } });
+        },
+        .Null => {
+            generate_ir_instr(c, .{ .Instr = .{
+                .Mov = .{
+                    .dst = .{ .Tmp = dst_tmp },
+                    .src = .{ .Imm = 0 },
+                },
+            } });
+        },
+        .Symbol => |symbol| {
+            switch (symbol.payload) {
+                .Variable => |variable| {
+                    generate_ir_instr(c, .{ .Instr = .{
+                        .Mov = .{
+                            .dst = .{ .Tmp = dst_tmp },
+                            .src = .{ .Tmp = variable.tmp },
+                        },
+                    } });
+                },
+                .Parameter => |parameter| {
+                    generate_ir_instr(c, .{ .Instr = .{
+                        .Mov = .{
+                            .dst = .{ .Tmp = dst_tmp },
+                            .src = .{ .Tmp = parameter.tmp },
+                        },
+                    } });
+                },
+                .Function => |function| {
+                    generate_ir_instr(c, .{ .Instr = .{
+                        .Mov = .{
+                            .dst = .{ .Tmp = dst_tmp },
+                            .src = .{ .Label = function.label },
+                        },
+                    } });
+                },
+                .Struct_Field,
+                .Union_Field,
+                => unreachable,
+                .Enum_Field => |field| {
+                    var value = field.value;
+
+                    generate_ir_instr(c, .{ .Instr = .{
+                        .Mov = .{
+                            .dst = .{ .Tmp = dst_tmp },
+                            .src = .{ .Imm = @intCast(value) },
+                        },
+                    } });
+                },
+                .Type,
+                .Definition,
+                => unreachable,
+            }
+        },
+        .Enum_Field_From_Type,
+        .Enum_Field,
+        .Type,
+        .Identifier,
+        => unreachable,
+    }
+}
+
+fn generate_ir_lvalue(expr: *Expr) IrTmp {
+    switch (expr.payload) {
+        .Symbol => |symbol| {
+            switch (symbol.payload) {
+                .Variable => |variable| {
+                    return variable.tmp;
+                },
+                .Parameter => |parameter| {
+                    return parameter.tmp;
+                },
+                else => unreachable,
+            }
+        },
+        else => unreachable,
+    }
+}
+
+fn debug_print_ir_tmp(tmp: IrTmp) void {
+    switch (tmp.tag) {
+        .Global => std.debug.print("$+{}", .{tmp.payload.Global}),
+        .Local => std.debug.print("%{:0>1}", .{tmp.payload.Local}),
+    }
+}
+
+fn debug_print_ir_address(address: IrAddress) void {
+    std.debug.print("[", .{});
+
+    var should_print_delim = false;
+
+    if (address.choose & 0x1 == 0x1) {
+        debug_print_ir_tmp(address.base);
+        should_print_delim = true;
+    }
+
+    if (address.choose & 0x2 == 0x2) {
+        if (should_print_delim) {
+            std.debug.print(" + ", .{});
+        }
+        std.debug.print("{}", .{address.disp});
+        should_print_delim = true;
+    }
+
+    std.debug.print("]", .{});
+}
+
+fn debug_print_ir_lvalue(lvalue: IrLvalue) void {
+    switch (lvalue) {
+        .Tmp => |tmp| debug_print_ir_tmp(tmp),
+        .Address => |address| debug_print_ir_address(address),
+    }
+}
+
+fn debug_print_ir_operand(operand: IrOperand) void {
+    switch (operand) {
+        .Tmp => |tmp| debug_print_ir_tmp(tmp),
+        .Address => |address| debug_print_ir_address(address),
+        .Label => |label| std.debug.print("L{}", .{label}),
+        .Imm => |imm| std.debug.print("{}", .{imm}),
+    }
+}
+
+fn debug_print_ir_instr(ir_instr: IrInstr) void {
+    switch (ir_instr) {
+        .Binary_Op => |op| {
+            var text: []const u8 = switch (op.tag) {
+                .Or => "    or",
+                .And => "    and",
+                .Eq => "    eq ",
+                .Neq => "    neq",
+                .Lt => "    lt ",
+                .Leq => "    leq",
+                .Gt => "    gt ",
+                .Geq => "    geq",
+                .Add => "    add",
+                .Sub => "    sub",
+                .Mul => "    mul",
+                .Div => "    div",
+                .Mod => "    mod",
+            };
+
+            std.debug.print("{s}    ", .{text});
+            debug_print_ir_lvalue(op.dst);
+            std.debug.print(", ", .{});
+            debug_print_ir_operand(op.src);
+        },
+        .Unary_Op => |op| {
+            var text: []const u8 = switch (op.tag) {
+                .Not => "    not",
+                .Neg => "    neg",
+            };
+
+            std.debug.print("{s}    ", .{text});
+            debug_print_ir_lvalue(op.dst);
+        },
+        .Instr => |instr| {
+            switch (instr) {
+                .Print => |src| {
+                    std.debug.print("    print  ", .{});
+                    debug_print_ir_operand(src);
+                },
+                .Mov => |mov| {
+                    std.debug.print("    mov    ", .{});
+                    debug_print_ir_lvalue(mov.dst);
+                    std.debug.print(", ", .{});
+                    debug_print_ir_operand(mov.src);
+                },
+                .Jmp => |label| {
+                    std.debug.print("    jmp    L{}", .{label});
+                },
+                .Jnz => |jnz| {
+                    std.debug.print("    jnz    ", .{});
+                    debug_print_ir_operand(jnz.src);
+                    std.debug.print(", L{}", .{jnz.label});
+                },
+                .Jz => |jz| {
+                    std.debug.print("    jz     ", .{});
+                    debug_print_ir_operand(jz.src);
+                    std.debug.print(", L{}", .{jz.label});
+                },
+                .Je => |je| {
+                    std.debug.print("    je     ", .{});
+                    debug_print_ir_operand(je.src0);
+                    std.debug.print(", ", .{});
+                    debug_print_ir_operand(je.src1);
+                    std.debug.print(", L{}", .{je.label});
+                },
+                .Push => |src| {
+                    std.debug.print("    push   ", .{});
+                    debug_print_ir_operand(src);
+                },
+                .Pop => |count| {
+                    std.debug.print("    pop    {}", .{count});
+                },
+                .Call => |call| {
+                    std.debug.print("    call   ", .{});
+                    debug_print_ir_lvalue(call.dst);
+                    std.debug.print(", ", .{});
+                    debug_print_ir_operand(call.src);
+                },
+                .Ret1 => |label| {
+                    std.debug.print("    ret    L{}", .{label});
+                },
+                .Ret2 => |ret| {
+                    std.debug.print("    ret    ", .{});
+                    debug_print_ir_lvalue(ret.src);
+                    std.debug.print(", L{}", .{ret.label});
+                },
+                .Exit => {
+                    std.debug.print("    exit", .{});
+                },
+            }
+        },
+        .Meta => |meta| {
+            switch (meta) {
+                .GFB => |gfb| {
+                    std.debug.print("GFB{}: {}b", .{ gfb.label, gfb.stack_space_used });
+                },
+                .GFE => |gfe| {
+                    std.debug.print("GFE{}: {}b", .{ gfe.label, gfe.stack_space_used });
+                    std.debug.print("\n", .{});
+                },
+                .Label => |label| {
+                    std.debug.print("L{}:", .{label});
+                },
+            }
+        },
+    }
+
+    std.debug.print("\n", .{});
+}
+
+fn debug_print_ir(c: *Compiler) void {
+    for (c.ir_instrs.items) |ir_instr| {
+        debug_print_ir_instr(ir_instr);
+    }
+}
+
+fn ir_grab_pointer_from_tmp(c: *Compiler, tmp: IrTmp) u64 {
+    switch (tmp.tag) {
+        .Global => return tmp.payload.Global,
+        .Local => return if (tmp.payload.Local < 0)
+            c.rbp - @as(u64, @intCast(-tmp.payload.Local))
+        else
+            c.rbp + @as(u64, @intCast(tmp.payload.Local)),
+    }
+}
+
+fn ir_grab_pointer_from_lvalue(c: *Compiler, lvalue: IrLvalue) u64 {
+    switch (lvalue) {
+        .Tmp => |tmp| {
+            return ir_grab_pointer_from_tmp(c, tmp);
+        },
+        .Address => |address| {
+            var offset: i64 = 0;
+
+            if (address.choose & 0x1 == 0x1) {
+                var base: i64 = @bitCast(ir_grab_value_from_operand(c, .{ .Tmp = address.base }));
+                offset += base;
+            }
+
+            if (address.choose & 0x2 == 0x2) {
+                offset += address.disp;
+            }
+
+            return @bitCast(offset);
+        },
+    }
+}
+
+fn ir_grab_value_from_operand(c: *Compiler, operand: IrOperand) u64 {
+    switch (operand) {
+        .Tmp => |tmp| {
+            var pointer = ir_grab_pointer_from_lvalue(c, .{ .Tmp = tmp });
+            return ir_read_u64_from_stack(c, pointer);
+        },
+        .Address => |address| {
+            var pointer = ir_grab_pointer_from_lvalue(c, .{ .Address = address });
+            return ir_read_u64_from_stack(c, pointer);
+        },
+        .Label => |label| return label,
+        .Imm => |imm| return @bitCast(imm),
+    }
+}
+
+fn ir_read_u64_from_stack(c: *Compiler, pointer: u64) u64 {
+    if (pointer % 8 != 0 or pointer + 8 > c.rsp) {
+        std.os.exit(1);
+    }
+
+    return @as(*u64, @alignCast(@ptrCast(&c.stack[pointer]))).*;
+}
+
+fn ir_read_u64_from_stack_no_check(c: *Compiler, pointer: u64) u64 {
+    return @as(*u64, @alignCast(@ptrCast(&c.stack[pointer]))).*;
+}
+
+fn ir_write_u64_to_stack(c: *Compiler, pointer: u64, value: u64) void {
+    if (pointer % 8 != 0 or pointer + 8 > c.rsp) {
+        std.os.exit(1);
+    }
+
+    @as(*u64, @alignCast(@ptrCast(&c.stack[pointer]))).* = value;
+}
+
+fn ir_write_u64_to_stack_no_check(c: *Compiler, pointer: u64, value: u64) void {
+    @as(*u64, @alignCast(@ptrCast(&c.stack[pointer]))).* = value;
+}
+
+fn ir_stack_push(c: *Compiler, value: u64) void {
+    @as(*u64, @alignCast(@ptrCast(&c.stack[c.rsp]))).* = value;
+    c.rsp += 8;
+}
+
+fn ir_stack_pop(c: *Compiler) u64 {
+    c.rsp -= 8;
+    return @as(*u64, @alignCast(@ptrCast(&c.stack[c.rsp]))).*;
+}
+
+fn interpret(c: *Compiler) void {
+    c.stack = gpa.alloc(u8, 2 * 1024 * 1024) catch {
+        std.os.exit(1);
+    };
+    defer gpa.free(c.stack);
+
+    var labels = gpa.alloc(u64, c.next_label) catch {
+        std.os.exit(1);
+    };
+    defer gpa.free(labels);
+
+    for (c.ir_instrs.items, 0..) |ir_instr, i| {
+        switch (ir_instr) {
+            .Meta => |meta| {
+                switch (meta) {
+                    .GFB => |gfb| {
+                        labels[gfb.label] = i;
+                    },
+                    .GFE => |gfe| {
+                        labels[gfe.label] = i;
+                    },
+                    .Label => |label| {
+                        labels[label] = i;
+                    },
+                }
+            },
+            else => {},
+        }
+    }
+
+    c.rsp = c.next_global.payload.Global;
+    c.rbp = c.rsp;
+
+    var return_src: u64 = 0xFFFF_FFFF_FFFF_FFFF;
+    var ip: u64 = 0;
+    while (ip < c.ir_instrs.items.len) {
+        switch (c.ir_instrs.items[ip]) {
+            .Binary_Op => |op| {
+                var dst = ir_grab_pointer_from_lvalue(c, op.dst);
+                var lhs = ir_read_u64_from_stack(c, dst);
+                var rhs = ir_grab_value_from_operand(c, op.src);
+
+                switch (op.tag) {
+                    .Or => lhs = @intFromBool((lhs != 0) or (rhs != 0)),
+                    .And => lhs = @intFromBool((lhs != 0) and (rhs != 0)),
+                    .Eq => lhs = @intFromBool(lhs == rhs),
+                    .Neq => lhs = @intFromBool(lhs != rhs),
+                    .Lt => lhs = @intFromBool(@as(i64, @intCast(lhs)) < @as(i64, @intCast(rhs))),
+                    .Leq => lhs = @intFromBool(@as(i64, @intCast(lhs)) <= @as(i64, @intCast(rhs))),
+                    .Gt => lhs = @intFromBool(@as(i64, @intCast(lhs)) > @as(i64, @intCast(rhs))),
+                    .Geq => lhs = @intFromBool(@as(i64, @intCast(lhs)) >= @as(i64, @intCast(rhs))),
+                    .Add => lhs = @bitCast(@as(i64, @intCast(lhs)) + @as(i64, @intCast(rhs))),
+                    .Sub => lhs = @bitCast(@as(i64, @intCast(lhs)) - @as(i64, @intCast(rhs))),
+                    .Mul => lhs = @bitCast(@as(i64, @intCast(lhs)) * @as(i64, @intCast(rhs))),
+                    .Div => lhs = @bitCast(@divTrunc(@as(i64, @intCast(lhs)), @as(i64, @intCast(rhs)))),
+                    .Mod => lhs = @bitCast(@rem(@as(i64, @intCast(lhs)), @as(i64, @intCast(rhs)))),
+                }
+
+                ir_write_u64_to_stack(c, dst, lhs);
+            },
+            .Unary_Op => |op| {
+                var dst = ir_grab_pointer_from_lvalue(c, op.dst);
+                var src = ir_read_u64_from_stack(c, dst);
+
+                switch (op.tag) {
+                    .Not => src = @intFromBool(src == 0),
+                    .Neg => src = @bitCast(-@as(i64, @bitCast(src))),
+                }
+
+                ir_write_u64_to_stack(c, dst, src);
+            },
+            .Instr => |instr| {
+                switch (instr) {
+                    .Print => |tmp| {
+                        var src: i64 = @bitCast(ir_grab_value_from_operand(c, tmp));
+                        std.debug.print("{}\n", .{src});
+                    },
+                    .Mov => |mov| {
+                        var dst = ir_grab_pointer_from_lvalue(c, mov.dst);
+                        var src = ir_grab_value_from_operand(c, mov.src);
+
+                        ir_write_u64_to_stack(c, dst, src);
+                    },
+                    .Jmp => |label| {
+                        ip = labels[label];
+                        continue;
+                    },
+                    .Jnz => |jnz| {
+                        var cond = ir_grab_value_from_operand(c, jnz.src);
+                        if (cond != 0) {
+                            ip = labels[jnz.label];
+                            continue;
+                        }
+                    },
+                    .Jz => |jz| {
+                        var cond = ir_grab_value_from_operand(c, jz.src);
+                        if (cond == 0) {
+                            ip = labels[jz.label];
+                            continue;
+                        }
+                    },
+                    .Je => |je| {
+                        var src0 = ir_grab_value_from_operand(c, je.src0);
+                        var src1 = ir_grab_value_from_operand(c, je.src1);
+                        if (src0 == src1) {
+                            ip = labels[je.label];
+                            continue;
+                        }
+                    },
+                    .Push => |src| {
+                        var value = ir_grab_value_from_operand(c, src);
+                        ir_stack_push(c, value);
+                    },
+                    .Pop => |count| {
+                        c.rsp -= count;
+                    },
+                    .Call => |call| {
+                        var dst = ir_grab_pointer_from_lvalue(c, call.dst);
+                        ir_stack_push(c, ip);
+                        ir_stack_push(c, c.rbp);
+                        ir_stack_push(c, dst);
+
+                        var label = ir_grab_value_from_operand(c, call.src);
+                        ip = labels[label];
+                        continue;
+                    },
+                    .Ret1 => |label| {
+                        ip = labels[label];
+                        continue;
+                    },
+                    .Ret2 => |ret| {
+                        return_src = ir_grab_pointer_from_lvalue(c, ret.src);
+                        ip = labels[ret.label];
+                        continue;
+                    },
+                    .Exit => {
+                        break;
+                    },
+                }
+            },
+            .Meta => |meta| {
+                switch (meta) {
+                    .GFB => |gfb| {
+                        c.rbp = c.rsp;
+                        c.rsp += gfb.stack_space_used;
+                        return_src = 0xFFFF_FFFF_FFFF_FFFF;
+                    },
+                    .GFE => |gfe| {
+                        c.rsp -= gfe.stack_space_used;
+
+                        var dst = ir_stack_pop(c);
+                        c.rbp = ir_stack_pop(c);
+                        ip = ir_stack_pop(c);
+
+                        if (return_src != 0xFFFF_FFFF_FFFF_FFFF) {
+                            var value = ir_read_u64_from_stack_no_check(c, return_src);
+                            ir_write_u64_to_stack(c, dst, value);
+                        }
+                    },
+                    .Label => {},
+                }
+            },
+        }
+
+        ip += 1;
+    }
+}
+
 pub fn compile() void {
     var args = std.process.args();
     var filepath: [:0]const u8 = "examples/debug";
@@ -3190,14 +4428,21 @@ pub fn compile() void {
         .symbols = SymbolTable.init(gpa),
         .global_scope = undefined,
         .current_scope = undefined,
+        .main_function = undefined,
+        .ir_instrs = IrInstrList.init(gpa),
+        .stack = &[0]u8{},
     };
 
     parse_top_level(&compiler);
     resolve_identifiers(&compiler);
     typecheck(&compiler);
+    generate_ir(&compiler);
+    debug_print_ir(&compiler);
+    interpret(&compiler);
 
     gpa.free(source_code);
     compiler.symbols.deinit();
     ast_arena.deinit();
+    compiler.ir_instrs.deinit();
     std.debug.assert(general_purpose_allocator.deinit() == .ok);
 }
