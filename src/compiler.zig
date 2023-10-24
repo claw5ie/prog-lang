@@ -3641,6 +3641,9 @@ fn generate_ir_block(c: *Compiler, ctx: *const IrStmtContext, block: StmtBlock) 
 }
 
 fn generate_ir_stmt(c: *Compiler, ctx: *const IrStmtContext, stmt: *Stmt) void {
+    var old_next_local = c.next_local;
+    var should_clean_locals = true;
+
     switch (stmt.payload) {
         .Print => |expr| {
             var tmp = c.grab_local();
@@ -3831,21 +3834,20 @@ fn generate_ir_stmt(c: *Compiler, ctx: *const IrStmtContext, stmt: *Stmt) void {
             c.return_local(tmp);
         },
         .Symbol => |symbol| {
+            should_clean_locals = false;
             generate_ir_local_symbol(c, symbol);
         },
         .Assign => |assign| {
-            var old_next_local = c.next_local;
-
             var lhs_tmp = generate_ir_lvalue(c, assign.lhs);
             generate_ir_expr_lvalue(c, assign.rhs, lhs_tmp);
-
-            c.next_local = old_next_local;
         },
         .Expr => |expr| {
-            var tmp = c.grab_local();
-            generate_ir_expr(c, expr, tmp);
-            c.return_local(tmp);
+            _ = generate_ir_expr(c, expr, c.grab_local());
         },
+    }
+
+    if (should_clean_locals) {
+        c.next_local = old_next_local;
     }
 }
 
@@ -3854,6 +3856,8 @@ inline fn generate_ir_expr(c: *Compiler, expr: *Expr, tmp: IrTmp) void {
 }
 
 fn generate_ir_expr_lvalue(c: *Compiler, expr: *Expr, dst_tmp: IrLvalue) void {
+    var old_next_local = c.next_local;
+
     switch (expr.payload) {
         .Binary_Op => |op| {
             var rhs_tmp = c.grab_local();
@@ -3900,7 +3904,6 @@ fn generate_ir_expr_lvalue(c: *Compiler, expr: *Expr, dst_tmp: IrLvalue) void {
                     } });
                 },
                 .Ref => {
-                    var old_next_local = c.next_local;
                     var addr_tmp = generate_ir_lvalue(c, op.subexpr);
                     generate_ir_instr(c, .{ .Instr = .{
                         .Mov = .{
@@ -3908,7 +3911,6 @@ fn generate_ir_expr_lvalue(c: *Compiler, expr: *Expr, dst_tmp: IrLvalue) void {
                             .src = .{ .Addr = addr_tmp },
                         },
                     } });
-                    c.next_local = old_next_local;
                 },
                 .Deref => {
                     generate_ir_expr_lvalue(c, op.subexpr, dst_tmp);
@@ -3965,64 +3967,49 @@ fn generate_ir_expr_lvalue(c: *Compiler, expr: *Expr, dst_tmp: IrLvalue) void {
             } });
         },
         .Call => |call| {
-            if (call.lhs.payload == .Symbol and call.lhs.payload.Symbol.payload == .Function) {
-                var symbol = call.lhs.payload.Symbol;
-                var function = &call.lhs.payload.Symbol.payload.Function;
-
-                var it = call.args.reverse_iterator();
-                while (it.prev()) |arg| {
-                    var arg_tmp = c.grab_local();
-                    generate_ir_expr(c, arg, arg_tmp);
-                    generate_ir_instr(c, .{ .Instr = .{
-                        .Push = arg_tmp.as_rvalue(),
-                    } });
-                    c.return_local(arg_tmp);
-                }
-
-                var bytes_to_pop: u64 = call.args.count * 8;
-
-                if (symbol.key.scope != c.global_scope) {
-                    generate_ir_instr(c, .{ .Instr = .{
-                        .Push_Frame_Pointer = c.function_depth - function.depth,
-                    } });
-                    bytes_to_pop += 8;
-                }
-
+            var it = call.args.reverse_iterator();
+            while (it.prev()) |arg| {
+                var arg_tmp = c.grab_local();
+                generate_ir_expr(c, arg, arg_tmp);
                 generate_ir_instr(c, .{ .Instr = .{
-                    .Call = .{
-                        .dst = dst_tmp,
-                        .src = .{ .Label = function.label },
-                    },
+                    .Push = arg_tmp.as_rvalue(),
                 } });
-                if (bytes_to_pop > 0) {
-                    generate_ir_instr(c, .{ .Instr = .{
-                        .Pop = bytes_to_pop,
-                    } });
+                c.return_local(arg_tmp);
+            }
+
+            var bytes_to_pop: u64 = call.args.count * 8;
+
+            var src_tmp: IrRvalue = src_tmp: {
+                if (call.lhs.payload == .Symbol and call.lhs.payload.Symbol.payload == .Function) {
+                    var symbol = call.lhs.payload.Symbol;
+                    var function = &symbol.payload.Function;
+
+                    if (symbol.key.scope != c.global_scope) {
+                        generate_ir_instr(c, .{ .Instr = .{
+                            .Push_Frame_Pointer = c.function_depth - function.depth,
+                        } });
+                        bytes_to_pop += 8;
+                    }
+
+                    break :src_tmp .{ .Label = function.label };
                 }
-            } else {
+
                 var lhs_tmp = c.grab_local();
                 generate_ir_expr(c, call.lhs, lhs_tmp);
 
-                var it = call.args.iterator();
-                while (it.next()) |arg| {
-                    var arg_tmp = c.grab_local();
-                    generate_ir_expr(c, arg, arg_tmp);
-                    generate_ir_instr(c, .{ .Instr = .{
-                        .Push = arg_tmp.as_rvalue(),
-                    } });
-                    c.return_local(arg_tmp);
-                }
+                break :src_tmp lhs_tmp.as_rvalue();
+            };
 
+            generate_ir_instr(c, .{ .Instr = .{
+                .Call = .{
+                    .dst = dst_tmp,
+                    .src = src_tmp,
+                },
+            } });
+            if (bytes_to_pop > 0) {
                 generate_ir_instr(c, .{ .Instr = .{
-                    .Call = .{
-                        .dst = dst_tmp,
-                        .src = lhs_tmp.as_rvalue(),
-                    },
+                    .Pop = bytes_to_pop,
                 } });
-                generate_ir_instr(c, .{ .Instr = .{
-                    .Pop = @intCast(call.args.count * 8),
-                } });
-                c.return_local(lhs_tmp);
             }
         },
         .Index,
@@ -4108,6 +4095,8 @@ fn generate_ir_expr_lvalue(c: *Compiler, expr: *Expr, dst_tmp: IrLvalue) void {
         .Identifier,
         => unreachable,
     }
+
+    c.next_local = old_next_local;
 }
 
 fn generate_ir_lvalue(c: *Compiler, expr: *Expr) IrLvalue {
