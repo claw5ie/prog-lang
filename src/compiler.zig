@@ -47,26 +47,31 @@ const Compiler = struct {
     line_info: LineInfo = .{},
 
     globals: SymbolList,
+    local_functions: SymbolList,
     ast_arena: ArenaAllocator,
     ast_arena_allocator: Allocator,
     symbols: SymbolTable,
     current_scope: *Scope,
     global_scope: *Scope,
     main_function: *Symbol,
+    function_depth: i32 = 0,
 
     ir_instrs: IrInstrList,
     next_global: IrTmp = .{
         .payload = .{ .Global = 0 },
         .tag = .Global,
+        .height = 0,
     },
     next_local: IrTmp = .{
         .payload = .{ .Local = 0 },
         .tag = .Local,
+        .height = 0,
     },
     next_label: IrLabel = 0,
     biggest_local_so_far: IrTmp = .{
         .payload = .{ .Local = 0 },
         .tag = .Local,
+        .height = 0,
     },
 
     stack: []u8,
@@ -795,6 +800,7 @@ const SymbolFunction = struct {
     _type: *Type,
     block: StmtList,
     label: IrLabel,
+    depth: i32,
 };
 
 const SymbolStructField = struct {
@@ -840,6 +846,7 @@ const SymbolPayload = union(SymbolTag) {
 const Symbol = struct {
     payload: SymbolPayload,
     key: SymbolKey,
+    depth: i32,
     line_info: LineInfo,
 };
 
@@ -895,6 +902,7 @@ const IrTmp = packed struct {
         Local: i31,
     },
     tag: IrTmpTag,
+    height: i32,
 };
 
 const IrLvalueTag = enum {
@@ -928,6 +936,7 @@ const IrMem = struct {
     base: IrTmp = .{
         .payload = .{ .Global = 0 },
         .tag = .Global,
+        .height = 0,
     },
     disp: i64 = 0,
 };
@@ -962,6 +971,7 @@ const IrInstrOpcode = enum {
     Jnz,
     Jz,
     Je,
+    Push_Frame_Pointer,
     Push,
     Pop,
     Call,
@@ -1013,6 +1023,7 @@ const IrInstr = union(IrInstrType) {
             src1: IrOperand,
             label: IrLabel,
         },
+        Push_Frame_Pointer: i32,
         Push: IrOperand,
         Pop: u64,
         Call: struct {
@@ -1153,6 +1164,7 @@ fn create_symbol(c: *Compiler, token: Token) *Symbol {
             .text = token.text,
             .scope = c.current_scope,
         },
+        .depth = c.function_depth,
         .line_info = token.line_info,
     };
     return symbol;
@@ -1393,6 +1405,8 @@ fn parse_symbol(c: *Compiler) *Symbol {
             c.advance();
 
             if (c.peek() == .Proc) {
+                c.function_depth += 1;
+
                 var _type = parse_type(c);
 
                 if (c.peek() == .Open_Curly) {
@@ -1414,18 +1428,17 @@ fn parse_symbol(c: *Compiler) *Symbol {
                         ._type = _type,
                         .block = block,
                         .label = c.grab_label(),
+                        .depth = c.function_depth,
                     } };
-
                     c.current_scope = previous_scope;
-
-                    return symbol;
                 } else {
                     c.expect(.Semicolon);
-
                     symbol.payload = .{ .Type = _type };
-
-                    return symbol;
                 }
+
+                c.function_depth -= 1;
+
+                return symbol;
             } else {
                 var expr = ast_create(c, Expr);
                 expr.* = parse_expr(c);
@@ -1522,8 +1535,6 @@ fn parse_expr(c: *Compiler) Expr {
 
 fn parse_prec(c: *Compiler, min_prec: i32) Expr {
     var lhs = parse_highest_prec(c);
-    parse_postfix_unary_ops(c, &lhs);
-
     var op = c.peek();
     var prev_prec: i32 = 0x7FFF_FFFF;
     var curr_prec: i32 = prec_of_op(op);
@@ -1821,6 +1832,8 @@ fn parse_highest_prec(c: *Compiler) Expr {
             },
         }
     };
+
+    parse_postfix_unary_ops(c, &result);
 
     return result;
 }
@@ -2155,12 +2168,6 @@ fn parse_stmt(c: *Compiler) Stmt {
             else => {
                 if (is_def(c)) {
                     var symbol = parse_symbol(c);
-
-                    if (symbol.payload == .Function) {
-                        print_error(c, symbol.line_info, "nested functions are not allowed.", .{});
-                        std.os.exit(1);
-                    }
-
                     break :payload .{ .Symbol = symbol };
                 } else {
                     var lhs = ast_create(c, Expr);
@@ -2469,6 +2476,14 @@ fn resolve_identifiers_stmt(c: *Compiler, stmt: *Stmt) void {
         },
         .Symbol => |symbol| {
             resolve_identifiers_symbol(c, symbol);
+
+            if (symbol.payload == .Function) {
+                var node = ast_create(c, SymbolList.Node);
+                node.* = .{
+                    .payload = symbol,
+                };
+                c.local_functions.insert_last(node);
+            }
         },
         .Assign => |assign| {
             resolve_identifiers_expr(c, assign.lhs);
@@ -2639,7 +2654,15 @@ fn typecheck_symbol(c: *Compiler, symbol: *Symbol) void {
                 }
             } else {
                 if (variable.expr) |expr| {
-                    variable._type = typecheck_expr(c, null, expr);
+                    var _type = typecheck_expr(c, null, expr);
+                    variable._type = _type;
+
+                    if (_type.payload == .Function) {
+                        if (_type.payload.Function.scope != c.global_scope) {
+                            print_error(c, symbol.line_info, "can't use function pointers to local functions.", .{});
+                            std.os.exit(1);
+                        }
+                    }
                 } else {
                     unreachable;
                 }
@@ -2944,6 +2967,13 @@ fn typecheck_stmt(c: *Compiler, ctx: *const TypecheckerStmtContext, stmt: *Stmt)
             if (!assign.lhs.is_lvalue) {
                 print_error(c, assign.lhs.line_info, "expression is not an lvalue.", .{});
                 std.os.exit(1);
+            }
+
+            if (rhs_type.payload == .Function) {
+                if (rhs_type.payload.Function.scope != c.global_scope) {
+                    print_error(c, assign.rhs.line_info, "can't use function pointers to local functions.", .{});
+                    std.os.exit(1);
+                }
             }
 
             if (!lhs_type.eql(rhs_type)) {
@@ -3452,6 +3482,7 @@ fn generate_ir_instr(c: *Compiler, instr: IrInstr) void {
 
 fn generate_ir(c: *Compiler) void {
     {
+        _ = c.grab_global();
         var dst = c.grab_global();
         generate_ir_instr(c, .{ .Instr = .{
             .Call = .{
@@ -3464,11 +3495,16 @@ fn generate_ir(c: *Compiler) void {
 
     var it = c.globals.iterator();
     while (it.next()) |symbol| {
-        generate_ir_symbol(c, symbol.*);
+        generate_ir_global_symbol(c, symbol.*);
+    }
+
+    it = c.local_functions.iterator();
+    while (it.next()) |symbol| {
+        generate_ir_local_symbol_function(c, &symbol.*.payload.Function);
     }
 }
 
-fn generate_ir_symbol(c: *Compiler, symbol: *Symbol) void {
+fn generate_ir_global_symbol(c: *Compiler, symbol: *Symbol) void {
     switch (symbol.payload) {
         .Variable => |*variable| {
             var tmp = c.grab_global();
@@ -3479,55 +3515,20 @@ fn generate_ir_symbol(c: *Compiler, symbol: *Symbol) void {
             }
         },
         .Function => |function| {
-            {
-                // Account for ip, rbp and return address.
-                var param_tmp = IrTmp{
-                    .payload = .{ .Local = -24 },
-                    .tag = .Local,
-                };
-                var it = function._type.payload.Function.params.iterator();
-                while (it.next()) |param_ptr| {
-                    var param = &param_ptr.*.payload.Parameter;
-                    param_tmp.payload.Local -= 8;
-                    param.tmp = param_tmp;
-                }
+            // Account for ip, rbp and return address.
+            var param_tmp = IrTmp{
+                .payload = .{ .Local = -(3 * 8) },
+                .tag = .Local,
+                .height = 0,
+            };
+            var it = function._type.payload.Function.params.iterator();
+            while (it.next()) |param_ptr| {
+                var param = &param_ptr.*.payload.Parameter;
+                param_tmp.payload.Local -= 8;
+                param.tmp = param_tmp;
             }
 
-            var function_end_label = c.grab_label();
-            var index = c.ir_instrs.items.len;
-            generate_ir_instr(c, undefined);
-
-            {
-                var ctx = IrStmtContext{
-                    .loop_cond_label = undefined,
-                    .loop_end_label = undefined,
-                    .function_end_label = function_end_label,
-                };
-                var it = function.block.iterator();
-                while (it.next()) |stmt| {
-                    generate_ir_stmt(c, &ctx, stmt);
-                }
-            }
-
-            {
-                var stack_space_used: u32 = @intCast(c.biggest_local_so_far.payload.Local);
-                c.ir_instrs.items[index] = .{ .Meta = .{
-                    .GFB = .{
-                        .stack_space_used = stack_space_used,
-                        .label = function.label,
-                    },
-                } };
-
-                generate_ir_instr(c, .{ .Meta = .{
-                    .GFE = .{
-                        .stack_space_used = stack_space_used,
-                        .label = function_end_label,
-                    },
-                } });
-            }
-
-            c.next_local.payload.Local = 0;
-            c.biggest_local_so_far.payload.Local = 0;
+            generate_ir_function_body(c, &function);
         },
         .Type => {},
         .Parameter,
@@ -3537,6 +3538,91 @@ fn generate_ir_symbol(c: *Compiler, symbol: *Symbol) void {
         .Enum_Field,
         => unreachable,
     }
+}
+
+fn generate_ir_local_symbol(c: *Compiler, symbol: *Symbol) void {
+    switch (symbol.payload) {
+        .Variable => |*variable| {
+            var tmp = c.grab_local();
+            variable.tmp = tmp;
+
+            if (variable.expr) |expr| {
+                generate_ir_expr(c, expr, tmp);
+            }
+        },
+        .Function => {
+            // Generate local functions separately.
+        },
+        .Type => {},
+        .Parameter,
+        .Definition,
+        .Struct_Field,
+        .Union_Field,
+        .Enum_Field,
+        => unreachable,
+    }
+}
+
+fn generate_ir_local_symbol_function(c: *Compiler, function: *SymbolFunction) void {
+    // NOTE: parameters depth should always be zero
+    // because they always belong to current scope.
+
+    // Account for ip, rbp and return address and base pointer of previous frame.
+    var param_tmp = IrTmp{
+        .payload = .{ .Local = -(4 * 8) },
+        .tag = .Local,
+        .height = 0,
+    };
+    var it = function._type.payload.Function.params.iterator();
+    while (it.next()) |param_ptr| {
+        var param = &param_ptr.*.payload.Parameter;
+        param_tmp.payload.Local -= 8;
+        param.tmp = param_tmp;
+    }
+
+    generate_ir_function_body(c, function);
+}
+
+fn generate_ir_function_body(c: *Compiler, function: *const SymbolFunction) void {
+    var old_depth = c.function_depth;
+    c.function_depth = function.depth;
+
+    var function_end_label = c.grab_label();
+    var index = c.ir_instrs.items.len;
+    generate_ir_instr(c, undefined);
+
+    {
+        var ctx = IrStmtContext{
+            .loop_cond_label = undefined,
+            .loop_end_label = undefined,
+            .function_end_label = function_end_label,
+        };
+        var it = function.block.iterator();
+        while (it.next()) |stmt| {
+            generate_ir_stmt(c, &ctx, stmt);
+        }
+    }
+
+    {
+        var stack_space_used: u32 = @intCast(c.biggest_local_so_far.payload.Local);
+        c.ir_instrs.items[index] = .{ .Meta = .{
+            .GFB = .{
+                .stack_space_used = stack_space_used,
+                .label = function.label,
+            },
+        } };
+
+        generate_ir_instr(c, .{ .Meta = .{
+            .GFE = .{
+                .stack_space_used = stack_space_used,
+                .label = function_end_label,
+            },
+        } });
+    }
+
+    c.next_local.payload.Local = 0;
+    c.biggest_local_so_far.payload.Local = 0;
+    c.function_depth = old_depth;
 }
 
 fn generate_ir_block(c: *Compiler, ctx: *const IrStmtContext, block: StmtBlock) void {
@@ -3743,31 +3829,16 @@ fn generate_ir_stmt(c: *Compiler, ctx: *const IrStmtContext, stmt: *Stmt) void {
             c.return_local(tmp);
         },
         .Symbol => |symbol| {
-            switch (symbol.payload) {
-                .Variable => |*variable| {
-                    var tmp = c.grab_local();
-                    variable.tmp = tmp;
-
-                    if (variable.expr) |expr| {
-                        generate_ir_expr(c, expr, tmp);
-                    }
-                },
-                .Type => {},
-                .Function,
-                .Parameter,
-                .Definition,
-                .Struct_Field,
-                .Union_Field,
-                .Enum_Field,
-                => unreachable,
-            }
+            generate_ir_local_symbol(c, symbol);
         },
         .Assign => |assign| {
             switch (assign.lhs.payload) {
                 .Symbol => |symbol| {
                     switch (symbol.payload) {
                         .Variable => |variable| {
-                            generate_ir_expr(c, assign.rhs, variable.tmp);
+                            var tmp = variable.tmp;
+                            tmp.height = c.function_depth - symbol.depth;
+                            generate_ir_expr(c, assign.rhs, tmp);
                         },
                         .Parameter => |parameter| {
                             generate_ir_expr(c, assign.rhs, parameter.tmp);
@@ -3901,6 +3972,7 @@ fn generate_ir_expr_aux(c: *Compiler, expr: *Expr, dst_tmp: IrTmp, should_genera
         },
         .Call => |call| {
             if (call.lhs.payload == .Symbol and call.lhs.payload.Symbol.payload == .Function) {
+                var symbol = call.lhs.payload.Symbol;
                 var function = &call.lhs.payload.Symbol.payload.Function;
 
                 var it = call.args.reverse_iterator();
@@ -3913,15 +3985,26 @@ fn generate_ir_expr_aux(c: *Compiler, expr: *Expr, dst_tmp: IrTmp, should_genera
                     c.return_local(arg_tmp);
                 }
 
+                var bytes_to_pop: u64 = call.args.count * 8;
+
+                if (symbol.key.scope != c.global_scope) {
+                    generate_ir_instr(c, .{ .Instr = .{
+                        .Push_Frame_Pointer = c.function_depth - function.depth,
+                    } });
+                    bytes_to_pop += 8;
+                }
+
                 generate_ir_instr(c, .{ .Instr = .{
                     .Call = .{
                         .dst = .{ .Tmp = dst_tmp },
                         .src = .{ .Label = function.label },
                     },
                 } });
-                generate_ir_instr(c, .{ .Instr = .{
-                    .Pop = @intCast(call.args.count * 8),
-                } });
+                if (bytes_to_pop > 0) {
+                    generate_ir_instr(c, .{ .Instr = .{
+                        .Pop = bytes_to_pop,
+                    } });
+                }
             } else {
                 var lhs_tmp = c.grab_local();
                 generate_ir_expr(c, call.lhs, lhs_tmp);
@@ -3983,18 +4066,21 @@ fn generate_ir_expr_aux(c: *Compiler, expr: *Expr, dst_tmp: IrTmp, should_genera
         .Symbol => |symbol| {
             switch (symbol.payload) {
                 .Variable => |variable| {
+                    var tmp = variable.tmp;
+                    tmp.height = c.function_depth - symbol.depth;
+
                     if (!should_generate_lvalue) {
                         generate_ir_instr(c, .{ .Instr = .{
                             .Mov = .{
                                 .dst = .{ .Tmp = dst_tmp },
-                                .src = .{ .Tmp = variable.tmp },
+                                .src = .{ .Tmp = tmp },
                             },
                         } });
                     } else {
                         generate_ir_instr(c, .{ .Instr = .{
                             .Mov = .{
                                 .dst = .{ .Tmp = dst_tmp },
-                                .src = .{ .Addr = variable.tmp },
+                                .src = .{ .Addr = tmp },
                             },
                         } });
                     }
@@ -4051,8 +4137,17 @@ fn generate_ir_expr_aux(c: *Compiler, expr: *Expr, dst_tmp: IrTmp, should_genera
 
 fn debug_print_ir_tmp(tmp: IrTmp) void {
     switch (tmp.tag) {
-        .Global => std.debug.print("$+{}", .{tmp.payload.Global}),
-        .Local => std.debug.print("%{:0>1}", .{tmp.payload.Local}),
+        .Global => {
+            std.debug.assert(tmp.height == 0);
+            std.debug.print("${}", .{tmp.payload.Global});
+        },
+        .Local => {
+            if (tmp.height == 0) {
+                std.debug.print("%{:<1}", .{tmp.payload.Local});
+            } else {
+                std.debug.print("%{:<1}({}^)", .{ tmp.payload.Local, tmp.height });
+            }
+        },
     }
 }
 
@@ -4162,6 +4257,9 @@ fn debug_print_ir_instr(ir_instr: IrInstr) void {
                     debug_print_ir_operand(je.src1);
                     std.debug.print(", L{}", .{je.label});
                 },
+                .Push_Frame_Pointer => |depth| {
+                    std.debug.print("    push   ({}^)", .{depth});
+                },
                 .Push => |src| {
                     std.debug.print("    push   ", .{});
                     debug_print_ir_operand(src);
@@ -4221,8 +4319,14 @@ fn ir_grab_pointer_from_tmp(c: *Compiler, tmp: IrTmp) u64 {
     switch (tmp.tag) {
         .Global => return tmp.payload.Global,
         .Local => {
-            var rbp: i64 = @bitCast(c.rbp);
-            return @bitCast(rbp + tmp.payload.Local);
+            var i = tmp.height;
+            var rbp = c.rbp;
+            while (i > 0) : (i -= 1) {
+                rbp = ir_stack_read_u64(c, rbp - 4 * 8);
+            }
+
+            var rbp_i64: i64 = @bitCast(rbp);
+            return @bitCast(rbp_i64 + tmp.payload.Local);
         },
     }
 }
@@ -4357,15 +4461,15 @@ fn interpret(c: *Compiler) void {
                     .And => lhs = @intFromBool((lhs != 0) and (rhs != 0)),
                     .Eq => lhs = @intFromBool(lhs == rhs),
                     .Neq => lhs = @intFromBool(lhs != rhs),
-                    .Lt => lhs = @intFromBool(@as(i64, @intCast(lhs)) < @as(i64, @intCast(rhs))),
-                    .Leq => lhs = @intFromBool(@as(i64, @intCast(lhs)) <= @as(i64, @intCast(rhs))),
-                    .Gt => lhs = @intFromBool(@as(i64, @intCast(lhs)) > @as(i64, @intCast(rhs))),
-                    .Geq => lhs = @intFromBool(@as(i64, @intCast(lhs)) >= @as(i64, @intCast(rhs))),
-                    .Add => lhs = @bitCast(@as(i64, @intCast(lhs)) + @as(i64, @intCast(rhs))),
-                    .Sub => lhs = @bitCast(@as(i64, @intCast(lhs)) - @as(i64, @intCast(rhs))),
-                    .Mul => lhs = @bitCast(@as(i64, @intCast(lhs)) * @as(i64, @intCast(rhs))),
-                    .Div => lhs = @bitCast(@divTrunc(@as(i64, @intCast(lhs)), @as(i64, @intCast(rhs)))),
-                    .Mod => lhs = @bitCast(@rem(@as(i64, @intCast(lhs)), @as(i64, @intCast(rhs)))),
+                    .Lt => lhs = @intFromBool(@as(i64, @bitCast(lhs)) < @as(i64, @bitCast(rhs))),
+                    .Leq => lhs = @intFromBool(@as(i64, @bitCast(lhs)) <= @as(i64, @bitCast(rhs))),
+                    .Gt => lhs = @intFromBool(@as(i64, @bitCast(lhs)) > @as(i64, @bitCast(rhs))),
+                    .Geq => lhs = @intFromBool(@as(i64, @bitCast(lhs)) >= @as(i64, @bitCast(rhs))),
+                    .Add => lhs = @bitCast(@as(i64, @bitCast(lhs)) + @as(i64, @bitCast(rhs))),
+                    .Sub => lhs = @bitCast(@as(i64, @bitCast(lhs)) - @as(i64, @bitCast(rhs))),
+                    .Mul => lhs = @bitCast(@as(i64, @bitCast(lhs)) * @as(i64, @bitCast(rhs))),
+                    .Div => lhs = @bitCast(@divTrunc(@as(i64, @bitCast(lhs)), @as(i64, @bitCast(rhs)))),
+                    .Mod => lhs = @bitCast(@rem(@as(i64, @bitCast(lhs)), @as(i64, @bitCast(rhs)))),
                 }
 
                 ir_stack_write_u64(c, dst, lhs);
@@ -4418,6 +4522,15 @@ fn interpret(c: *Compiler) void {
                             ip = labels[je.label];
                             continue;
                         }
+                    },
+                    .Push_Frame_Pointer => |depth| {
+                        var i = depth;
+                        var rbp = c.rbp;
+                        while (i >= 0) : (i -= 1) {
+                            rbp = ir_stack_read_u64(c, rbp - 4 * 8);
+                        }
+
+                        ir_stack_push(c, rbp);
                     },
                     .Push => |src| {
                         var value = ir_grab_value_from_operand(c, src);
@@ -4497,6 +4610,7 @@ pub fn compile() void {
         .filepath = filepath,
         .source_code = source_code,
         .globals = .{},
+        .local_functions = .{},
         .ast_arena = ast_arena,
         .ast_arena_allocator = ast_arena.allocator(),
         .symbols = SymbolTable.init(gpa),
