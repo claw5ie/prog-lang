@@ -37,6 +37,8 @@ var INT64_TYPE_HINT = Type{
 
 const LOWEST_PREC = -127;
 
+const FunctionDepth = i32;
+
 const Compiler = struct {
     const LOOKAHEAD = 2;
     tokens: [LOOKAHEAD]Token = undefined,
@@ -54,25 +56,13 @@ const Compiler = struct {
     current_scope: *Scope,
     global_scope: *Scope,
     main_function: *Symbol,
-    function_depth: i32 = 0,
+    function_depth: FunctionDepth = 0,
 
     ir_instrs: IrInstrList,
-    next_global: IrTmp = .{
-        .payload = .{ .Global = 0 },
-        .tag = .Global,
-        .height = 0,
-    },
-    next_local: IrTmp = .{
-        .payload = .{ .Local = 0 },
-        .tag = .Local,
-        .height = 0,
-    },
+    next_global: IrOffset = 0,
+    next_local: IrOffset = 0,
     next_label: IrLabel = 0,
-    biggest_local_so_far: IrTmp = .{
-        .payload = .{ .Local = 0 },
-        .tag = .Local,
-        .height = 0,
-    },
+    biggest_local_so_far: IrOffset = 0,
 
     stack: []u8,
     rsp: u64 = 0,
@@ -275,26 +265,34 @@ const Compiler = struct {
     }
 
     pub fn grab_global(c: *Compiler) IrTmp {
-        var result = c.next_global;
-        c.next_global.payload.Global += 8;
-        return result;
+        var offset = c.next_global;
+        c.next_global += 8;
+        return .{
+            .offset = offset,
+            .tag = .Global,
+            .height = 0,
+        };
     }
 
     pub fn grab_local(c: *Compiler) IrTmp {
-        var result = c.next_local;
-        c.next_local.payload.Local += 8;
+        var offset = c.next_local;
+        c.next_local += 8;
 
-        if (c.biggest_local_so_far.payload.Local < c.next_local.payload.Local) {
-            c.biggest_local_so_far.payload.Local = c.next_local.payload.Local;
+        if (c.biggest_local_so_far < c.next_local) {
+            c.biggest_local_so_far = c.next_local;
         }
 
-        return result;
+        return .{
+            .offset = offset,
+            .tag = .Local,
+            .height = 0,
+        };
     }
 
     pub fn return_local(c: *Compiler, tmp: IrTmp) void {
         std.debug.assert(tmp.tag == .Local);
-        c.next_local.payload.Local -= 8;
-        std.debug.assert(c.next_local.payload.Local == tmp.payload.Local);
+        c.next_local -= 8;
+        std.debug.assert(c.next_local == tmp.offset);
     }
 
     pub fn grab_label(c: *Compiler) IrLabel {
@@ -423,7 +421,7 @@ const TypePayload = union(TypeTag) {
     },
     Array: struct {
         expr: *Expr,
-        count: usize,
+        count: TypeSize,
         subtype: *Type,
     },
     Pointer: *Type,
@@ -433,6 +431,8 @@ const TypePayload = union(TypeTag) {
     Symbol: *Symbol,
     Identifier: Identifier,
 };
+
+const TypeSize = u31;
 
 const Type = struct {
     const FlagType = u16;
@@ -447,7 +447,7 @@ const Type = struct {
     const Is_Pointer_To_Array: FlagType = 0x100;
 
     payload: TypePayload,
-    size: usize,
+    size: TypeSize,
     is_resolved: bool = false,
     typechecking_stage: TypecheckingStage = .Not_Typechecked,
     line_info: LineInfo,
@@ -800,7 +800,7 @@ const SymbolFunction = struct {
     _type: *Type,
     block: StmtList,
     label: IrLabel,
-    depth: i32,
+    depth: FunctionDepth,
 };
 
 const SymbolStructField = struct {
@@ -846,7 +846,7 @@ const SymbolPayload = union(SymbolTag) {
 const Symbol = struct {
     payload: SymbolPayload,
     key: SymbolKey,
-    depth: i32,
+    depth: FunctionDepth,
     line_info: LineInfo,
 };
 
@@ -891,18 +891,17 @@ const IrInstrList = std.ArrayList(IrInstr);
 const CHOOSE_BASE: u3 = 0x1;
 const CHOOSE_DISP: u3 = 0x2;
 
+const IrOffset = i31;
+
 const IrTmpTag = enum {
     Global,
     Local,
 };
 
 const IrTmp = packed struct {
-    payload: packed union {
-        Global: u31,
-        Local: i31,
-    },
+    offset: IrOffset,
     tag: IrTmpTag,
-    height: i32,
+    height: FunctionDepth,
 
     pub inline fn as_rvalue(tmp: IrTmp) IrRvalue {
         return .{ .Lvalue = .{ .Tmp = tmp } };
@@ -936,7 +935,7 @@ const IrRvalue = union(IrRvalueTag) {
 const IrMem = struct {
     choose: u2 = 0,
     base: IrTmp = .{
-        .payload = .{ .Global = 0 },
+        .offset = 0,
         .tag = .Global,
         .height = 0,
     },
@@ -2734,7 +2733,7 @@ fn typecheck_type_aux(c: *Compiler, _type: *Type, flags: u8) TypecheckingStage {
 
     switch (_type.payload) {
         .Struct => |_struct| {
-            var size: usize = 0;
+            var size: TypeSize = 0;
 
             _flags |= REJECT_VOID_TYPE;
 
@@ -2749,7 +2748,7 @@ fn typecheck_type_aux(c: *Compiler, _type: *Type, flags: u8) TypecheckingStage {
             _type.size = size;
         },
         .Union => |_union| {
-            var size: usize = 0;
+            var size: TypeSize = 0;
 
             _flags |= REJECT_VOID_TYPE;
 
@@ -3519,14 +3518,14 @@ fn generate_ir_global_symbol(c: *Compiler, symbol: *Symbol) void {
         .Function => |function| {
             // Account for ip, rbp and return address.
             var param_tmp = IrTmp{
-                .payload = .{ .Local = -(3 * 8) },
+                .offset = -(3 * 8),
                 .tag = .Local,
                 .height = 0,
             };
             var it = function._type.payload.Function.params.iterator();
             while (it.next()) |param_ptr| {
                 var param = &param_ptr.*.payload.Parameter;
-                param_tmp.payload.Local -= 8;
+                param_tmp.offset -= 8;
                 param.tmp = param_tmp;
             }
 
@@ -3571,14 +3570,14 @@ fn generate_ir_local_symbol_function(c: *Compiler, function: *SymbolFunction) vo
 
     // Account for ip, rbp and return address and base pointer of previous frame.
     var param_tmp = IrTmp{
-        .payload = .{ .Local = -(4 * 8) },
+        .offset = -(4 * 8),
         .tag = .Local,
         .height = 0,
     };
     var it = function._type.payload.Function.params.iterator();
     while (it.next()) |param_ptr| {
         var param = &param_ptr.*.payload.Parameter;
-        param_tmp.payload.Local -= 8;
+        param_tmp.offset -= 8;
         param.tmp = param_tmp;
     }
 
@@ -3606,7 +3605,7 @@ fn generate_ir_function_body(c: *Compiler, function: *const SymbolFunction) void
     }
 
     {
-        var stack_space_used: u32 = @intCast(c.biggest_local_so_far.payload.Local);
+        var stack_space_used: u32 = @intCast(c.biggest_local_so_far);
         c.ir_instrs.items[index] = .{ .Meta = .{
             .GFB = .{
                 .stack_space_used = stack_space_used,
@@ -3622,8 +3621,8 @@ fn generate_ir_function_body(c: *Compiler, function: *const SymbolFunction) void
         } });
     }
 
-    c.next_local.payload.Local = 0;
-    c.biggest_local_so_far.payload.Local = 0;
+    c.next_local = 0;
+    c.biggest_local_so_far = 0;
     c.function_depth = old_depth;
 }
 
@@ -4134,13 +4133,13 @@ fn debug_print_ir_tmp(tmp: IrTmp) void {
     switch (tmp.tag) {
         .Global => {
             std.debug.assert(tmp.height == 0);
-            std.debug.print("${}", .{tmp.payload.Global});
+            std.debug.print("${}", .{tmp.offset});
         },
         .Local => {
             if (tmp.height == 0) {
-                std.debug.print("%{:<1}", .{tmp.payload.Local});
+                std.debug.print("%{:<1}", .{tmp.offset});
             } else {
-                std.debug.print("%{:<1}({}^)", .{ tmp.payload.Local, tmp.height });
+                std.debug.print("%{:<1}({}^)", .{ tmp.offset, tmp.height });
             }
         },
     }
@@ -4311,7 +4310,7 @@ inline fn cast_ptr(comptime dst: type, src: anytype) dst {
 
 fn ir_grab_pointer_from_tmp(c: *Compiler, tmp: IrTmp) u64 {
     switch (tmp.tag) {
-        .Global => return tmp.payload.Global,
+        .Global => return @intCast(tmp.offset),
         .Local => {
             var i = tmp.height;
             var rbp = c.rbp;
@@ -4320,7 +4319,7 @@ fn ir_grab_pointer_from_tmp(c: *Compiler, tmp: IrTmp) u64 {
             }
 
             var rbp_i64: i64 = @bitCast(rbp);
-            return @bitCast(rbp_i64 + tmp.payload.Local);
+            return @bitCast(rbp_i64 + tmp.offset);
         },
     }
 }
@@ -4434,7 +4433,7 @@ fn interpret(c: *Compiler) void {
         }
     }
 
-    c.rsp = c.next_global.payload.Global;
+    c.rsp = @intCast(c.next_global);
     c.rbp = c.rsp;
 
     var return_src: u64 = 0xFFFF_FFFF_FFFF_FFFF;
