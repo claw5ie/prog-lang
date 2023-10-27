@@ -66,5 +66,18 @@ pub fn DoublyLinkedList(comptime T: type) type {
                 list.count = 1;
             }
         }
+
+        pub fn insert_first(list: *Self, node: *Node) void {
+            if (list.count != 0) {
+                list.first.?.prev = node;
+                node.next = list.first;
+                list.first = node;
+                list.count += 1;
+            } else {
+                list.first = node;
+                list.last = node;
+                list.count = 1;
+            }
+        }
     };
 }

@@ -289,6 +289,13 @@ const Compiler = struct {
         };
     }
 
+    pub fn maybe_grab_local(c: *Compiler, has_lvalue: ?*IrLvalue) IrLvalue {
+        return if (has_lvalue) |lvalue|
+            lvalue.*
+        else
+            c.grab_local().as_lvalue();
+    }
+
     pub fn return_local(c: *Compiler, tmp: IrTmp) void {
         std.debug.assert(tmp.tag == .Local);
         c.next_local -= 8;
@@ -903,6 +910,10 @@ const IrTmp = packed struct {
     tag: IrTmpTag,
     height: FunctionDepth,
 
+    pub inline fn as_lvalue(tmp: IrTmp) IrLvalue {
+        return .{ .Tmp = tmp };
+    }
+
     pub inline fn as_rvalue(tmp: IrTmp) IrRvalue {
         return .{ .Lvalue = .{ .Tmp = tmp } };
     }
@@ -916,6 +927,10 @@ const IrLvalueTag = enum {
 const IrLvalue = union(IrLvalueTag) {
     Tmp: IrTmp,
     Mem: IrMem,
+
+    pub inline fn as_rvalue(lvalue: IrLvalue) IrRvalue {
+        return .{ .Lvalue = lvalue };
+    }
 };
 
 const IrRvalueTag = enum {
@@ -930,6 +945,55 @@ const IrRvalue = union(IrRvalueTag) {
     Addr: IrLvalue,
     Label: IrLabel,
     Imm: i64,
+
+    pub fn ref(src_tmp: IrRvalue, c: *Compiler) IrLvalue {
+        switch (src_tmp) {
+            .Lvalue => |lvalue| {
+                switch (lvalue) {
+                    .Tmp => |tmp| {
+                        return .{ .Mem = .{
+                            .choose = CHOOSE_BASE,
+                            .base = tmp,
+                        } };
+                    },
+                    .Mem => {
+                        var dst_tmp = c.grab_local();
+
+                        generate_ir_instr(c, .{ .Instr = .{
+                            .Mov = .{
+                                .dst = dst_tmp.as_lvalue(),
+                                .src = src_tmp,
+                            },
+                        } });
+
+                        return .{ .Mem = .{
+                            .choose = CHOOSE_BASE,
+                            .base = dst_tmp,
+                        } };
+                    },
+                }
+            },
+            .Addr => |dst_tmp| {
+                return dst_tmp;
+            },
+            .Label => |label| {
+                return .{ .Mem = .{
+                    .choose = CHOOSE_DISP,
+                    .disp = label,
+                } };
+            },
+            .Imm => |imm| {
+                return .{ .Mem = .{
+                    .choose = CHOOSE_DISP,
+                    .disp = imm,
+                } };
+            },
+        }
+    }
+
+    pub fn deref(src_tmp: IrRvalue, c: *Compiler) IrRvalue {
+        return .{ .Lvalue = src_tmp.ref(c) };
+    }
 };
 
 const IrMem = struct {
@@ -943,6 +1007,15 @@ const IrMem = struct {
 };
 
 const IrLabel = u32;
+
+const IrInstrJmpcTag = enum {
+    Eq,
+    Neq,
+    Lt,
+    Leq,
+    Gt,
+    Geq,
+};
 
 const IrInstrBinaryOpTag = enum {
     Or,
@@ -969,15 +1042,11 @@ const IrInstrOpcode = enum {
     Print,
     Mov,
     Jmp,
-    Jnz,
-    Jz,
-    Je,
     Push_Frame_Pointer,
     Push,
     Pop,
     Call,
-    Ret1,
-    Ret2,
+    Ret,
     Exit,
 };
 
@@ -990,6 +1059,7 @@ const IrInstrMetaTag = enum {
 const IrInstrType = enum {
     Binary_Op,
     Unary_Op,
+    Jmpc,
     Instr,
     Meta,
 };
@@ -998,11 +1068,19 @@ const IrInstr = union(IrInstrType) {
     Binary_Op: struct {
         tag: IrInstrBinaryOpTag,
         dst: IrLvalue,
-        src: IrRvalue,
+        src0: IrRvalue,
+        src1: IrRvalue,
     },
     Unary_Op: struct {
         tag: IrInstrUnaryOpTag,
         dst: IrLvalue,
+        src: IrRvalue,
+    },
+    Jmpc: struct {
+        tag: IrInstrJmpcTag,
+        src0: IrRvalue,
+        src1: IrRvalue,
+        label: IrLabel,
     },
     Instr: union(IrInstrOpcode) {
         Print: IrRvalue,
@@ -1011,19 +1089,6 @@ const IrInstr = union(IrInstrType) {
             src: IrRvalue,
         },
         Jmp: IrLabel,
-        Jnz: struct {
-            src: IrRvalue,
-            label: IrLabel,
-        },
-        Jz: struct {
-            src: IrRvalue,
-            label: IrLabel,
-        },
-        Je: struct {
-            src0: IrRvalue,
-            src1: IrRvalue,
-            label: IrLabel,
-        },
         Push_Frame_Pointer: i32,
         Push: IrRvalue,
         Pop: u64,
@@ -1031,11 +1096,7 @@ const IrInstr = union(IrInstrType) {
             dst: IrLvalue,
             src: IrRvalue,
         },
-        Ret1: IrLabel,
-        Ret2: struct {
-            src: IrLvalue,
-            label: IrLabel,
-        },
+        Ret: IrLabel,
         Exit: void,
     },
     Meta: union(IrInstrMetaTag) {
@@ -2483,7 +2544,7 @@ fn resolve_identifiers_stmt(c: *Compiler, stmt: *Stmt) void {
                 node.* = .{
                     .payload = symbol,
                 };
-                c.local_functions.insert_last(node);
+                c.local_functions.insert_first(node);
             }
         },
         .Assign => |assign| {
@@ -3481,6 +3542,10 @@ fn generate_ir_instr(c: *Compiler, instr: IrInstr) void {
     };
 }
 
+const GF_FIRST_ARG_OFFSET = -3 * 8;
+const LF_FIRST_ARG_OFFSET = -4 * 8;
+const RETURN_ADDRESS_OFFSET = -8;
+
 fn generate_ir(c: *Compiler) void {
     {
         _ = c.grab_global();
@@ -3501,35 +3566,28 @@ fn generate_ir(c: *Compiler) void {
 
     it = c.local_functions.iterator();
     while (it.next()) |symbol| {
-        generate_ir_local_symbol_function(c, &symbol.*.payload.Function);
+        generate_ir_function(c, &symbol.*.payload.Function, LF_FIRST_ARG_OFFSET);
     }
 }
 
 fn generate_ir_global_symbol(c: *Compiler, symbol: *Symbol) void {
     switch (symbol.payload) {
         .Variable => |*variable| {
-            var tmp = c.grab_global();
-            variable.tmp = tmp;
+            // Impelement globals as lvalue [imm]?
+            variable.tmp = c.grab_global();
 
             if (variable.expr) |expr| {
-                generate_ir_expr(c, expr, tmp);
+                var src_tmp = generate_ir_short_lived_rvalue(c, expr);
+                generate_ir_instr(c, .{ .Instr = .{
+                    .Mov = .{
+                        .dst = variable.tmp.as_lvalue(),
+                        .src = src_tmp,
+                    },
+                } });
             }
         },
         .Function => |function| {
-            // Account for ip, rbp and return address.
-            var param_tmp = IrTmp{
-                .offset = -(3 * 8),
-                .tag = .Local,
-                .height = 0,
-            };
-            var it = function._type.payload.Function.params.iterator();
-            while (it.next()) |param_ptr| {
-                var param = &param_ptr.*.payload.Parameter;
-                param_tmp.offset -= 8;
-                param.tmp = param_tmp;
-            }
-
-            generate_ir_function_body(c, &function);
+            generate_ir_function(c, &function, GF_FIRST_ARG_OFFSET);
         },
         .Type => {},
         .Parameter,
@@ -3544,11 +3602,10 @@ fn generate_ir_global_symbol(c: *Compiler, symbol: *Symbol) void {
 fn generate_ir_local_symbol(c: *Compiler, symbol: *Symbol) void {
     switch (symbol.payload) {
         .Variable => |*variable| {
-            var tmp = c.grab_local();
-            variable.tmp = tmp;
-
             if (variable.expr) |expr| {
-                generate_ir_expr(c, expr, tmp);
+                variable.tmp = generate_ir_expr(c, expr);
+            } else {
+                variable.tmp = c.grab_local();
             }
         },
         .Function => {
@@ -3564,13 +3621,9 @@ fn generate_ir_local_symbol(c: *Compiler, symbol: *Symbol) void {
     }
 }
 
-fn generate_ir_local_symbol_function(c: *Compiler, function: *SymbolFunction) void {
-    // NOTE: parameters depth should always be zero
-    // because they always belong to current scope.
-
-    // Account for ip, rbp and return address and base pointer of previous frame.
+fn generate_ir_function(c: *Compiler, function: *const SymbolFunction, first_arg_offset: IrOffset) void {
     var param_tmp = IrTmp{
-        .offset = -(4 * 8),
+        .offset = first_arg_offset,
         .tag = .Local,
         .height = 0,
     };
@@ -3645,36 +3698,25 @@ fn generate_ir_stmt(c: *Compiler, ctx: *const IrStmtContext, stmt: *Stmt) void {
 
     switch (stmt.payload) {
         .Print => |expr| {
-            var tmp = c.grab_local();
-            generate_ir_expr(c, expr, tmp);
+            var src_tmp = generate_ir_rvalue(c, expr, null);
             generate_ir_instr(c, .{ .Instr = .{
-                .Print = tmp.as_rvalue(),
+                .Print = src_tmp,
             } });
-            c.return_local(tmp);
         },
         .Block => |block| {
             generate_ir_block(c, ctx, block);
         },
         .If => |_if| {
-            var cond_tmp = c.grab_local();
-            generate_ir_expr(c, _if.cond, cond_tmp);
-
             var is_if_true_there: u2 = @intFromBool(_if.if_true.stmts.count != 0);
             var is_if_false_there: u2 = @intFromBool(_if.if_false.stmts.count != 0);
             switch ((is_if_true_there << 1) | is_if_false_there) {
                 0b00 => {
-                    c.return_local(cond_tmp);
+                    _ = generate_ir_rvalue(c, _if.cond, null);
                 },
                 0b01 => {
                     var end_label = c.grab_label();
 
-                    generate_ir_instr(c, .{ .Instr = .{
-                        .Jnz = .{
-                            .src = cond_tmp.as_rvalue(),
-                            .label = end_label,
-                        },
-                    } });
-                    c.return_local(cond_tmp);
+                    generate_ir_jump(c, _if.cond, true, end_label);
                     generate_ir_block(c, ctx, _if.if_false);
                     generate_ir_instr(c, .{ .Meta = .{
                         .Label = end_label,
@@ -3683,13 +3725,7 @@ fn generate_ir_stmt(c: *Compiler, ctx: *const IrStmtContext, stmt: *Stmt) void {
                 0b10 => {
                     var end_label = c.grab_label();
 
-                    generate_ir_instr(c, .{ .Instr = .{
-                        .Jz = .{
-                            .src = cond_tmp.as_rvalue(),
-                            .label = end_label,
-                        },
-                    } });
-                    c.return_local(cond_tmp);
+                    generate_ir_jump(c, _if.cond, false, end_label);
                     generate_ir_block(c, ctx, _if.if_true);
                     generate_ir_instr(c, .{ .Meta = .{
                         .Label = end_label,
@@ -3699,13 +3735,7 @@ fn generate_ir_stmt(c: *Compiler, ctx: *const IrStmtContext, stmt: *Stmt) void {
                     var false_label = c.grab_label();
                     var end_label = c.grab_label();
 
-                    generate_ir_instr(c, .{ .Instr = .{
-                        .Jz = .{
-                            .src = cond_tmp.as_rvalue(),
-                            .label = false_label,
-                        },
-                    } });
-                    c.return_local(cond_tmp);
+                    generate_ir_jump(c, _if.cond, false, false_label);
                     generate_ir_block(c, ctx, _if.if_true);
                     generate_ir_instr(c, .{ .Instr = .{
                         .Jmp = end_label,
@@ -3741,19 +3771,10 @@ fn generate_ir_stmt(c: *Compiler, ctx: *const IrStmtContext, stmt: *Stmt) void {
                 .function_end_label = ctx.function_end_label,
             };
             generate_ir_block(c, &new_ctx, _while.block);
-
-            var cond_tmp = c.grab_local();
             generate_ir_instr(c, .{ .Meta = .{
                 .Label = cond_label,
             } });
-            generate_ir_expr(c, _while.cond, cond_tmp);
-            generate_ir_instr(c, .{ .Instr = .{
-                .Jnz = .{
-                    .src = cond_tmp.as_rvalue(),
-                    .label = block_label,
-                },
-            } });
-            c.return_local(cond_tmp);
+            generate_ir_jump(c, _while.cond, true, block_label);
         },
         .Break => {
             generate_ir_instr(c, .{ .Instr = .{
@@ -3766,8 +3787,7 @@ fn generate_ir_stmt(c: *Compiler, ctx: *const IrStmtContext, stmt: *Stmt) void {
             } });
         },
         .Switch => |_switch| {
-            var cond_tmp = c.grab_local();
-            generate_ir_expr(c, _switch.cond, cond_tmp);
+            var cond_tmp = generate_ir_expr(c, _switch.cond);
 
             var first_case_label = c.grab_buncha_labels(@intCast(_switch.cases.count));
             var end_label = c.grab_label();
@@ -3776,17 +3796,14 @@ fn generate_ir_stmt(c: *Compiler, ctx: *const IrStmtContext, stmt: *Stmt) void {
                 var label = first_case_label;
                 var it = _switch.cases.iterator();
                 while (it.next()) |case| {
-                    var case_tmp = c.grab_local();
-                    generate_ir_expr(c, case.value, case_tmp);
-                    generate_ir_instr(c, .{ .Instr = .{
-                        .Je = .{
-                            .src0 = cond_tmp.as_rvalue(),
-                            .src1 = case_tmp.as_rvalue(),
-                            .label = label,
-                        },
+                    var case_tmp = generate_ir_short_lived_rvalue(c, case.value);
+                    generate_ir_instr(c, .{ .Jmpc = .{
+                        .tag = .Eq,
+                        .src0 = cond_tmp.as_rvalue(),
+                        .src1 = case_tmp,
+                        .label = label,
                     } });
                     label += 1;
-                    c.return_local(case_tmp);
                 }
             }
 
@@ -3801,8 +3818,8 @@ fn generate_ir_stmt(c: *Compiler, ctx: *const IrStmtContext, stmt: *Stmt) void {
                     generate_ir_instr(c, .{ .Meta = .{
                         .Label = label,
                     } });
-                    label += 1;
                     generate_ir_block(c, ctx, case.block);
+                    label += 1;
 
                     if (!case.should_fallthrough) {
                         generate_ir_instr(c, .{ .Instr = .{
@@ -3818,30 +3835,33 @@ fn generate_ir_stmt(c: *Compiler, ctx: *const IrStmtContext, stmt: *Stmt) void {
         },
         .Return => {
             generate_ir_instr(c, .{ .Instr = .{
-                .Ret1 = ctx.function_end_label,
+                .Ret = ctx.function_end_label,
             } });
         },
         .Return_Expr => |expr| {
-            var tmp = c.grab_local();
-            generate_ir_expr(c, expr, tmp);
-            generate_ir_instr(c, .{ .Instr = .{
-                .Ret2 = .{
-                    .src = .{ .Tmp = tmp },
-                    .label = ctx.function_end_label,
+            var dst_tmp = .{ .Mem = .{
+                .choose = CHOOSE_BASE,
+                .base = .{
+                    .offset = RETURN_ADDRESS_OFFSET,
+                    .tag = .Local,
+                    .height = 0,
                 },
+            } };
+            _ = generate_ir_rvalue(c, expr, &dst_tmp);
+            generate_ir_instr(c, .{ .Instr = .{
+                .Ret = ctx.function_end_label,
             } });
-            c.return_local(tmp);
         },
         .Symbol => |symbol| {
             should_clean_locals = false;
             generate_ir_local_symbol(c, symbol);
         },
         .Assign => |assign| {
-            var lhs_tmp = generate_ir_lvalue(c, assign.lhs);
-            generate_ir_expr_lvalue(c, assign.rhs, lhs_tmp);
+            var dst_tmp = generate_ir_lvalue(c, assign.lhs);
+            _ = generate_ir_rvalue(c, assign.rhs, &dst_tmp);
         },
         .Expr => |expr| {
-            _ = generate_ir_expr(c, expr, c.grab_local());
+            _ = generate_ir_rvalue(c, expr, null);
         },
     }
 
@@ -3850,135 +3870,176 @@ fn generate_ir_stmt(c: *Compiler, ctx: *const IrStmtContext, stmt: *Stmt) void {
     }
 }
 
-inline fn generate_ir_expr(c: *Compiler, expr: *Expr, tmp: IrTmp) void {
-    generate_ir_expr_lvalue(c, expr, .{ .Tmp = tmp });
-}
-
-fn generate_ir_expr_lvalue(c: *Compiler, expr: *Expr, dst_tmp: IrLvalue) void {
+fn generate_ir_jump(c: *Compiler, expr: *Expr, jump_if_true: bool, label: IrLabel) void {
     var old_next_local = c.next_local;
 
-    switch (expr.payload) {
-        .Binary_Op => |op| {
-            var rhs_tmp = c.grab_local();
-            generate_ir_expr(c, op.rhs, rhs_tmp);
-            generate_ir_expr_lvalue(c, op.lhs, dst_tmp);
+    var tag: IrInstrJmpcTag = .Neq;
+    var src0_tmp: IrRvalue = undefined;
+    var src1_tmp: IrRvalue = .{ .Imm = 0 };
 
-            var tag: IrInstrBinaryOpTag = switch (op.tag) {
-                .Or => .Or,
-                .And => .And,
-                .Eq => .Eq,
-                .Neq => .Neq,
-                .Lt => .Lt,
-                .Leq => .Leq,
-                .Gt => .Gt,
-                .Geq => .Geq,
-                .Add => .Add,
-                .Sub => .Sub,
-                .Mul => .Mul,
-                .Div => .Div,
-                .Mod => .Mod,
-            };
+    _ = fill_operands: {
+        if (expr.payload == .Binary_Op) {
+            var op = &expr.payload.Binary_Op;
 
-            generate_ir_instr(c, .{ .Binary_Op = .{
-                .tag = tag,
-                .dst = dst_tmp,
-                .src = rhs_tmp.as_rvalue(),
-            } });
-            c.return_local(rhs_tmp);
-        },
-        .Unary_Op => |op| {
             switch (op.tag) {
-                .Not => {
-                    generate_ir_expr_lvalue(c, op.subexpr, dst_tmp);
-                    generate_ir_instr(c, .{ .Unary_Op = .{
-                        .tag = .Not,
-                        .dst = dst_tmp,
-                    } });
-                },
-                .Neg => {
-                    generate_ir_expr_lvalue(c, op.subexpr, dst_tmp);
-                    generate_ir_instr(c, .{ .Unary_Op = .{
-                        .tag = .Neg,
-                        .dst = dst_tmp,
-                    } });
-                },
-                .Ref => {
-                    var addr_tmp = generate_ir_lvalue(c, op.subexpr);
-                    generate_ir_instr(c, .{ .Instr = .{
-                        .Mov = .{
-                            .dst = dst_tmp,
-                            .src = .{ .Addr = addr_tmp },
-                        },
-                    } });
-                },
-                .Deref => {
-                    generate_ir_expr_lvalue(c, op.subexpr, dst_tmp);
-
-                    var src_tmp: IrTmp = undefined;
-                    if (dst_tmp == .Mem) {
-                        src_tmp = c.grab_local();
-                        generate_ir_instr(c, .{ .Instr = .{
-                            .Mov = .{
-                                .dst = .{ .Tmp = src_tmp },
-                                .src = .{ .Lvalue = dst_tmp },
-                            },
-                        } });
-                        c.return_local(src_tmp);
-                    } else {
-                        src_tmp = dst_tmp.Tmp;
-                    }
-
-                    generate_ir_instr(c, .{ .Instr = .{
-                        .Mov = .{
-                            .dst = dst_tmp,
-                            .src = .{ .Lvalue = .{ .Mem = .{
-                                .choose = CHOOSE_BASE,
-                                .base = src_tmp,
-                            } } },
-                        },
-                    } });
+                .Eq => tag = .Eq,
+                .Neq => tag = .Neq,
+                .Lt => tag = .Lt,
+                .Leq => tag = .Leq,
+                .Gt => tag = .Gt,
+                .Geq => tag = .Geq,
+                else => {
+                    src0_tmp = generate_ir_rvalue(c, expr, null);
+                    break :fill_operands;
                 },
             }
-        },
-        .If => |_if| {
-            var false_label = c.grab_label();
-            var end_label = c.grab_label();
 
-            var cond_tmp = c.grab_local();
-            generate_ir_expr(c, _if.cond, cond_tmp);
-            generate_ir_instr(c, .{ .Instr = .{
-                .Jz = .{
-                    .src = cond_tmp.as_rvalue(),
-                    .label = false_label,
-                },
-            } });
-            c.return_local(cond_tmp);
-            generate_ir_expr_lvalue(c, _if.if_true, dst_tmp);
-            generate_ir_instr(c, .{ .Instr = .{
-                .Jmp = end_label,
-            } });
-            generate_ir_instr(c, .{ .Meta = .{
-                .Label = false_label,
-            } });
-            generate_ir_expr_lvalue(c, _if.if_false, dst_tmp);
-            generate_ir_instr(c, .{ .Meta = .{
-                .Label = end_label,
-            } });
-        },
-        .Call => |call| {
-            var it = call.args.reverse_iterator();
-            while (it.prev()) |arg| {
-                var arg_tmp = c.grab_local();
-                generate_ir_expr(c, arg, arg_tmp);
-                generate_ir_instr(c, .{ .Instr = .{
-                    .Push = arg_tmp.as_rvalue(),
+            src0_tmp = generate_ir_rvalue(c, op.lhs, null);
+            src1_tmp = generate_ir_rvalue(c, op.rhs, null);
+        } else {
+            src0_tmp = generate_ir_rvalue(c, expr, null);
+        }
+    };
+
+    if (!jump_if_true) {
+        tag = switch (tag) {
+            .Eq => .Neq,
+            .Neq => .Eq,
+            .Lt => .Geq,
+            .Leq => .Gt,
+            .Gt => .Leq,
+            .Geq => .Lt,
+        };
+    }
+
+    generate_ir_instr(c, .{ .Jmpc = .{
+        .tag = tag,
+        .src0 = src0_tmp,
+        .src1 = src1_tmp,
+        .label = label,
+    } });
+
+    c.next_local = old_next_local;
+}
+
+fn generate_ir_expr(c: *Compiler, expr: *Expr) IrTmp {
+    var dst_tmp = c.grab_local();
+    var dst_lvalue = dst_tmp.as_lvalue();
+    _ = generate_ir_rvalue(c, expr, &dst_lvalue);
+    return dst_tmp;
+}
+
+// Can't allocate any locals after this call to avoid trashing other locals.
+fn generate_ir_short_lived_rvalue(c: *Compiler, expr: *Expr) IrRvalue {
+    var old_next_local = c.next_local;
+    var result = generate_ir_rvalue(c, expr, null);
+    c.next_local = old_next_local;
+
+    return result;
+}
+
+fn generate_ir_rvalue(c: *Compiler, expr: *Expr, has_dst_tmp: ?*IrLvalue) IrRvalue {
+    var was_destination_used = false;
+    var result: IrRvalue = result: {
+        switch (expr.payload) {
+            .Binary_Op => |op| {
+                var lhs_tmp = generate_ir_rvalue(c, op.lhs, null);
+                var rhs_tmp = generate_ir_rvalue(c, op.rhs, null);
+
+                var tag: IrInstrBinaryOpTag = switch (op.tag) {
+                    .Or => .Or,
+                    .And => .And,
+                    .Eq => .Eq,
+                    .Neq => .Neq,
+                    .Lt => .Lt,
+                    .Leq => .Leq,
+                    .Gt => .Gt,
+                    .Geq => .Geq,
+                    .Add => .Add,
+                    .Sub => .Sub,
+                    .Mul => .Mul,
+                    .Div => .Div,
+                    .Mod => .Mod,
+                };
+
+                was_destination_used = true;
+                var dst_tmp = c.maybe_grab_local(has_dst_tmp);
+                generate_ir_instr(c, .{ .Binary_Op = .{
+                    .tag = tag,
+                    .dst = dst_tmp,
+                    .src0 = lhs_tmp,
+                    .src1 = rhs_tmp,
                 } });
-                c.return_local(arg_tmp);
-            }
 
-            var bytes_to_pop: u64 = call.args.count * 8;
+                break :result dst_tmp.as_rvalue();
+            },
+            .Unary_Op => |op| {
+                switch (op.tag) {
+                    .Not => {
+                        was_destination_used = true;
+                        var dst_tmp = c.maybe_grab_local(has_dst_tmp);
+                        var src_tmp = generate_ir_rvalue(c, op.subexpr, null);
+                        generate_ir_instr(c, .{ .Unary_Op = .{
+                            .tag = .Not,
+                            .dst = dst_tmp,
+                            .src = src_tmp,
+                        } });
+                        break :result dst_tmp.as_rvalue();
+                    },
+                    .Neg => {
+                        was_destination_used = true;
+                        var dst_tmp = c.maybe_grab_local(has_dst_tmp);
+                        var src_tmp = generate_ir_rvalue(c, op.subexpr, null);
+                        generate_ir_instr(c, .{ .Unary_Op = .{
+                            .tag = .Neg,
+                            .dst = dst_tmp,
+                            .src = src_tmp,
+                        } });
+                        break :result dst_tmp.as_rvalue();
+                    },
+                    .Ref => {
+                        break :result .{ .Addr = generate_ir_lvalue(c, op.subexpr) };
+                    },
+                    .Deref => {
+                        var src_tmp = generate_ir_rvalue(c, op.subexpr, null);
+                        break :result src_tmp.deref(c);
+                    },
+                }
+            },
+            .If => |_if| {
+                var false_label = c.grab_label();
+                var end_label = c.grab_label();
 
-            var src_tmp: IrRvalue = src_tmp: {
+                generate_ir_jump(c, _if.cond, false, false_label);
+
+                was_destination_used = true;
+                var dst_tmp = c.maybe_grab_local(has_dst_tmp);
+                _ = generate_ir_rvalue(c, _if.if_true, &dst_tmp);
+                generate_ir_instr(c, .{ .Instr = .{
+                    .Jmp = end_label,
+                } });
+                generate_ir_instr(c, .{ .Meta = .{
+                    .Label = false_label,
+                } });
+
+                _ = generate_ir_rvalue(c, _if.if_false, &dst_tmp);
+                generate_ir_instr(c, .{ .Meta = .{
+                    .Label = end_label,
+                } });
+
+                break :result dst_tmp.as_rvalue();
+            },
+            .Call => |call| {
+                var it = call.args.reverse_iterator();
+                while (it.prev()) |arg| {
+                    var arg_tmp = generate_ir_short_lived_rvalue(c, arg);
+                    generate_ir_instr(c, .{ .Instr = .{
+                        .Push = arg_tmp,
+                    } });
+                }
+
+                var bytes_to_pop: u64 = call.args.count * 8;
+
                 if (call.lhs.payload == .Symbol and call.lhs.payload.Symbol.payload == .Function) {
                     var symbol = call.lhs.payload.Symbol;
                     var function = &symbol.payload.Function;
@@ -3989,127 +4050,95 @@ fn generate_ir_expr_lvalue(c: *Compiler, expr: *Expr, dst_tmp: IrLvalue) void {
                         } });
                         bytes_to_pop += 8;
                     }
-
-                    break :src_tmp .{ .Label = function.label };
                 }
 
-                var lhs_tmp = c.grab_local();
-                generate_ir_expr(c, call.lhs, lhs_tmp);
-
-                break :src_tmp lhs_tmp.as_rvalue();
-            };
-
-            generate_ir_instr(c, .{ .Instr = .{
-                .Call = .{
-                    .dst = dst_tmp,
-                    .src = src_tmp,
-                },
-            } });
-            if (bytes_to_pop > 0) {
+                was_destination_used = true;
+                var dst_tmp = c.maybe_grab_local(has_dst_tmp);
+                var src_tmp = generate_ir_rvalue(c, call.lhs, null);
                 generate_ir_instr(c, .{ .Instr = .{
-                    .Pop = bytes_to_pop,
+                    .Call = .{
+                        .dst = dst_tmp,
+                        .src = src_tmp,
+                    },
                 } });
-            }
-        },
-        .Index,
-        .Field,
-        .Initializer,
-        .Expr_List,
-        .Designator,
-        .Cast1,
-        .Cast2,
-        => unreachable,
-        .Bool => |value| {
-            generate_ir_instr(c, .{ .Instr = .{
-                .Mov = .{
-                    .dst = dst_tmp,
-                    .src = .{ .Imm = @intFromBool(value) },
-                },
-            } });
-        },
-        .Int64 => |value| {
-            generate_ir_instr(c, .{ .Instr = .{
-                .Mov = .{
-                    .dst = dst_tmp,
-                    .src = .{ .Imm = value },
-                },
-            } });
-        },
-        .Null => {
-            generate_ir_instr(c, .{ .Instr = .{
-                .Mov = .{
-                    .dst = dst_tmp,
-                    .src = .{ .Imm = 0 },
-                },
-            } });
-        },
-        .Symbol => |symbol| {
-            switch (symbol.payload) {
-                .Variable => |variable| {
-                    var tmp = variable.tmp;
-                    tmp.height = c.function_depth - symbol.depth;
+                if (bytes_to_pop > 0) {
                     generate_ir_instr(c, .{ .Instr = .{
-                        .Mov = .{
-                            .dst = dst_tmp,
-                            .src = tmp.as_rvalue(),
-                        },
+                        .Pop = bytes_to_pop,
                     } });
-                },
-                .Parameter => |parameter| {
-                    generate_ir_instr(c, .{ .Instr = .{
-                        .Mov = .{
-                            .dst = dst_tmp,
-                            .src = parameter.tmp.as_rvalue(),
-                        },
-                    } });
-                },
-                .Function => |function| {
-                    generate_ir_instr(c, .{ .Instr = .{
-                        .Mov = .{
-                            .dst = dst_tmp,
-                            .src = .{ .Label = function.label },
-                        },
-                    } });
-                },
-                .Enum_Field => |field| {
-                    var value = field.value;
+                }
 
-                    generate_ir_instr(c, .{ .Instr = .{
-                        .Mov = .{
-                            .dst = dst_tmp,
-                            .src = .{ .Imm = @intCast(value) },
-                        },
-                    } });
+                break :result dst_tmp.as_rvalue();
+            },
+            .Index,
+            .Field,
+            .Initializer,
+            .Expr_List,
+            .Designator,
+            .Cast1,
+            .Cast2,
+            => unreachable,
+            .Bool => |value| {
+                break :result .{ .Imm = @intFromBool(value) };
+            },
+            .Int64 => |value| {
+                break :result .{ .Imm = value };
+            },
+            .Null => {
+                break :result .{ .Imm = 0 };
+            },
+            .Symbol => |symbol| {
+                switch (symbol.payload) {
+                    .Variable => |variable| {
+                        var tmp = variable.tmp;
+                        tmp.height = c.function_depth - symbol.depth;
+
+                        break :result tmp.as_rvalue();
+                    },
+                    .Parameter => |parameter| {
+                        break :result parameter.tmp.as_rvalue();
+                    },
+                    .Function => |function| {
+                        break :result .{ .Label = function.label };
+                    },
+                    .Enum_Field => |field| {
+                        break :result .{ .Imm = @intCast(field.value) };
+                    },
+                    .Struct_Field,
+                    .Union_Field,
+                    .Type,
+                    .Definition,
+                    => unreachable,
+                }
+            },
+            .Enum_Field_From_Type,
+            .Enum_Field,
+            .Type,
+            .Identifier,
+            => unreachable,
+        }
+    };
+
+    if (!was_destination_used) {
+        if (has_dst_tmp) |dst_tmp| {
+            generate_ir_instr(c, .{ .Instr = .{
+                .Mov = .{
+                    .dst = dst_tmp.*,
+                    .src = result,
                 },
-                .Struct_Field,
-                .Union_Field,
-                .Type,
-                .Definition,
-                => unreachable,
-            }
-        },
-        .Enum_Field_From_Type,
-        .Enum_Field,
-        .Type,
-        .Identifier,
-        => unreachable,
+            } });
+            return dst_tmp.as_rvalue();
+        }
     }
 
-    c.next_local = old_next_local;
+    return result;
 }
 
 fn generate_ir_lvalue(c: *Compiler, expr: *Expr) IrLvalue {
     switch (expr.payload) {
         .Unary_Op => |op| {
             std.debug.assert(op.tag == .Deref);
-
-            var dst_tmp = c.grab_local();
-            generate_ir_expr(c, op.subexpr, dst_tmp);
-
-            return .{ .Mem = .{
-                .choose = CHOOSE_BASE,
-                .base = dst_tmp,
-            } };
+            var src_tmp = generate_ir_rvalue(c, op.subexpr, null);
+            return src_tmp.ref(c);
         },
         .Symbol => |symbol| {
             switch (symbol.payload) {
@@ -4117,10 +4146,10 @@ fn generate_ir_lvalue(c: *Compiler, expr: *Expr) IrLvalue {
                     var tmp = variable.tmp;
                     tmp.height = c.function_depth - symbol.depth;
 
-                    return .{ .Tmp = tmp };
+                    return tmp.as_lvalue();
                 },
                 .Parameter => |parameter| {
-                    return .{ .Tmp = parameter.tmp };
+                    return parameter.tmp.as_lvalue();
                 },
                 else => unreachable,
             }
@@ -4189,34 +4218,54 @@ fn debug_print_ir_instr(ir_instr: IrInstr) void {
     switch (ir_instr) {
         .Binary_Op => |op| {
             var text: []const u8 = switch (op.tag) {
-                .Or => "    or",
-                .And => "    and",
-                .Eq => "    eq ",
-                .Neq => "    neq",
-                .Lt => "    lt ",
-                .Leq => "    leq",
-                .Gt => "    gt ",
-                .Geq => "    geq",
-                .Add => "    add",
-                .Sub => "    sub",
-                .Mul => "    mul",
-                .Div => "    div",
-                .Mod => "    mod",
+                .Or => "or",
+                .And => "and",
+                .Eq => "eq ",
+                .Neq => "neq",
+                .Lt => "lt ",
+                .Leq => "leq",
+                .Gt => "gt ",
+                .Geq => "geq",
+                .Add => "add",
+                .Sub => "sub",
+                .Mul => "mul",
+                .Div => "div",
+                .Mod => "mod",
             };
 
-            std.debug.print("{s}    ", .{text});
+            std.debug.print("    {s}    ", .{text});
+            debug_print_ir_lvalue(op.dst);
+            std.debug.print(", ", .{});
+            debug_print_ir_rvalue(op.src0);
+            std.debug.print(", ", .{});
+            debug_print_ir_rvalue(op.src1);
+        },
+        .Unary_Op => |op| {
+            var text: []const u8 = switch (op.tag) {
+                .Not => "not",
+                .Neg => "neg",
+            };
+
+            std.debug.print("    {s}    ", .{text});
             debug_print_ir_lvalue(op.dst);
             std.debug.print(", ", .{});
             debug_print_ir_rvalue(op.src);
         },
-        .Unary_Op => |op| {
-            var text: []const u8 = switch (op.tag) {
-                .Not => "    not",
-                .Neg => "    neg",
+        .Jmpc => |jmpc| {
+            var text: []const u8 = switch (jmpc.tag) {
+                .Eq => "je ",
+                .Neq => "jne",
+                .Lt => "jl ",
+                .Leq => "jle",
+                .Gt => "jg ",
+                .Geq => "jge",
             };
 
-            std.debug.print("{s}    ", .{text});
-            debug_print_ir_lvalue(op.dst);
+            std.debug.print("    {s}    ", .{text});
+            debug_print_ir_rvalue(jmpc.src0);
+            std.debug.print(", ", .{});
+            debug_print_ir_rvalue(jmpc.src1);
+            std.debug.print(", L{}", .{jmpc.label});
         },
         .Instr => |instr| {
             switch (instr) {
@@ -4232,23 +4281,6 @@ fn debug_print_ir_instr(ir_instr: IrInstr) void {
                 },
                 .Jmp => |label| {
                     std.debug.print("    jmp    L{}", .{label});
-                },
-                .Jnz => |jnz| {
-                    std.debug.print("    jnz    ", .{});
-                    debug_print_ir_rvalue(jnz.src);
-                    std.debug.print(", L{}", .{jnz.label});
-                },
-                .Jz => |jz| {
-                    std.debug.print("    jz     ", .{});
-                    debug_print_ir_rvalue(jz.src);
-                    std.debug.print(", L{}", .{jz.label});
-                },
-                .Je => |je| {
-                    std.debug.print("    je     ", .{});
-                    debug_print_ir_rvalue(je.src0);
-                    std.debug.print(", ", .{});
-                    debug_print_ir_rvalue(je.src1);
-                    std.debug.print(", L{}", .{je.label});
                 },
                 .Push_Frame_Pointer => |depth| {
                     std.debug.print("    push   ({}^)", .{depth});
@@ -4266,13 +4298,8 @@ fn debug_print_ir_instr(ir_instr: IrInstr) void {
                     std.debug.print(", ", .{});
                     debug_print_ir_rvalue(call.src);
                 },
-                .Ret1 => |label| {
+                .Ret => |label| {
                     std.debug.print("    ret    L{}", .{label});
-                },
-                .Ret2 => |ret| {
-                    std.debug.print("    ret    ", .{});
-                    debug_print_ir_lvalue(ret.src);
-                    std.debug.print(", L{}", .{ret.label});
                 },
                 .Exit => {
                     std.debug.print("    exit", .{});
@@ -4315,7 +4342,7 @@ fn ir_grab_pointer_from_tmp(c: *Compiler, tmp: IrTmp) u64 {
             var i = tmp.height;
             var rbp = c.rbp;
             while (i > 0) : (i -= 1) {
-                rbp = ir_stack_read_u64(c, rbp - 4 * 8);
+                rbp = ir_stack_read_u64(c, rbp - -LF_FIRST_ARG_OFFSET);
             }
 
             var rbp_i64: i64 = @bitCast(rbp);
@@ -4436,36 +4463,35 @@ fn interpret(c: *Compiler) void {
     c.rsp = @intCast(c.next_global);
     c.rbp = c.rsp;
 
-    var return_src: u64 = 0xFFFF_FFFF_FFFF_FFFF;
     var ip: u64 = 0;
     while (ip < c.ir_instrs.items.len) {
         switch (c.ir_instrs.items[ip]) {
             .Binary_Op => |op| {
                 var dst = ir_grab_pointer_from_lvalue(c, op.dst);
-                var lhs = ir_stack_read_u64(c, dst);
-                var rhs = ir_grab_value_from_rvalue(c, op.src);
+                var src0 = ir_grab_value_from_rvalue(c, op.src0);
+                var src1 = ir_grab_value_from_rvalue(c, op.src1);
 
                 switch (op.tag) {
-                    .Or => lhs = @intFromBool((lhs != 0) or (rhs != 0)),
-                    .And => lhs = @intFromBool((lhs != 0) and (rhs != 0)),
-                    .Eq => lhs = @intFromBool(lhs == rhs),
-                    .Neq => lhs = @intFromBool(lhs != rhs),
-                    .Lt => lhs = @intFromBool(@as(i64, @bitCast(lhs)) < @as(i64, @bitCast(rhs))),
-                    .Leq => lhs = @intFromBool(@as(i64, @bitCast(lhs)) <= @as(i64, @bitCast(rhs))),
-                    .Gt => lhs = @intFromBool(@as(i64, @bitCast(lhs)) > @as(i64, @bitCast(rhs))),
-                    .Geq => lhs = @intFromBool(@as(i64, @bitCast(lhs)) >= @as(i64, @bitCast(rhs))),
-                    .Add => lhs = @bitCast(@as(i64, @bitCast(lhs)) + @as(i64, @bitCast(rhs))),
-                    .Sub => lhs = @bitCast(@as(i64, @bitCast(lhs)) - @as(i64, @bitCast(rhs))),
-                    .Mul => lhs = @bitCast(@as(i64, @bitCast(lhs)) * @as(i64, @bitCast(rhs))),
-                    .Div => lhs = @bitCast(@divTrunc(@as(i64, @bitCast(lhs)), @as(i64, @bitCast(rhs)))),
-                    .Mod => lhs = @bitCast(@rem(@as(i64, @bitCast(lhs)), @as(i64, @bitCast(rhs)))),
+                    .Or => src0 = @intFromBool((src0 != 0) or (src1 != 0)),
+                    .And => src0 = @intFromBool((src0 != 0) and (src1 != 0)),
+                    .Eq => src0 = @intFromBool(src0 == src1),
+                    .Neq => src0 = @intFromBool(src0 != src1),
+                    .Lt => src0 = @intFromBool(@as(i64, @bitCast(src0)) < @as(i64, @bitCast(src1))),
+                    .Leq => src0 = @intFromBool(@as(i64, @bitCast(src0)) <= @as(i64, @bitCast(src1))),
+                    .Gt => src0 = @intFromBool(@as(i64, @bitCast(src0)) > @as(i64, @bitCast(src1))),
+                    .Geq => src0 = @intFromBool(@as(i64, @bitCast(src0)) >= @as(i64, @bitCast(src1))),
+                    .Add => src0 = @bitCast(@as(i64, @bitCast(src0)) + @as(i64, @bitCast(src1))),
+                    .Sub => src0 = @bitCast(@as(i64, @bitCast(src0)) - @as(i64, @bitCast(src1))),
+                    .Mul => src0 = @bitCast(@as(i64, @bitCast(src0)) * @as(i64, @bitCast(src1))),
+                    .Div => src0 = @bitCast(@divTrunc(@as(i64, @bitCast(src0)), @as(i64, @bitCast(src1)))),
+                    .Mod => src0 = @bitCast(@rem(@as(i64, @bitCast(src0)), @as(i64, @bitCast(src1)))),
                 }
 
-                ir_stack_write_u64(c, dst, lhs);
+                ir_stack_write_u64(c, dst, src0);
             },
             .Unary_Op => |op| {
                 var dst = ir_grab_pointer_from_lvalue(c, op.dst);
-                var src = ir_stack_read_u64(c, dst);
+                var src = ir_grab_value_from_rvalue(c, op.src);
 
                 switch (op.tag) {
                     .Not => src = @intFromBool(src == 0),
@@ -4473,6 +4499,24 @@ fn interpret(c: *Compiler) void {
                 }
 
                 ir_stack_write_u64(c, dst, src);
+            },
+            .Jmpc => |jmpc| {
+                var src0 = ir_grab_value_from_rvalue(c, jmpc.src0);
+                var src1 = ir_grab_value_from_rvalue(c, jmpc.src1);
+
+                switch (jmpc.tag) {
+                    .Eq => src0 = @intFromBool(src0 == src1),
+                    .Neq => src0 = @intFromBool(src0 != src1),
+                    .Lt => src0 = @intFromBool(@as(i64, @bitCast(src0)) < @as(i64, @bitCast(src1))),
+                    .Leq => src0 = @intFromBool(@as(i64, @bitCast(src0)) <= @as(i64, @bitCast(src1))),
+                    .Gt => src0 = @intFromBool(@as(i64, @bitCast(src0)) > @as(i64, @bitCast(src1))),
+                    .Geq => src0 = @intFromBool(@as(i64, @bitCast(src0)) >= @as(i64, @bitCast(src1))),
+                }
+
+                if (src0 != 0) {
+                    ip = labels[jmpc.label];
+                    continue;
+                }
             },
             .Instr => |instr| {
                 switch (instr) {
@@ -4490,33 +4534,11 @@ fn interpret(c: *Compiler) void {
                         ip = labels[label];
                         continue;
                     },
-                    .Jnz => |jnz| {
-                        var cond = ir_grab_value_from_rvalue(c, jnz.src);
-                        if (cond != 0) {
-                            ip = labels[jnz.label];
-                            continue;
-                        }
-                    },
-                    .Jz => |jz| {
-                        var cond = ir_grab_value_from_rvalue(c, jz.src);
-                        if (cond == 0) {
-                            ip = labels[jz.label];
-                            continue;
-                        }
-                    },
-                    .Je => |je| {
-                        var src0 = ir_grab_value_from_rvalue(c, je.src0);
-                        var src1 = ir_grab_value_from_rvalue(c, je.src1);
-                        if (src0 == src1) {
-                            ip = labels[je.label];
-                            continue;
-                        }
-                    },
                     .Push_Frame_Pointer => |depth| {
                         var i = depth;
                         var rbp = c.rbp;
                         while (i >= 0) : (i -= 1) {
-                            rbp = ir_stack_read_u64(c, rbp - 4 * 8);
+                            rbp = ir_stack_read_u64(c, rbp - -LF_FIRST_ARG_OFFSET);
                         }
 
                         ir_stack_push(c, rbp);
@@ -4538,13 +4560,8 @@ fn interpret(c: *Compiler) void {
                         ip = labels[label];
                         continue;
                     },
-                    .Ret1 => |label| {
+                    .Ret => |label| {
                         ip = labels[label];
-                        continue;
-                    },
-                    .Ret2 => |ret| {
-                        return_src = ir_grab_pointer_from_lvalue(c, ret.src);
-                        ip = labels[ret.label];
                         continue;
                     },
                     .Exit => {
@@ -4557,19 +4574,12 @@ fn interpret(c: *Compiler) void {
                     .GFB => |gfb| {
                         c.rbp = c.rsp;
                         c.rsp += gfb.stack_space_used;
-                        return_src = 0xFFFF_FFFF_FFFF_FFFF;
                     },
                     .GFE => |gfe| {
                         c.rsp -= gfe.stack_space_used;
-
-                        var dst = ir_stack_pop(c);
+                        _ = ir_stack_pop(c);
                         c.rbp = ir_stack_pop(c);
                         ip = ir_stack_pop(c);
-
-                        if (return_src != 0xFFFF_FFFF_FFFF_FFFF) {
-                            var value = ir_stack_read_u64_no_check(c, return_src);
-                            ir_stack_write_u64(c, dst, value);
-                        }
                     },
                     .Label => {},
                 }
