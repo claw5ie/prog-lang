@@ -1092,10 +1092,7 @@ const IrInstr = union(IrInstrType) {
         Push_Frame_Pointer: i32,
         Push: IrRvalue,
         Pop: u64,
-        Call: struct {
-            dst: IrLvalue,
-            src: IrRvalue,
-        },
+        Call: IrRvalue,
         Ret: IrLabel,
         Exit: void,
     },
@@ -1116,6 +1113,7 @@ const IrStmtContext = struct {
     loop_cond_label: IrLabel,
     loop_end_label: IrLabel,
     function_end_label: IrLabel,
+    return_address_offset: IrOffset,
 };
 
 inline fn min_enum(x: anytype, y: @TypeOf(x)) @TypeOf(x) {
@@ -3542,22 +3540,19 @@ fn generate_ir_instr(c: *Compiler, instr: IrInstr) void {
     };
 }
 
-const GF_FIRST_ARG_OFFSET = -3 * 8;
-const LF_FIRST_ARG_OFFSET = -4 * 8;
-const RETURN_ADDRESS_OFFSET = -8;
+const GF_FIRST_ARG_OFFSET = GF_RETURN_ADDRESS_OFFSET - 8;
+const GF_RETURN_ADDRESS_OFFSET = -16 - 8;
+const LF_FIRST_ARG_OFFSET = LF_RETURN_ADDRESS_OFFSET - 8;
+const LF_RETURN_ADDRESS_OFFSET = -16 - 16;
+const LF_RBP_OFFSET = LF_RETURN_ADDRESS_OFFSET + 8;
 
 fn generate_ir(c: *Compiler) void {
-    {
-        _ = c.grab_global();
-        var dst = c.grab_global();
-        generate_ir_instr(c, .{ .Instr = .{
-            .Call = .{
-                .dst = .{ .Tmp = dst },
-                .src = .{ .Label = c.main_function.payload.Function.label },
-            },
-        } });
-        generate_ir_instr(c, .{ .Instr = .Exit });
-    }
+    generate_ir_instr(c, .{ .Instr = .{
+        .Call = .{
+            .Label = c.main_function.payload.Function.label,
+        },
+    } });
+    generate_ir_instr(c, .{ .Instr = .Exit });
 
     var it = c.globals.iterator();
     while (it.next()) |symbol| {
@@ -3622,61 +3617,62 @@ fn generate_ir_local_symbol(c: *Compiler, symbol: *Symbol) void {
 }
 
 fn generate_ir_function(c: *Compiler, function: *const SymbolFunction, first_arg_offset: IrOffset) void {
-    var param_tmp = IrTmp{
-        .offset = first_arg_offset,
-        .tag = .Local,
-        .height = 0,
-    };
-    var it = function._type.payload.Function.params.iterator();
-    while (it.next()) |param_ptr| {
-        var param = &param_ptr.*.payload.Parameter;
-        param_tmp.offset -= 8;
-        param.tmp = param_tmp;
-    }
-
-    generate_ir_function_body(c, function);
-}
-
-fn generate_ir_function_body(c: *Compiler, function: *const SymbolFunction) void {
-    var old_depth = c.function_depth;
-    c.function_depth = function.depth;
-
-    var function_end_label = c.grab_label();
-    var index = c.ir_instrs.items.len;
-    generate_ir_instr(c, undefined);
-
     {
-        var ctx = IrStmtContext{
-            .loop_cond_label = undefined,
-            .loop_end_label = undefined,
-            .function_end_label = function_end_label,
+        var param_tmp = IrTmp{
+            .offset = first_arg_offset,
+            .tag = .Local,
+            .height = 0,
         };
-        var it = function.block.iterator();
-        while (it.next()) |stmt| {
-            generate_ir_stmt(c, &ctx, stmt);
+        var it = function._type.payload.Function.params.iterator();
+        while (it.next()) |param_ptr| {
+            var param = &param_ptr.*.payload.Parameter;
+            param.tmp = param_tmp;
+            param_tmp.offset -= 8;
         }
     }
 
     {
-        var stack_space_used: u32 = @intCast(c.biggest_local_so_far);
-        c.ir_instrs.items[index] = .{ .Meta = .{
-            .GFB = .{
-                .stack_space_used = stack_space_used,
-                .label = function.label,
-            },
-        } };
+        var old_depth = c.function_depth;
+        c.function_depth = function.depth;
 
-        generate_ir_instr(c, .{ .Meta = .{
-            .GFE = .{
-                .stack_space_used = stack_space_used,
-                .label = function_end_label,
-            },
-        } });
+        var function_end_label = c.grab_label();
+        var index = c.ir_instrs.items.len;
+        generate_ir_instr(c, undefined);
+
+        {
+            var ctx = IrStmtContext{
+                .loop_cond_label = undefined,
+                .loop_end_label = undefined,
+                .function_end_label = function_end_label,
+                .return_address_offset = first_arg_offset + 8, // NOTE[0]: Assume that return address is right after first argument.
+            };
+            var it = function.block.iterator();
+            while (it.next()) |stmt| {
+                generate_ir_stmt(c, &ctx, stmt);
+            }
+        }
+
+        {
+            var stack_space_used: u32 = @intCast(c.biggest_local_so_far);
+            c.ir_instrs.items[index] = .{ .Meta = .{
+                .GFB = .{
+                    .stack_space_used = stack_space_used,
+                    .label = function.label,
+                },
+            } };
+
+            generate_ir_instr(c, .{ .Meta = .{
+                .GFE = .{
+                    .stack_space_used = stack_space_used,
+                    .label = function_end_label,
+                },
+            } });
+        }
+
+        c.next_local = 0;
+        c.biggest_local_so_far = 0;
+        c.function_depth = old_depth;
     }
-
-    c.next_local = 0;
-    c.biggest_local_so_far = 0;
-    c.function_depth = old_depth;
 }
 
 fn generate_ir_block(c: *Compiler, ctx: *const IrStmtContext, block: StmtBlock) void {
@@ -3765,11 +3761,10 @@ fn generate_ir_stmt(c: *Compiler, ctx: *const IrStmtContext, stmt: *Stmt) void {
                 .Label = block_label,
             } });
 
-            var new_ctx = IrStmtContext{
-                .loop_cond_label = cond_label,
-                .loop_end_label = end_label,
-                .function_end_label = ctx.function_end_label,
-            };
+            var new_ctx = ctx.*;
+            new_ctx.loop_cond_label = cond_label;
+            new_ctx.loop_end_label = end_label;
+
             generate_ir_block(c, &new_ctx, _while.block);
             generate_ir_instr(c, .{ .Meta = .{
                 .Label = cond_label,
@@ -3842,7 +3837,7 @@ fn generate_ir_stmt(c: *Compiler, ctx: *const IrStmtContext, stmt: *Stmt) void {
             var dst_tmp = .{ .Mem = .{
                 .choose = CHOOSE_BASE,
                 .base = .{
-                    .offset = RETURN_ADDRESS_OFFSET,
+                    .offset = ctx.return_address_offset,
                     .tag = .Local,
                     .height = 0,
                 },
@@ -4040,6 +4035,15 @@ fn generate_ir_rvalue(c: *Compiler, expr: *Expr, has_dst_tmp: ?*IrLvalue) IrRval
 
                 var bytes_to_pop: u64 = call.args.count * 8;
 
+                // Return address must the first thing pushed to the stack after arguments, because NOTE[0] relies on that assumption.
+                was_destination_used = true;
+                var dst_tmp = c.maybe_grab_local(has_dst_tmp);
+                generate_ir_instr(c, .{ .Instr = .{
+                    .Push = .{ .Addr = dst_tmp },
+                } });
+
+                bytes_to_pop += 8;
+
                 if (call.lhs.payload == .Symbol and call.lhs.payload.Symbol.payload == .Function) {
                     var symbol = call.lhs.payload.Symbol;
                     var function = &symbol.payload.Function;
@@ -4052,14 +4056,9 @@ fn generate_ir_rvalue(c: *Compiler, expr: *Expr, has_dst_tmp: ?*IrLvalue) IrRval
                     }
                 }
 
-                was_destination_used = true;
-                var dst_tmp = c.maybe_grab_local(has_dst_tmp);
                 var src_tmp = generate_ir_rvalue(c, call.lhs, null);
                 generate_ir_instr(c, .{ .Instr = .{
-                    .Call = .{
-                        .dst = dst_tmp,
-                        .src = src_tmp,
-                    },
+                    .Call = src_tmp,
                 } });
                 if (bytes_to_pop > 0) {
                     generate_ir_instr(c, .{ .Instr = .{
@@ -4292,11 +4291,9 @@ fn debug_print_ir_instr(ir_instr: IrInstr) void {
                 .Pop => |count| {
                     std.debug.print("    pop    {}", .{count});
                 },
-                .Call => |call| {
+                .Call => |src| {
                     std.debug.print("    call   ", .{});
-                    debug_print_ir_lvalue(call.dst);
-                    std.debug.print(", ", .{});
-                    debug_print_ir_rvalue(call.src);
+                    debug_print_ir_rvalue(src);
                 },
                 .Ret => |label| {
                     std.debug.print("    ret    L{}", .{label});
@@ -4309,10 +4306,10 @@ fn debug_print_ir_instr(ir_instr: IrInstr) void {
         .Meta => |meta| {
             switch (meta) {
                 .GFB => |gfb| {
-                    std.debug.print("GFB{}: {}b", .{ gfb.label, gfb.stack_space_used });
+                    std.debug.print("GFB L{}: {}b", .{ gfb.label, gfb.stack_space_used });
                 },
                 .GFE => |gfe| {
-                    std.debug.print("GFE{}: {}b", .{ gfe.label, gfe.stack_space_used });
+                    std.debug.print("GFE L{}: {}b", .{ gfe.label, gfe.stack_space_used });
                     std.debug.print("\n", .{});
                 },
                 .Label => |label| {
@@ -4342,7 +4339,7 @@ fn ir_grab_pointer_from_tmp(c: *Compiler, tmp: IrTmp) u64 {
             var i = tmp.height;
             var rbp = c.rbp;
             while (i > 0) : (i -= 1) {
-                rbp = ir_stack_read_u64(c, rbp - -LF_FIRST_ARG_OFFSET);
+                rbp = ir_stack_read_u64(c, rbp - -LF_RBP_OFFSET);
             }
 
             var rbp_i64: i64 = @bitCast(rbp);
@@ -4538,7 +4535,7 @@ fn interpret(c: *Compiler) void {
                         var i = depth;
                         var rbp = c.rbp;
                         while (i >= 0) : (i -= 1) {
-                            rbp = ir_stack_read_u64(c, rbp - -LF_FIRST_ARG_OFFSET);
+                            rbp = ir_stack_read_u64(c, rbp - -LF_RBP_OFFSET);
                         }
 
                         ir_stack_push(c, rbp);
@@ -4550,13 +4547,11 @@ fn interpret(c: *Compiler) void {
                     .Pop => |count| {
                         c.rsp -= count;
                     },
-                    .Call => |call| {
-                        var dst = ir_grab_pointer_from_lvalue(c, call.dst);
+                    .Call => |src| {
                         ir_stack_push(c, ip);
                         ir_stack_push(c, c.rbp);
-                        ir_stack_push(c, dst);
 
-                        var label = ir_grab_value_from_rvalue(c, call.src);
+                        var label = ir_grab_value_from_rvalue(c, src);
                         ip = labels[label];
                         continue;
                     },
@@ -4577,7 +4572,6 @@ fn interpret(c: *Compiler) void {
                     },
                     .GFE => |gfe| {
                         c.rsp -= gfe.stack_space_used;
-                        _ = ir_stack_pop(c);
                         c.rbp = ir_stack_pop(c);
                         ip = ir_stack_pop(c);
                     },
