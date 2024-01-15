@@ -127,7 +127,7 @@ pub fn peek(l: *This) TokenTag {
     return l.tokens[l.token_start].tag;
 }
 
-pub fn peek_ahead(l: *This, index: usize) TokenTag {
+pub fn peek_ahead(l: *This, index: u8) TokenTag {
     std.debug.assert(index < LOOKAHEAD);
 
     while (index >= l.token_count) {

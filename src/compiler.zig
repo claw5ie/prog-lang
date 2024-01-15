@@ -5,9 +5,6 @@ const notstd = @import("notstd.zig");
 const ArenaAllocator = std.heap.ArenaAllocator;
 const Allocator = std.mem.Allocator;
 
-var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
-var gpa = general_purpose_allocator.allocator();
-
 var VOID_TYPE_HINT = Type{
     .payload = .Void,
     .size = 0,
@@ -33,26 +30,10 @@ var INT64_TYPE_HINT = Type{
     .line_info = .{},
 };
 
-const LOWEST_PREC = -127;
-
-const FunctionDepth = i32;
-
 const Compiler = struct {
-    globals: SymbolList,
-    local_functions: SymbolList,
-    ast_arena: ArenaAllocator,
-    ast_arena_allocator: Allocator,
-    symbols: SymbolTable,
-    current_scope: *Scope,
-    global_scope: *Scope,
-    main_function: *Symbol,
-    function_depth: FunctionDepth = 0,
+    local_functions: Ast.SymbolList,
 
-    ir_instrs: IrInstrList,
-    next_global: IrOffset = 0,
-    next_local: IrOffset = 0,
-    next_label: IrLabel = 0,
-    biggest_local_so_far: IrOffset = 0,
+    main_function: *Symbol,
 
     stack: []u8,
     rsp: u64 = 0,
@@ -109,731 +90,9 @@ const Compiler = struct {
     }
 };
 
-const Scope = struct {
-    parent: ?*Scope,
-};
-
-const Identifier = struct {
-    token: Token,
-    scope: *Scope,
-};
-
-const TypeStruct = struct {
-    fields: SymbolList,
-    scope: *Scope,
-};
-
-const TypeTag = enum {
-    Struct,
-    Union,
-    Enum,
-    Function,
-    Array,
-    Pointer,
-    Void,
-    Bool,
-    Int64,
-    Symbol,
-    Identifier,
-};
-
-const TypePayload = union(TypeTag) {
-    Struct: TypeStruct,
-    Union: TypeStruct,
-    Enum: TypeStruct,
-    Function: struct {
-        params: SymbolList,
-        return_type: *Type,
-        scope: *Scope,
-    },
-    Array: struct {
-        expr: *Expr,
-        count: TypeSize,
-        subtype: *Type,
-    },
-    Pointer: *Type,
-    Void: void,
-    Bool: void,
-    Int64: void,
-    Symbol: *Symbol,
-    Identifier: Identifier,
-};
-
-const TypeSize = u31;
-
-const Type = struct {
-    const FlagType = u16;
-    const Is_Integer: FlagType = 0x1;
-    const Is_Integral: FlagType = 0x2;
-    const Is_Comparable: FlagType = 0x4;
-    const Is_Ptr: FlagType = 0x8;
-    const Is_Void_Ptr: FlagType = 0x10;
-    const Can_Be_Dereferenced: FlagType = 0x20;
-    const Is_Pointer_To_Struct: FlagType = 0x40;
-    const Is_Pointer_To_Union: FlagType = 0x80;
-    const Is_Pointer_To_Array: FlagType = 0x100;
-
-    payload: TypePayload,
-    size: TypeSize,
-    is_resolved: bool = false,
-    typechecking_stage: TypecheckingStage = .Not_Typechecked,
-    line_info: LineInfo,
-
-    pub fn format(self: Type, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-        switch (self.payload) {
-            .Struct => try writer.writeAll("<struct>"),
-            .Union => try writer.writeAll("<union>"),
-            .Enum => try writer.writeAll("<enum>"),
-            .Function => |function| {
-                try writer.print("proc(", .{});
-
-                var it = function.params.iterator();
-                while (it.next()) |param_ptr| {
-                    var param = &param_ptr.*.payload.Parameter;
-                    if (param.has_id) {
-                        try writer.print("{s}: ", .{param_ptr.*.key.text});
-                    }
-                    try writer.print("{}", .{param._type});
-
-                    if (it.has_next()) {
-                        try writer.print(", ", .{});
-                    }
-                }
-
-                try writer.print(") -> {}", .{function.return_type});
-            },
-            .Array => |array| try writer.print("[{}]{}", .{ array.count, array.subtype }),
-            .Pointer => |subtype| try writer.print("*{}", .{subtype}),
-            .Void => try writer.writeAll("void"),
-            .Bool => try writer.writeAll("bool"),
-            .Int64 => try writer.writeAll("int64"),
-            .Symbol => |symbol| try writer.writeAll(symbol.key.text),
-            .Identifier => unreachable,
-        }
-    }
-
-    pub fn compare(self: *Type) FlagType {
-        var flags: FlagType = 0;
-
-        switch (self.payload) {
-            .Enum => flags |= Is_Integer | Is_Integral | Is_Comparable,
-            .Function => flags |= Is_Ptr,
-            .Pointer => {
-                flags |= Is_Ptr | Can_Be_Dereferenced;
-
-                var subtype = self.payload.Pointer.extract_ptr();
-                switch (subtype.payload) {
-                    .Struct => flags |= Is_Pointer_To_Struct,
-                    .Union => flags |= Is_Pointer_To_Union,
-                    .Array => flags |= Is_Pointer_To_Array,
-                    .Void => {
-                        flags |= Is_Void_Ptr;
-                        flags &= ~Can_Be_Dereferenced;
-                    },
-                    else => {},
-                }
-            },
-            .Bool => flags |= Is_Comparable,
-            .Int64 => flags |= Is_Integer | Is_Integral | Is_Comparable,
-            .Struct,
-            .Union,
-            .Array,
-            .Void,
-            => {},
-            .Symbol,
-            .Identifier,
-            => unreachable,
-        }
-
-        return flags;
-    }
-
-    pub fn extract_ptr(self: *Type) *Type {
-        return if (self.payload != .Symbol)
-            self
-        else
-            self.payload.Symbol.payload.Type;
-    }
-
-    pub inline fn is(self: *Type, tag: TypeTag) bool {
-        return self.payload == tag;
-    }
-
-    pub fn eql(self: *Type, other: *Type) bool {
-        if (self.payload != @as(TypeTag, other.payload)) {
-            return false;
-        }
-
-        switch (self.payload) {
-            .Struct => {
-                var sstruct = &self.payload.Struct;
-                var ostruct = &other.payload.Struct;
-                return sstruct.scope == ostruct.scope;
-            },
-            .Union => {
-                var sstruct = &self.payload.Union;
-                var ostruct = &other.payload.Union;
-                return sstruct.scope == ostruct.scope;
-            },
-            .Enum => {
-                var sstruct = &self.payload.Enum;
-                var ostruct = &other.payload.Enum;
-                return sstruct.scope == ostruct.scope;
-            },
-            .Function => {
-                var sfunc = &self.payload.Function;
-                var ofunc = &other.payload.Function;
-
-                if (sfunc.params.count != ofunc.params.count) {
-                    return false;
-                }
-
-                var sit = sfunc.params.iterator();
-                var oit = ofunc.params.iterator();
-                while (sit.next()) |sparam| {
-                    var oparam = oit.next().?;
-                    var otype = oparam.*.payload.Parameter._type.extract_ptr();
-                    var stype = sparam.*.payload.Parameter._type.extract_ptr();
-                    if (!stype.eql(otype)) {
-                        return false;
-                    }
-                }
-
-                var sreturn_type = sfunc.return_type.extract_ptr();
-                var oreturn_type = ofunc.return_type.extract_ptr();
-
-                return sreturn_type.eql(oreturn_type);
-            },
-            .Array => {
-                var sarray = &self.payload.Array;
-                var oarray = &other.payload.Array;
-
-                if (sarray.count != oarray.count) {
-                    return false;
-                }
-
-                var ssubtype = sarray.subtype.extract_ptr();
-                var osubtype = oarray.subtype.extract_ptr();
-
-                return ssubtype.eql(osubtype);
-            },
-            .Pointer => {
-                var stype = self.payload.Pointer.extract_ptr();
-                var otype = other.payload.Pointer.extract_ptr();
-
-                if (stype.is(.Void) or otype.is(.Void)) {
-                    return true;
-                }
-
-                return stype.eql(otype);
-            },
-            .Void,
-            .Bool,
-            .Int64,
-            => return true,
-            .Symbol,
-            .Identifier,
-            => unreachable,
-        }
-    }
-};
-
-const ExprBinaryOpTag = enum {
-    Or,
-    And,
-    Eq,
-    Neq,
-    Lt,
-    Leq,
-    Gt,
-    Geq,
-    Add,
-    Sub,
-    Mul,
-    Div,
-    Mod,
-};
-
-const ExprUnaryOpTag = enum {
-    Not,
-    Neg,
-    Ref,
-    Deref,
-};
-
-const ExprTag = enum {
-    Binary_Op,
-    Unary_Op,
-    If,
-    Call,
-    Index,
-    Field,
-    Initializer,
-    Expr_List,
-    Designator,
-    Enum_Field_From_Type,
-    Enum_Field,
-    Cast1,
-    Cast2,
-    Bool,
-    Int64,
-    Null,
-    Type,
-    Symbol,
-    Identifier,
-};
-
-const ExprPayload = union(ExprTag) {
-    Binary_Op: struct {
-        tag: ExprBinaryOpTag,
-        lhs: *Expr,
-        rhs: *Expr,
-    },
-    Unary_Op: struct {
-        tag: ExprUnaryOpTag,
-        subexpr: *Expr,
-    },
-    If: struct {
-        cond: *Expr,
-        if_true: *Expr,
-        if_false: *Expr,
-    },
-    Call: struct {
-        lhs: *Expr,
-        args: ExprList,
-    },
-    Index: struct {
-        lhs: *Expr,
-        index: *Expr,
-    },
-    Field: struct {
-        lhs: *Expr,
-        id: Token,
-    },
-    Initializer: struct {
-        _type: *Type,
-        expr_list: ExprList,
-    },
-    Expr_List: ExprList,
-    Designator: struct {
-        id: Token,
-        expr: *Expr,
-    },
-    Enum_Field_From_Type: struct {
-        _type: *Type,
-        id: Token,
-    },
-    Enum_Field: Token,
-    Cast1: *Expr,
-    Cast2: struct {
-        _type: *Type,
-        expr: *Expr,
-    },
-    Bool: bool,
-    Int64: i64,
-    Null: void,
-    Type: *Type,
-    Symbol: *Symbol,
-    Identifier: Identifier,
-};
-
-const Expr = struct {
-    payload: ExprPayload,
-    _type: *Type,
-    is_lvalue: bool = false,
-    line_info: LineInfo,
-};
-
-const ExprList = notstd.DoublyLinkedList(Expr);
-
-const StmtTag = enum {
-    Print,
-    Block,
-    If,
-    While,
-    Break,
-    Continue,
-    Switch,
-    Return,
-    Return_Expr,
-    Symbol,
-    Assign,
-    Expr,
-};
-
-const StmtPayload = union(StmtTag) {
-    Print: *Expr,
-    Block: StmtBlock,
-    If: struct {
-        cond: *Expr,
-        if_true: StmtBlock,
-        if_false: StmtBlock,
-    },
-    While: struct {
-        cond: *Expr,
-        block: StmtBlock,
-        is_do_while: bool = false,
-    },
-    Break: void,
-    Continue: void,
-    Switch: struct {
-        cond: *Expr,
-        cases: SwitchCaseList,
-    },
-    Return: void,
-    Return_Expr: *Expr,
-    Symbol: *Symbol,
-    Assign: struct {
-        lhs: *Expr,
-        rhs: *Expr,
-    },
-    Expr: *Expr,
-};
-
-const Stmt = struct {
-    payload: StmtPayload,
-    line_info: LineInfo,
-};
-
-const StmtList = notstd.DoublyLinkedList(Stmt);
-
-const SwitchCase = struct {
-    value: *Expr,
-    block: StmtBlock,
-    should_fallthrough: bool,
-};
-
-const SwitchCaseList = notstd.DoublyLinkedList(SwitchCase);
-
-const StmtBlock = struct {
-    stmts: StmtList,
-    scope: ?*Scope,
-};
-
-const SymbolVariable = struct {
-    _type: ?*Type,
-    expr: ?*Expr,
-    was_visited: bool = false,
-    tmp: IrTmp,
-};
-
-const SymbolParameter = struct {
-    _type: *Type,
-    has_id: bool,
-    tmp: IrTmp,
-};
-
-const SymbolFunction = struct {
-    _type: *Type,
-    block: StmtList,
-    label: IrLabel,
-    depth: FunctionDepth,
-};
-
-const SymbolStructField = struct {
-    _type: *Type,
-};
-
-const SymbolUnionField = struct {
-    _type: *Type,
-};
-
-const SymbolEnumField = struct {
-    _type: *Type,
-    value: u64,
-};
-
-const SymbolDefinition = struct {
-    expr: *Expr,
-    was_visited: bool = false,
-};
-
-const SymbolTag = enum {
-    Variable,
-    Parameter,
-    Function,
-    Struct_Field,
-    Union_Field,
-    Enum_Field,
-    Type,
-    Definition,
-};
-
-const SymbolPayload = union(SymbolTag) {
-    Variable: SymbolVariable,
-    Parameter: SymbolParameter,
-    Function: SymbolFunction,
-    Struct_Field: SymbolStructField,
-    Union_Field: SymbolUnionField,
-    Enum_Field: SymbolEnumField,
-    Type: *Type,
-    Definition: SymbolDefinition,
-};
-
-const Symbol = struct {
-    payload: SymbolPayload,
-    key: SymbolKey,
-    depth: FunctionDepth,
-    line_info: LineInfo,
-};
-
-const SymbolList = notstd.DoublyLinkedList(*Symbol);
-
-const SymbolKey = struct {
-    text: []const u8,
-    scope: *Scope,
-};
-
-const SymbolTableContext = struct {
-    pub fn hash(_: SymbolTableContext, key: SymbolKey) u64 {
-        const MurMur = std.hash.Murmur2_64;
-
-        var h0 = MurMur.hash(key.text);
-        var h1 = MurMur.hashUint64(@intFromPtr(key.scope));
-
-        return h0 +% 33 *% h1;
-    }
-
-    pub fn eql(_: SymbolTableContext, k0: SymbolKey, k1: SymbolKey) bool {
-        return k0.scope == k1.scope and std.mem.eql(u8, k0.text, k1.text);
-    }
-};
-
-const SymbolTable = std.HashMap(SymbolKey, *Symbol, SymbolTableContext, 80);
-
-const TypecheckingStage = enum {
-    Not_Typechecked,
-    Being_Typechecked,
-    Shallow_Typechecked,
-    Fully_Typechecked,
-};
-
 const TypecheckerStmtContext = struct {
     return_type: *Type,
     is_in_loop: bool,
-};
-
-const IrInstrList = std.ArrayList(IrInstr);
-
-const CHOOSE_BASE: u3 = 0x1;
-const CHOOSE_DISP: u3 = 0x2;
-
-const IrOffset = i31;
-
-const IrTmpTag = enum {
-    Global,
-    Local,
-};
-
-const IrTmp = packed struct {
-    offset: IrOffset,
-    tag: IrTmpTag,
-    height: FunctionDepth,
-
-    pub inline fn as_lvalue(tmp: IrTmp) IrLvalue {
-        return .{ .Tmp = tmp };
-    }
-
-    pub inline fn as_rvalue(tmp: IrTmp) IrRvalue {
-        return .{ .Lvalue = .{ .Tmp = tmp } };
-    }
-};
-
-const IrLvalueTag = enum {
-    Tmp,
-    Mem,
-};
-
-const IrLvalue = union(IrLvalueTag) {
-    Tmp: IrTmp,
-    Mem: IrMem,
-
-    pub inline fn as_rvalue(lvalue: IrLvalue) IrRvalue {
-        return .{ .Lvalue = lvalue };
-    }
-};
-
-const IrRvalueTag = enum {
-    Lvalue,
-    Addr,
-    Label,
-    Imm,
-};
-
-const IrRvalue = union(IrRvalueTag) {
-    Lvalue: IrLvalue,
-    Addr: IrLvalue,
-    Label: IrLabel,
-    Imm: i64,
-
-    pub fn ref(src_tmp: IrRvalue, c: *Compiler) IrLvalue {
-        switch (src_tmp) {
-            .Lvalue => |lvalue| {
-                switch (lvalue) {
-                    .Tmp => |tmp| {
-                        return .{ .Mem = .{
-                            .choose = CHOOSE_BASE,
-                            .base = tmp,
-                        } };
-                    },
-                    .Mem => {
-                        var dst_tmp = c.grab_local();
-
-                        generate_ir_instr(c, .{ .Instr = .{
-                            .Mov = .{
-                                .dst = dst_tmp.as_lvalue(),
-                                .src = src_tmp,
-                            },
-                        } });
-
-                        return .{ .Mem = .{
-                            .choose = CHOOSE_BASE,
-                            .base = dst_tmp,
-                        } };
-                    },
-                }
-            },
-            .Addr => |dst_tmp| {
-                return dst_tmp;
-            },
-            .Label => |label| {
-                return .{ .Mem = .{
-                    .choose = CHOOSE_DISP,
-                    .disp = label,
-                } };
-            },
-            .Imm => |imm| {
-                return .{ .Mem = .{
-                    .choose = CHOOSE_DISP,
-                    .disp = imm,
-                } };
-            },
-        }
-    }
-
-    pub fn deref(src_tmp: IrRvalue, c: *Compiler) IrRvalue {
-        return .{ .Lvalue = src_tmp.ref(c) };
-    }
-};
-
-const IrMem = struct {
-    choose: u2 = 0,
-    base: IrTmp = .{
-        .offset = 0,
-        .tag = .Global,
-        .height = 0,
-    },
-    disp: i64 = 0,
-};
-
-const IrLabel = u32;
-
-const IrInstrJmpcTag = enum {
-    Eq,
-    Neq,
-    Lt,
-    Leq,
-    Gt,
-    Geq,
-};
-
-const IrInstrBinaryOpTag = enum {
-    Or,
-    And,
-    Eq,
-    Neq,
-    Lt,
-    Leq,
-    Gt,
-    Geq,
-    Add,
-    Sub,
-    Mul,
-    Div,
-    Mod,
-};
-
-const IrInstrUnaryOpTag = enum {
-    Not,
-    Neg,
-};
-
-const IrInstrOpcode = enum {
-    Print,
-    Mov,
-    Jmp,
-    Push_Frame_Pointer,
-    Push,
-    Pop,
-    Call,
-    Ret,
-    Exit,
-};
-
-const IrInstrMetaTag = enum {
-    GFB,
-    GFE,
-    Label,
-};
-
-const IrInstrType = enum {
-    Binary_Op,
-    Unary_Op,
-    Jmpc,
-    Instr,
-    Meta,
-};
-
-const IrInstr = union(IrInstrType) {
-    Binary_Op: struct {
-        tag: IrInstrBinaryOpTag,
-        dst: IrLvalue,
-        src0: IrRvalue,
-        src1: IrRvalue,
-    },
-    Unary_Op: struct {
-        tag: IrInstrUnaryOpTag,
-        dst: IrLvalue,
-        src: IrRvalue,
-    },
-    Jmpc: struct {
-        tag: IrInstrJmpcTag,
-        src0: IrRvalue,
-        src1: IrRvalue,
-        label: IrLabel,
-    },
-    Instr: union(IrInstrOpcode) {
-        Print: IrRvalue,
-        Mov: struct {
-            dst: IrLvalue,
-            src: IrRvalue,
-        },
-        Jmp: IrLabel,
-        Push_Frame_Pointer: i32,
-        Push: IrRvalue,
-        Pop: u64,
-        Call: IrRvalue,
-        Ret: IrLabel,
-        Exit: void,
-    },
-    Meta: union(IrInstrMetaTag) {
-        GFB: struct {
-            stack_space_used: u32,
-            label: IrLabel,
-        },
-        GFE: struct {
-            stack_space_used: u32,
-            label: IrLabel,
-        },
-        Label: IrLabel,
-    },
-};
-
-const IrStmtContext = struct {
-    loop_cond_label: IrLabel,
-    loop_end_label: IrLabel,
-    function_end_label: IrLabel,
-    return_address_offset: IrOffset,
 };
 
 inline fn min_enum(x: anytype, y: @TypeOf(x)) @TypeOf(x) {
@@ -842,67 +101,6 @@ inline fn min_enum(x: anytype, y: @TypeOf(x)) @TypeOf(x) {
 
 inline fn check_flags(actual: anytype, expected: @TypeOf(actual)) bool {
     return actual & expected == expected;
-}
-
-fn create_scope(c: *Compiler) *Scope {
-    var result = ast_create(c, Scope);
-    result.* = .{
-        .parent = c.current_scope,
-    };
-    return result;
-}
-
-fn push_scope(c: *Compiler) void {
-    var scope = create_scope(c);
-    c.current_scope = scope;
-}
-
-fn pop_scope(c: *Compiler) void {
-    c.current_scope = c.current_scope.parent.?;
-}
-
-fn ast_create(c: *Compiler, comptime T: type) *T {
-    return c.ast_arena_allocator.create(T) catch {
-        std.os.exit(1);
-    };
-}
-
-fn create_symbol(c: *Compiler, token: Token) *Symbol {
-    var symbol = ast_create(c, Symbol);
-    symbol.* = .{
-        .payload = undefined,
-        .key = .{
-            .text = token.text,
-            .scope = c.current_scope,
-        },
-        .depth = c.function_depth,
-        .line_info = token.line_info,
-    };
-    return symbol;
-}
-
-fn insert_symbol(c: *Compiler, id: Token) *Symbol {
-    std.debug.assert(id.tag == .Identifier);
-
-    // Should create arena with identifier strings?
-    var symbol = create_symbol(c, id);
-    insert_existing_symbol(c, symbol);
-
-    return symbol;
-}
-
-fn insert_existing_symbol(c: *Compiler, symbol: *Symbol) void {
-    var get_or_put_result = c.symbols.getOrPut(symbol.key) catch {
-        std.os.exit(1);
-    };
-
-    if (get_or_put_result.found_existing) {
-        print_error(c, symbol.line_info, "symbol '{s}' is already defined.", .{symbol.key.text});
-        print_note(c, get_or_put_result.value_ptr.*.line_info, "first defined here.", .{});
-        std.os.exit(1);
-    }
-
-    get_or_put_result.value_ptr.* = symbol;
 }
 
 fn find_symbol(c: *Compiler, id: Identifier, is_type: *bool) *Symbol {
@@ -937,1043 +135,6 @@ fn find_symbol(c: *Compiler, id: Identifier, is_type: *bool) *Symbol {
 
     print_error(c, id.token.line_info, "'{s}' is not defined.", .{id.token.text});
     std.os.exit(1);
-}
-
-fn parse_top_level(c: *Compiler) void {
-    c.global_scope = ast_create(c, Scope);
-    c.global_scope.* = .{
-        .parent = null,
-    };
-    c.current_scope = c.global_scope;
-
-    while (c.peek() != .End_Of_File) {
-        var symbol = parse_symbol(c);
-        var node = ast_create(c, SymbolList.Node);
-        node.* = .{
-            .payload = symbol,
-        };
-        c.globals.insert_last(node);
-    }
-
-    std.debug.assert(c.current_scope == c.global_scope);
-}
-
-fn extract_type(c: *Compiler, expr: Expr) *Type {
-    switch (expr.payload) {
-        .Type => |_type| {
-            return _type;
-        },
-        .Identifier => |id| {
-            var _type = ast_create(c, Type);
-            _type.* = .{
-                .payload = .{ .Identifier = id },
-                .size = undefined,
-                .line_info = expr.line_info,
-            };
-
-            return _type;
-        },
-        else => {
-            print_error(c, expr.line_info, "expression doesn't look like a type.", .{});
-            std.os.exit(1);
-        },
-    }
-}
-
-fn parse_type(c: *Compiler) *Type {
-    return extract_type(c, parse_expr(c));
-}
-
-fn parse_type_function(c: *Compiler) TypePayload {
-    c.expect(.Open_Paren);
-
-    push_scope(c);
-
-    var params = SymbolList{};
-
-    var tt = c.peek();
-    while (tt != .End_Of_File and tt != .Close_Paren) {
-        var id = c.grab();
-        var has_id = false;
-
-        if (c.peek() == .Identifier) {
-            c.advance();
-            c.expect(.Colon);
-            has_id = true;
-        }
-
-        var _type = parse_type(c);
-        var symbol = create_symbol(c, id);
-        symbol.payload = .{ .Parameter = .{
-            ._type = _type,
-            .has_id = has_id,
-            .tmp = undefined,
-        } };
-
-        var node = ast_create(c, SymbolList.Node);
-        node.* = .{
-            .payload = symbol,
-        };
-        params.insert_last(node);
-
-        tt = c.peek();
-        if (tt != .End_Of_File and tt != .Close_Paren) {
-            c.expect(.Comma);
-            tt = c.peek();
-        }
-    }
-
-    c.expect(.Close_Paren);
-
-    var return_type: *Type = undefined;
-
-    if (c.peek() == .Arrow) {
-        c.advance();
-        return_type = parse_type(c);
-    } else {
-        return_type = ast_create(c, Type);
-        return_type.* = .{
-            .payload = .Void,
-            .size = undefined,
-            .line_info = c.grab().line_info,
-        };
-    }
-
-    var scope = c.current_scope;
-
-    pop_scope(c);
-
-    return .{ .Function = .{
-        .params = params,
-        .return_type = return_type,
-        .scope = scope,
-    } };
-}
-
-fn parse_struct_fields(c: *Compiler, is_struct: bool) TypeStruct {
-    c.expect(.Open_Curly);
-
-    push_scope(c);
-
-    var _struct = TypeStruct{
-        .fields = .{},
-        .scope = c.current_scope,
-    };
-
-    var tt = c.peek();
-    while (tt != .End_Of_File and tt != .Close_Curly) {
-        var id = c.grab();
-        c.expect(.Identifier);
-        c.expect(.Colon);
-
-        var _type = parse_type(c);
-        var symbol = insert_symbol(c, id);
-
-        if (is_struct) {
-            symbol.payload = .{ .Struct_Field = .{
-                ._type = _type,
-            } };
-        } else {
-            symbol.payload = .{ .Union_Field = .{
-                ._type = _type,
-            } };
-        }
-
-        var node = ast_create(c, SymbolList.Node);
-        node.* = .{
-            .payload = symbol,
-        };
-        _struct.fields.insert_last(node);
-
-        tt = c.peek();
-        if (tt != .End_Of_File and tt != .Close_Curly) {
-            c.expect(.Comma);
-            tt = c.peek();
-        }
-    }
-
-    pop_scope(c);
-
-    c.expect(.Close_Curly);
-
-    return _struct;
-}
-
-fn is_def(c: *Compiler) bool {
-    var fst = c.peek();
-    var snd = c.peek_ahead(1);
-    return fst == .Identifier and (snd == .Colon_Equal or snd == .Colon);
-}
-
-fn parse_symbol(c: *Compiler) *Symbol {
-    var id = c.grab();
-    c.expect(.Identifier);
-
-    var symbol = insert_symbol(c, id);
-
-    switch (c.peek()) {
-        .Colon_Equal => {
-            c.advance();
-
-            if (c.peek() == .Proc) {
-                c.function_depth += 1;
-
-                var _type = parse_type(c);
-
-                if (c.peek() == .Open_Curly) {
-                    var previous_scope = c.current_scope;
-                    c.current_scope = _type.payload.Function.scope;
-
-                    var it = _type.payload.Function.params.iterator();
-                    while (it.next()) |param_ptr| {
-                        var param = &param_ptr.*.payload.Parameter;
-                        if (param.has_id) {
-                            param_ptr.*.key.scope = c.current_scope;
-                            insert_existing_symbol(c, param_ptr.*);
-                        }
-                    }
-
-                    var block = parse_block_given_scope(c, c.current_scope);
-
-                    symbol.payload = .{ .Function = .{
-                        ._type = _type,
-                        .block = block,
-                        .label = c.grab_label(),
-                        .depth = c.function_depth,
-                    } };
-                    c.current_scope = previous_scope;
-                } else {
-                    c.expect(.Semicolon);
-                    symbol.payload = .{ .Type = _type };
-                }
-
-                c.function_depth -= 1;
-
-                return symbol;
-            } else {
-                var expr = ast_create(c, Expr);
-                expr.* = parse_expr(c);
-                c.expect(.Semicolon);
-
-                symbol.payload = .{ .Definition = .{
-                    .expr = expr,
-                } };
-
-                return symbol;
-            }
-        },
-        .Colon => {
-            c.advance();
-
-            var expr: ?*Expr = null;
-            var _type = parse_type(c);
-
-            if (c.peek() == .Equal) {
-                c.advance();
-                expr = ast_create(c, Expr);
-                expr.?.* = parse_expr(c);
-            }
-
-            c.expect(.Semicolon);
-
-            symbol.payload = .{ .Variable = .{
-                ._type = _type,
-                .expr = expr,
-                .tmp = undefined,
-            } };
-
-            return symbol;
-        },
-        else => {
-            var token = c.grab();
-            print_error(c, token.line_info, "expected ':' or ':=' to define symbol.", .{});
-            std.os.exit(1);
-        },
-    }
-}
-
-fn parse_expr_list(c: *Compiler) ExprList {
-    c.expect(.Open_Curly);
-
-    var result = ExprList{};
-
-    var tt = c.peek();
-    while (tt != .End_Of_File and tt != .Close_Curly) {
-        var expr: Expr = expr: {
-            if (c.peek() == .Identifier and
-                c.peek_ahead(1) == .Equal)
-            {
-                var id = c.grab();
-                c.advance_many(2);
-
-                var value = ast_create(c, Expr);
-                value.* = parse_expr(c);
-
-                break :expr .{
-                    .payload = .{ .Designator = .{
-                        .id = id,
-                        .expr = value,
-                    } },
-                    ._type = undefined,
-                    .line_info = id.line_info,
-                };
-            } else {
-                break :expr parse_expr(c);
-            }
-        };
-
-        var node = ast_create(c, ExprList.Node);
-        node.* = .{
-            .payload = expr,
-        };
-        result.insert_last(node);
-
-        tt = c.peek();
-        if (tt != .End_Of_File and tt != .Close_Curly) {
-            c.expect(.Comma);
-            tt = c.peek();
-        }
-    }
-
-    c.expect(.Close_Curly);
-
-    return result;
-}
-
-fn parse_expr(c: *Compiler) Expr {
-    return parse_prec(c, LOWEST_PREC);
-}
-
-fn parse_prec(c: *Compiler, min_prec: i32) Expr {
-    var lhs = parse_highest_prec(c);
-    var op = c.peek();
-    var prev_prec: i32 = 0x7FFF_FFFF;
-    var curr_prec: i32 = prec_of_op(op);
-
-    while (curr_prec < prev_prec and curr_prec >= min_prec) {
-        while (curr_prec == prec_of_op(op)) {
-            c.advance();
-
-            var lhs_ptr = ast_create(c, Expr);
-            var rhs_ptr = ast_create(c, Expr);
-            lhs_ptr.* = lhs;
-            rhs_ptr.* = parse_prec(c, curr_prec + 1);
-            lhs = .{
-                .payload = .{ .Binary_Op = .{
-                    .tag = token_tag_to_expr_binary_op_tag(op),
-                    .lhs = lhs_ptr,
-                    .rhs = rhs_ptr,
-                } },
-                ._type = undefined,
-                .line_info = lhs_ptr.line_info,
-            };
-
-            op = c.peek();
-        }
-
-        prev_prec = curr_prec;
-        curr_prec = prec_of_op(op);
-    }
-
-    return lhs;
-}
-
-fn parse_highest_prec(c: *Compiler) Expr {
-    var token = c.grab();
-    c.advance();
-
-    var result = Expr{
-        .payload = undefined,
-        ._type = undefined,
-        .line_info = token.line_info,
-    };
-    result.payload = payload: {
-        switch (token.tag) {
-            .Sub,
-            .Ref,
-            .Not,
-            => {
-                var subexpr = ast_create(c, Expr);
-                subexpr.* = parse_highest_prec(c);
-
-                break :payload .{ .Unary_Op = .{
-                    .tag = token_tag_to_expr_unary_op_tag(token.tag),
-                    .subexpr = subexpr,
-                } };
-            },
-            .And => {
-                print_error(c, token.line_info, "can't take a reference of rvalue.", .{});
-                std.os.exit(1);
-            },
-            .Open_Paren => {
-                var expr = parse_expr(c);
-                c.expect(.Close_Paren);
-
-                break :payload expr.payload;
-            },
-            .Dot => {
-                switch (c.peek()) {
-                    .Open_Curly => break :payload .{ .Expr_List = parse_expr_list(c) },
-                    .Identifier => {
-                        var id = c.grab();
-                        c.advance();
-
-                        break :payload .{ .Enum_Field = id };
-                    },
-                    else => {
-                        var _token = c.grab();
-                        print_error(c, _token.line_info, "unexpected '{s}' after '.' operator.", .{_token.text});
-                        print_note(c, _token.line_info, "expected designator list or identifier.", .{});
-                        std.os.exit(1);
-                    },
-                }
-            },
-            .If => {
-                var cond = ast_create(c, Expr);
-                var if_true = ast_create(c, Expr);
-                var if_false = ast_create(c, Expr);
-
-                cond.* = parse_expr(c);
-                if (c.peek() == .Then) {
-                    c.advance();
-                }
-                if_true.* = parse_expr(c);
-                c.expect(.Else);
-                if_false.* = parse_expr(c);
-
-                break :payload .{ .If = .{
-                    .cond = cond,
-                    .if_true = if_true,
-                    .if_false = if_false,
-                } };
-            },
-            .False,
-            .True,
-            => {
-                break :payload .{ .Bool = token.tag == .True };
-            },
-            .Null => {
-                break :payload .Null;
-            },
-            .Identifier => {
-                break :payload .{ .Identifier = .{
-                    .token = token,
-                    .scope = c.current_scope,
-                } };
-            },
-            .Integer => {
-                var value: i64 = 0;
-                for (token.text) |ch| {
-                    value = 10 * value + (ch - '0');
-                }
-
-                break :payload .{ .Int64 = value };
-            },
-            .Mul => {
-                var subtype = parse_type(c);
-                var _type = ast_create(c, Type);
-                _type.* = .{
-                    .payload = .{ .Pointer = subtype },
-                    .size = undefined,
-                    .line_info = token.line_info,
-                };
-
-                break :payload .{ .Type = _type };
-            },
-            .Open_Bracket => {
-                var expr = ast_create(c, Expr);
-                expr.* = parse_expr(c);
-                c.expect(.Close_Bracket);
-
-                var subtype = parse_type(c);
-                var _type = ast_create(c, Type);
-                _type.* = .{
-                    .payload = .{ .Array = .{
-                        .expr = expr,
-                        .count = undefined,
-                        .subtype = subtype,
-                    } },
-                    .size = undefined,
-                    .line_info = token.line_info,
-                };
-
-                break :payload .{ .Type = _type };
-            },
-            .Struct => {
-                var _struct = parse_struct_fields(c, true);
-                var _type = ast_create(c, Type);
-                _type.* = .{
-                    .payload = .{ .Struct = _struct },
-                    .size = undefined,
-                    .line_info = token.line_info,
-                };
-
-                break :payload .{ .Type = _type };
-            },
-            .Union => {
-                var _union = parse_struct_fields(c, false);
-                var _type = ast_create(c, Type);
-                _type.* = .{
-                    .payload = .{ .Union = _union },
-                    .size = undefined,
-                    .line_info = token.line_info,
-                };
-
-                break :payload .{ .Type = _type };
-            },
-            .Enum => {
-                c.expect(.Open_Curly);
-
-                push_scope(c);
-
-                var _enum = TypeStruct{
-                    .fields = .{},
-                    .scope = c.current_scope,
-                };
-
-                var tt = c.peek();
-                while (tt != .End_Of_File and tt != .Close_Curly) {
-                    var id = c.grab();
-                    c.expect(.Identifier);
-
-                    var symbol = insert_symbol(c, id);
-                    symbol.payload = .{ .Enum_Field = .{
-                        ._type = undefined,
-                        .value = undefined,
-                    } };
-
-                    var node = ast_create(c, SymbolList.Node);
-                    node.* = .{
-                        .payload = symbol,
-                    };
-                    _enum.fields.insert_last(node);
-
-                    tt = c.peek();
-                    if (tt != .End_Of_File and tt != .Close_Curly) {
-                        c.expect(.Comma);
-                        tt = c.peek();
-                    }
-                }
-
-                pop_scope(c);
-
-                c.expect(.Close_Curly);
-
-                var _type = ast_create(c, Type);
-                _type.* = .{
-                    .payload = .{ .Enum = _enum },
-                    .size = undefined,
-                    .line_info = token.line_info,
-                };
-
-                break :payload .{ .Type = _type };
-            },
-            .Proc => {
-                var _type = ast_create(c, Type);
-                _type.* = .{
-                    .payload = parse_type_function(c),
-                    .size = undefined,
-                    .line_info = token.line_info,
-                };
-
-                break :payload .{ .Type = _type };
-            },
-            .Void => {
-                var _type = ast_create(c, Type);
-                _type.* = .{
-                    .payload = .Void,
-                    .size = undefined,
-                    .line_info = token.line_info,
-                };
-                break :payload .{ .Type = _type };
-            },
-            .Bool => {
-                var _type = ast_create(c, Type);
-                _type.* = .{
-                    .payload = .Bool,
-                    .size = undefined,
-                    .line_info = token.line_info,
-                };
-                break :payload .{ .Type = _type };
-            },
-            .Int => {
-                var _type = ast_create(c, Type);
-                _type.* = .{
-                    .payload = .Int64,
-                    .size = undefined,
-                    .line_info = token.line_info,
-                };
-                break :payload .{ .Type = _type };
-            },
-            .Cast => {
-                c.expect(.Open_Paren);
-
-                var lhs = parse_expr(c);
-
-                if (c.peek() == .Comma) {
-                    c.advance();
-                }
-
-                if (c.peek() == .Close_Paren) {
-                    c.advance();
-
-                    var expr = ast_create(c, Expr);
-                    expr.* = lhs;
-                    break :payload .{ .Cast1 = expr };
-                } else {
-                    var _type = extract_type(c, lhs);
-                    var rhs = ast_create(c, Expr);
-                    rhs.* = parse_expr(c);
-
-                    if (c.peek() == .Comma) {
-                        c.advance();
-                    }
-
-                    c.expect(.Close_Paren);
-
-                    break :payload .{ .Cast2 = .{
-                        ._type = _type,
-                        .expr = rhs,
-                    } };
-                }
-            },
-            else => {
-                print_error(c, token.line_info, "'{s}' doesn't start expression.", .{token.text});
-                std.os.exit(1);
-            },
-        }
-    };
-
-    parse_postfix_unary_ops(c, &result);
-
-    return result;
-}
-
-fn parse_postfix_unary_ops(c: *Compiler, inner: *Expr) void {
-    while (true) {
-        switch (c.peek()) {
-            .Open_Paren => {
-                var line_info = c.grab().line_info;
-                c.advance();
-
-                var args = ExprList{};
-
-                var tt = c.peek();
-                while (tt != .End_Of_File and tt != .Close_Paren) {
-                    var expr = parse_expr(c);
-                    var node = ast_create(c, ExprList.Node);
-                    node.* = .{
-                        .payload = expr,
-                    };
-                    args.insert_last(node);
-
-                    tt = c.peek();
-                    if (tt != .End_Of_File and tt != .Close_Paren) {
-                        c.expect(.Comma);
-                        tt = c.peek();
-                    }
-                }
-
-                c.expect(.Close_Paren);
-
-                var lhs = ast_create(c, Expr);
-                lhs.* = inner.*;
-                inner.* = .{
-                    .payload = .{ .Call = .{
-                        .lhs = lhs,
-                        .args = args,
-                    } },
-                    ._type = undefined,
-                    .line_info = line_info,
-                };
-            },
-            .Open_Bracket => {
-                var line_info = c.grab().line_info;
-                c.advance();
-
-                var expr = ast_create(c, Expr);
-                expr.* = parse_expr(c);
-                c.expect(.Close_Bracket);
-
-                var lhs = ast_create(c, Expr);
-                lhs.* = inner.*;
-                inner.* = .{
-                    .payload = .{ .Index = .{
-                        .lhs = lhs,
-                        .index = expr,
-                    } },
-                    ._type = undefined,
-                    .line_info = line_info,
-                };
-            },
-            .Dot => {
-                c.advance();
-
-                if (c.peek() == .Mul) {
-                    c.advance();
-
-                    var lhs = ast_create(c, Expr);
-                    lhs.* = inner.*;
-                    inner.* = .{
-                        .payload = .{ .Unary_Op = .{
-                            .tag = .Deref,
-                            .subexpr = lhs,
-                        } },
-                        ._type = undefined,
-                        .line_info = lhs.line_info,
-                    };
-                } else if (c.peek() == .Open_Curly) {
-                    var expr_list = parse_expr_list(c);
-                    var _type = extract_type(c, inner.*);
-                    inner.* = .{
-                        .payload = .{ .Initializer = .{
-                            ._type = _type,
-                            .expr_list = expr_list,
-                        } },
-                        ._type = undefined,
-                        .line_info = _type.line_info,
-                    };
-                } else {
-                    var id = c.grab();
-                    c.expect(.Identifier);
-
-                    var lhs = ast_create(c, Expr);
-                    lhs.* = inner.*;
-                    inner.* = .{
-                        .payload = .{ .Field = .{
-                            .lhs = lhs,
-                            .id = id,
-                        } },
-                        ._type = undefined,
-                        .line_info = id.line_info,
-                    };
-                }
-            },
-            else => {
-                break;
-            },
-        }
-    }
-}
-
-fn prec_of_op(op: TokenTag) i32 {
-    return switch (op) {
-        .Or => 0,
-        .And => 1,
-        .Eq,
-        .Neq,
-        => 2,
-        .Lt,
-        .Leq,
-        .Gt,
-        .Geq,
-        => 3,
-        .Add,
-        .Sub,
-        => 4,
-        .Mul,
-        .Div,
-        .Mod,
-        => 5,
-        else => LOWEST_PREC - 1,
-    };
-}
-
-fn token_tag_to_expr_binary_op_tag(op: TokenTag) ExprBinaryOpTag {
-    return switch (op) {
-        .Or => .Or,
-        .And => .And,
-        .Eq => .Eq,
-        .Neq => .Neq,
-        .Lt => .Lt,
-        .Leq => .Leq,
-        .Gt => .Gt,
-        .Geq => .Geq,
-        .Add => .Add,
-        .Sub => .Sub,
-        .Mul => .Mul,
-        .Div => .Div,
-        .Mod => .Mod,
-        else => unreachable,
-    };
-}
-
-fn token_tag_to_expr_unary_op_tag(op: TokenTag) ExprUnaryOpTag {
-    return switch (op) {
-        .Sub => .Neg,
-        .Ref => .Ref,
-        .Not => .Not,
-        else => unreachable,
-    };
-}
-
-fn parse_stmt(c: *Compiler) Stmt {
-    var result: Stmt = .{
-        .payload = undefined,
-        .line_info = c.grab().line_info,
-    };
-
-    result.payload = payload: {
-        switch (c.peek()) {
-            .Print => {
-                c.advance();
-
-                var expr = ast_create(c, Expr);
-                expr.* = parse_expr(c);
-                c.expect(.Semicolon);
-
-                break :payload .{ .Print = expr };
-            },
-            .Open_Curly => {
-                break :payload .{ .Block = parse_scoped_block(c) };
-            },
-            .If => {
-                c.advance();
-
-                var cond = ast_create(c, Expr);
-                cond.* = parse_expr(c);
-
-                if (c.peek() == .Then) {
-                    c.advance();
-                }
-
-                var if_true = parse_stmt_or_scoped_block(c);
-                var if_false = StmtBlock{
-                    .stmts = .{},
-                    .scope = null,
-                };
-
-                if (c.peek() == .Else) {
-                    c.advance();
-                    if_false = parse_stmt_or_scoped_block(c);
-                }
-
-                break :payload .{ .If = .{
-                    .cond = cond,
-                    .if_true = if_true,
-                    .if_false = if_false,
-                } };
-            },
-            .While => {
-                c.advance();
-
-                var cond = ast_create(c, Expr);
-                cond.* = parse_expr(c);
-
-                if (c.peek() == .Do) {
-                    c.advance();
-                }
-
-                var block = parse_stmt_or_scoped_block(c);
-
-                break :payload .{ .While = .{
-                    .cond = cond,
-                    .block = block,
-                } };
-            },
-            .Do => {
-                c.advance();
-
-                var block = parse_stmt_or_scoped_block(c);
-
-                c.expect(.While);
-
-                var cond = ast_create(c, Expr);
-                cond.* = parse_expr(c);
-
-                c.expect(.Semicolon);
-
-                break :payload .{ .While = .{
-                    .block = block,
-                    .cond = cond,
-                    .is_do_while = true,
-                } };
-            },
-            .Break => {
-                c.advance();
-                c.expect(.Semicolon);
-                break :payload .Break;
-            },
-            .Continue => {
-                c.advance();
-                c.expect(.Semicolon);
-                break :payload .Continue;
-            },
-            .Switch => {
-                c.advance();
-
-                var cond = ast_create(c, Expr);
-                cond.* = parse_expr(c);
-
-                c.expect(.Open_Curly);
-
-                var cases = SwitchCaseList{};
-
-                var tt = c.peek();
-                while (tt != .End_Of_File and tt != .Close_Curly) {
-                    while (true) {
-                        var value = ast_create(c, Expr);
-                        value.* = parse_expr(c);
-
-                        push_scope(c);
-
-                        var case = SwitchCase{
-                            .value = value,
-                            .block = .{
-                                .stmts = .{},
-                                .scope = c.current_scope,
-                            },
-                            .should_fallthrough = true,
-                        };
-
-                        pop_scope(c);
-
-                        var node = ast_create(c, SwitchCaseList.Node);
-                        node.* = .{
-                            .payload = case,
-                        };
-                        cases.insert_last(node);
-
-                        tt = c.peek();
-                        if (tt != .End_Of_File and tt != .Colon) {
-                            c.expect(.Comma);
-                            tt = c.peek();
-                        }
-
-                        if (tt == .End_Of_File or tt == .Colon) {
-                            break;
-                        }
-                    }
-
-                    c.expect(.Colon);
-
-                    var case = cases.grab_last();
-                    case.should_fallthrough = false;
-                    case.block.stmts = parse_block_given_scope(c, case.block.scope.?);
-
-                    tt = c.peek();
-                }
-
-                c.expect(.Close_Curly);
-
-                break :payload .{ .Switch = .{
-                    .cond = cond,
-                    .cases = cases,
-                } };
-            },
-            .Return => {
-                c.advance();
-
-                if (c.peek() == .Semicolon) {
-                    c.advance();
-
-                    break :payload .Return;
-                }
-
-                var expr = ast_create(c, Expr);
-                expr.* = parse_expr(c);
-                c.expect(.Semicolon);
-
-                break :payload .{ .Return_Expr = expr };
-            },
-            else => {
-                if (is_def(c)) {
-                    var symbol = parse_symbol(c);
-                    break :payload .{ .Symbol = symbol };
-                } else {
-                    var lhs = ast_create(c, Expr);
-                    lhs.* = parse_expr(c);
-
-                    if (c.peek() == .Equal) {
-                        c.advance();
-
-                        var rhs = ast_create(c, Expr);
-                        rhs.* = parse_expr(c);
-                        c.expect(.Semicolon);
-
-                        break :payload .{ .Assign = .{
-                            .lhs = lhs,
-                            .rhs = rhs,
-                        } };
-                    }
-
-                    c.expect(.Semicolon);
-
-                    break :payload .{ .Expr = lhs };
-                }
-            },
-        }
-    };
-
-    return result;
-}
-
-fn parse_scoped_block(c: *Compiler) StmtBlock {
-    var scope = create_scope(c);
-    var stmts = parse_block_given_scope(c, scope);
-    return .{
-        .stmts = stmts,
-        .scope = scope,
-    };
-}
-
-fn parse_block_given_scope(c: *Compiler, scope: *Scope) StmtList {
-    // Previous scope may not be its parent.
-    var previous_scope = c.current_scope;
-    c.current_scope = scope;
-
-    var block = StmtList{};
-
-    c.expect(.Open_Curly);
-
-    var tt = c.peek();
-    while (tt != .End_Of_File and tt != .Close_Curly) {
-        var stmt = parse_stmt(c);
-        var node = ast_create(c, StmtList.Node);
-        node.* = .{
-            .payload = stmt,
-        };
-        block.insert_last(node);
-
-        tt = c.peek();
-    }
-
-    c.expect(.Close_Curly);
-
-    c.current_scope = previous_scope;
-
-    return block;
-}
-
-fn parse_stmt_or_scoped_block(c: *Compiler) StmtBlock {
-    var result = StmtBlock{
-        .stmts = .{},
-        .scope = null,
-    };
-
-    switch (c.peek()) {
-        .Open_Curly => {
-            result = parse_scoped_block(c);
-        },
-        .Semicolon => {
-            c.advance();
-        },
-        else => {
-            var stmt = parse_stmt(c);
-            var node = ast_create(c, StmtList.Node);
-            node.* = .{
-                .payload = stmt,
-            };
-            result.stmts.insert_last(node);
-
-            if (stmt.payload == .Symbol) {
-                print_error(c, stmt.line_info, "definitions are not allowed inside a single statement block.", .{});
-                std.os.exit(1);
-            }
-        },
-    }
-
-    return result;
 }
 
 fn is_expr_a_type(c: *Compiler, expr: *Expr) bool {
@@ -3185,6 +1346,262 @@ fn typecheck_expr_allow_void(c: *Compiler, type_hint: ?*Type, expr: *Expr) *Type
     return expr._type;
 }
 
+inline fn cast_ptr(comptime dst: type, src: anytype) dst {
+    return @alignCast(@ptrCast(src));
+}
+
+fn ir_grab_pointer_from_tmp(c: *Compiler, tmp: IrTmp) u64 {
+    switch (tmp.tag) {
+        .Global => return @intCast(tmp.offset),
+        .Local => {
+            var i = tmp.height;
+            var rbp = c.rbp;
+            while (i > 0) : (i -= 1) {
+                rbp = ir_stack_read_u64(c, rbp - -LF_RBP_OFFSET);
+            }
+
+            var rbp_i64: i64 = @bitCast(rbp);
+            return @bitCast(rbp_i64 + tmp.offset);
+        },
+    }
+}
+
+fn ir_grab_pointer_from_address(c: *Compiler, address: IrMem) u64 {
+    var offset: i64 = 0;
+
+    if (address.choose & 0x1 == 0x1) {
+        var base: i64 = @bitCast(ir_grab_value_from_tmp(c, address.base));
+        offset += base;
+    }
+
+    if (address.choose & 0x2 == 0x2) {
+        offset += address.disp;
+    }
+
+    return @bitCast(offset);
+}
+
+fn ir_grab_pointer_from_lvalue(c: *Compiler, lvalue: IrLvalue) u64 {
+    switch (lvalue) {
+        .Tmp => |tmp| return ir_grab_pointer_from_tmp(c, tmp),
+        .Mem => |address| return ir_grab_pointer_from_address(c, address),
+    }
+}
+
+fn ir_grab_value_from_tmp(c: *Compiler, tmp: IrTmp) u64 {
+    var pointer = ir_grab_pointer_from_tmp(c, tmp);
+    return ir_stack_read_u64(c, pointer);
+}
+
+fn ir_grab_value_from_rvalue(c: *Compiler, rvalue: IrRvalue) u64 {
+    switch (rvalue) {
+        .Lvalue => |lvalue| {
+            var pointer = ir_grab_pointer_from_lvalue(c, lvalue);
+            return ir_stack_read_u64(c, pointer);
+        },
+        .Addr => |lvalue| return ir_grab_pointer_from_lvalue(c, lvalue),
+        .Label => |label| return label,
+        .Imm => |imm| return @bitCast(imm),
+    }
+}
+
+fn ir_stack_read_u64(c: *Compiler, pointer: u64) u64 {
+    if (pointer < 8) {
+        std.debug.print("error: null pointer access (0x{x}).\n", .{pointer});
+        std.os.exit(1);
+    } else if (pointer + 8 > c.rsp) {
+        std.debug.print("error: address 0x{x} is outside of current stack pointer (0x{x}).\n", .{ pointer, c.rsp });
+        std.os.exit(1);
+    }
+    return ir_stack_read_u64_no_check(c, pointer);
+}
+
+inline fn ir_stack_read_u64_no_check(c: *Compiler, pointer: u64) u64 {
+    return cast_ptr(*u64, &c.stack[pointer]).*;
+}
+
+fn ir_stack_write_u64(c: *Compiler, pointer: u64, value: u64) void {
+    if (pointer < 8) {
+        std.debug.print("error: null pointer access (0x{x}).\n", .{pointer});
+        std.os.exit(1);
+    } else if (pointer + 8 > c.rsp) {
+        std.debug.print("error: address 0x{x} is outside of current stack pointer (0x{x}).\n", .{ pointer, c.rsp });
+        std.os.exit(1);
+    }
+    ir_stack_write_u64_no_check(c, pointer, value);
+}
+
+inline fn ir_stack_write_u64_no_check(c: *Compiler, pointer: u64, value: u64) void {
+    cast_ptr(*u64, &c.stack[pointer]).* = value;
+}
+
+fn ir_stack_push(c: *Compiler, value: u64) void {
+    ir_stack_write_u64_no_check(c, c.rsp, value);
+    c.rsp += 8;
+}
+
+fn ir_stack_pop(c: *Compiler) u64 {
+    c.rsp -= 8;
+    return ir_stack_read_u64_no_check(c, c.rsp);
+}
+
+fn interpret(c: *Compiler) void {
+    c.stack = gpa.alloc(u8, 2 * 1024 * 1024) catch {
+        std.os.exit(1);
+    };
+    defer gpa.free(c.stack);
+
+    var labels = gpa.alloc(u64, c.next_label) catch {
+        std.os.exit(1);
+    };
+    defer gpa.free(labels);
+
+    for (c.ir_instrs.items, 0..) |ir_instr, i| {
+        switch (ir_instr) {
+            .Meta => |meta| {
+                switch (meta) {
+                    .GFB => |gfb| {
+                        labels[gfb.label] = i;
+                    },
+                    .GFE => |gfe| {
+                        labels[gfe.label] = i;
+                    },
+                    .Label => |label| {
+                        labels[label] = i;
+                    },
+                }
+            },
+            else => {},
+        }
+    }
+
+    c.rsp = @intCast(c.next_global);
+    c.rbp = c.rsp;
+
+    var ip: u64 = 0;
+    while (ip < c.ir_instrs.items.len) {
+        switch (c.ir_instrs.items[ip]) {
+            .Binary_Op => |op| {
+                var dst = ir_grab_pointer_from_lvalue(c, op.dst);
+                var src0 = ir_grab_value_from_rvalue(c, op.src0);
+                var src1 = ir_grab_value_from_rvalue(c, op.src1);
+
+                switch (op.tag) {
+                    .Or => src0 = @intFromBool((src0 != 0) or (src1 != 0)),
+                    .And => src0 = @intFromBool((src0 != 0) and (src1 != 0)),
+                    .Eq => src0 = @intFromBool(src0 == src1),
+                    .Neq => src0 = @intFromBool(src0 != src1),
+                    .Lt => src0 = @intFromBool(@as(i64, @bitCast(src0)) < @as(i64, @bitCast(src1))),
+                    .Leq => src0 = @intFromBool(@as(i64, @bitCast(src0)) <= @as(i64, @bitCast(src1))),
+                    .Gt => src0 = @intFromBool(@as(i64, @bitCast(src0)) > @as(i64, @bitCast(src1))),
+                    .Geq => src0 = @intFromBool(@as(i64, @bitCast(src0)) >= @as(i64, @bitCast(src1))),
+                    .Add => src0 = @bitCast(@as(i64, @bitCast(src0)) + @as(i64, @bitCast(src1))),
+                    .Sub => src0 = @bitCast(@as(i64, @bitCast(src0)) - @as(i64, @bitCast(src1))),
+                    .Mul => src0 = @bitCast(@as(i64, @bitCast(src0)) * @as(i64, @bitCast(src1))),
+                    .Div => src0 = @bitCast(@divTrunc(@as(i64, @bitCast(src0)), @as(i64, @bitCast(src1)))),
+                    .Mod => src0 = @bitCast(@rem(@as(i64, @bitCast(src0)), @as(i64, @bitCast(src1)))),
+                }
+
+                ir_stack_write_u64(c, dst, src0);
+            },
+            .Unary_Op => |op| {
+                var dst = ir_grab_pointer_from_lvalue(c, op.dst);
+                var src = ir_grab_value_from_rvalue(c, op.src);
+
+                switch (op.tag) {
+                    .Not => src = @intFromBool(src == 0),
+                    .Neg => src = @bitCast(-@as(i64, @bitCast(src))),
+                }
+
+                ir_stack_write_u64(c, dst, src);
+            },
+            .Jmpc => |jmpc| {
+                var src0 = ir_grab_value_from_rvalue(c, jmpc.src0);
+                var src1 = ir_grab_value_from_rvalue(c, jmpc.src1);
+
+                switch (jmpc.tag) {
+                    .Eq => src0 = @intFromBool(src0 == src1),
+                    .Neq => src0 = @intFromBool(src0 != src1),
+                    .Lt => src0 = @intFromBool(@as(i64, @bitCast(src0)) < @as(i64, @bitCast(src1))),
+                    .Leq => src0 = @intFromBool(@as(i64, @bitCast(src0)) <= @as(i64, @bitCast(src1))),
+                    .Gt => src0 = @intFromBool(@as(i64, @bitCast(src0)) > @as(i64, @bitCast(src1))),
+                    .Geq => src0 = @intFromBool(@as(i64, @bitCast(src0)) >= @as(i64, @bitCast(src1))),
+                }
+
+                if (src0 != 0) {
+                    ip = labels[jmpc.label];
+                    continue;
+                }
+            },
+            .Instr => |instr| {
+                switch (instr) {
+                    .Print => |tmp| {
+                        var src: i64 = @bitCast(ir_grab_value_from_rvalue(c, tmp));
+                        std.debug.print("{}\n", .{src});
+                    },
+                    .Mov => |mov| {
+                        var dst = ir_grab_pointer_from_lvalue(c, mov.dst);
+                        var src = ir_grab_value_from_rvalue(c, mov.src);
+
+                        ir_stack_write_u64(c, dst, src);
+                    },
+                    .Jmp => |label| {
+                        ip = labels[label];
+                        continue;
+                    },
+                    .Push_Frame_Pointer => |depth| {
+                        var i = depth;
+                        var rbp = c.rbp;
+                        while (i >= 0) : (i -= 1) {
+                            rbp = ir_stack_read_u64(c, rbp - -LF_RBP_OFFSET);
+                        }
+
+                        ir_stack_push(c, rbp);
+                    },
+                    .Push => |src| {
+                        var value = ir_grab_value_from_rvalue(c, src);
+                        ir_stack_push(c, value);
+                    },
+                    .Pop => |count| {
+                        c.rsp -= count;
+                    },
+                    .Call => |src| {
+                        ir_stack_push(c, ip);
+                        ir_stack_push(c, c.rbp);
+
+                        var label = ir_grab_value_from_rvalue(c, src);
+                        ip = labels[label];
+                        continue;
+                    },
+                    .Ret => |label| {
+                        ip = labels[label];
+                        continue;
+                    },
+                    .Exit => {
+                        break;
+                    },
+                }
+            },
+            .Meta => |meta| {
+                switch (meta) {
+                    .GFB => |gfb| {
+                        c.rbp = c.rsp;
+                        c.rsp += gfb.stack_space_used;
+                    },
+                    .GFE => |gfe| {
+                        c.rsp -= gfe.stack_space_used;
+                        c.rbp = ir_stack_pop(c);
+                        ip = ir_stack_pop(c);
+                    },
+                    .Label => {},
+                }
+            },
+        }
+
+        ip += 1;
+    }
+}
+
 fn generate_ir_instr(c: *Compiler, instr: IrInstr) void {
     c.ir_instrs.append(instr) catch {
         std.os.exit(1);
@@ -3979,262 +2396,6 @@ fn debug_print_ir(c: *Compiler) void {
     }
 }
 
-inline fn cast_ptr(comptime dst: type, src: anytype) dst {
-    return @alignCast(@ptrCast(src));
-}
-
-fn ir_grab_pointer_from_tmp(c: *Compiler, tmp: IrTmp) u64 {
-    switch (tmp.tag) {
-        .Global => return @intCast(tmp.offset),
-        .Local => {
-            var i = tmp.height;
-            var rbp = c.rbp;
-            while (i > 0) : (i -= 1) {
-                rbp = ir_stack_read_u64(c, rbp - -LF_RBP_OFFSET);
-            }
-
-            var rbp_i64: i64 = @bitCast(rbp);
-            return @bitCast(rbp_i64 + tmp.offset);
-        },
-    }
-}
-
-fn ir_grab_pointer_from_address(c: *Compiler, address: IrMem) u64 {
-    var offset: i64 = 0;
-
-    if (address.choose & 0x1 == 0x1) {
-        var base: i64 = @bitCast(ir_grab_value_from_tmp(c, address.base));
-        offset += base;
-    }
-
-    if (address.choose & 0x2 == 0x2) {
-        offset += address.disp;
-    }
-
-    return @bitCast(offset);
-}
-
-fn ir_grab_pointer_from_lvalue(c: *Compiler, lvalue: IrLvalue) u64 {
-    switch (lvalue) {
-        .Tmp => |tmp| return ir_grab_pointer_from_tmp(c, tmp),
-        .Mem => |address| return ir_grab_pointer_from_address(c, address),
-    }
-}
-
-fn ir_grab_value_from_tmp(c: *Compiler, tmp: IrTmp) u64 {
-    var pointer = ir_grab_pointer_from_tmp(c, tmp);
-    return ir_stack_read_u64(c, pointer);
-}
-
-fn ir_grab_value_from_rvalue(c: *Compiler, rvalue: IrRvalue) u64 {
-    switch (rvalue) {
-        .Lvalue => |lvalue| {
-            var pointer = ir_grab_pointer_from_lvalue(c, lvalue);
-            return ir_stack_read_u64(c, pointer);
-        },
-        .Addr => |lvalue| return ir_grab_pointer_from_lvalue(c, lvalue),
-        .Label => |label| return label,
-        .Imm => |imm| return @bitCast(imm),
-    }
-}
-
-fn ir_stack_read_u64(c: *Compiler, pointer: u64) u64 {
-    if (pointer < 8) {
-        std.debug.print("error: null pointer access (0x{x}).\n", .{pointer});
-        std.os.exit(1);
-    } else if (pointer + 8 > c.rsp) {
-        std.debug.print("error: address 0x{x} is outside of current stack pointer (0x{x}).\n", .{ pointer, c.rsp });
-        std.os.exit(1);
-    }
-    return ir_stack_read_u64_no_check(c, pointer);
-}
-
-inline fn ir_stack_read_u64_no_check(c: *Compiler, pointer: u64) u64 {
-    return cast_ptr(*u64, &c.stack[pointer]).*;
-}
-
-fn ir_stack_write_u64(c: *Compiler, pointer: u64, value: u64) void {
-    if (pointer < 8) {
-        std.debug.print("error: null pointer access (0x{x}).\n", .{pointer});
-        std.os.exit(1);
-    } else if (pointer + 8 > c.rsp) {
-        std.debug.print("error: address 0x{x} is outside of current stack pointer (0x{x}).\n", .{ pointer, c.rsp });
-        std.os.exit(1);
-    }
-    ir_stack_write_u64_no_check(c, pointer, value);
-}
-
-inline fn ir_stack_write_u64_no_check(c: *Compiler, pointer: u64, value: u64) void {
-    cast_ptr(*u64, &c.stack[pointer]).* = value;
-}
-
-fn ir_stack_push(c: *Compiler, value: u64) void {
-    ir_stack_write_u64_no_check(c, c.rsp, value);
-    c.rsp += 8;
-}
-
-fn ir_stack_pop(c: *Compiler) u64 {
-    c.rsp -= 8;
-    return ir_stack_read_u64_no_check(c, c.rsp);
-}
-
-fn interpret(c: *Compiler) void {
-    c.stack = gpa.alloc(u8, 2 * 1024 * 1024) catch {
-        std.os.exit(1);
-    };
-    defer gpa.free(c.stack);
-
-    var labels = gpa.alloc(u64, c.next_label) catch {
-        std.os.exit(1);
-    };
-    defer gpa.free(labels);
-
-    for (c.ir_instrs.items, 0..) |ir_instr, i| {
-        switch (ir_instr) {
-            .Meta => |meta| {
-                switch (meta) {
-                    .GFB => |gfb| {
-                        labels[gfb.label] = i;
-                    },
-                    .GFE => |gfe| {
-                        labels[gfe.label] = i;
-                    },
-                    .Label => |label| {
-                        labels[label] = i;
-                    },
-                }
-            },
-            else => {},
-        }
-    }
-
-    c.rsp = @intCast(c.next_global);
-    c.rbp = c.rsp;
-
-    var ip: u64 = 0;
-    while (ip < c.ir_instrs.items.len) {
-        switch (c.ir_instrs.items[ip]) {
-            .Binary_Op => |op| {
-                var dst = ir_grab_pointer_from_lvalue(c, op.dst);
-                var src0 = ir_grab_value_from_rvalue(c, op.src0);
-                var src1 = ir_grab_value_from_rvalue(c, op.src1);
-
-                switch (op.tag) {
-                    .Or => src0 = @intFromBool((src0 != 0) or (src1 != 0)),
-                    .And => src0 = @intFromBool((src0 != 0) and (src1 != 0)),
-                    .Eq => src0 = @intFromBool(src0 == src1),
-                    .Neq => src0 = @intFromBool(src0 != src1),
-                    .Lt => src0 = @intFromBool(@as(i64, @bitCast(src0)) < @as(i64, @bitCast(src1))),
-                    .Leq => src0 = @intFromBool(@as(i64, @bitCast(src0)) <= @as(i64, @bitCast(src1))),
-                    .Gt => src0 = @intFromBool(@as(i64, @bitCast(src0)) > @as(i64, @bitCast(src1))),
-                    .Geq => src0 = @intFromBool(@as(i64, @bitCast(src0)) >= @as(i64, @bitCast(src1))),
-                    .Add => src0 = @bitCast(@as(i64, @bitCast(src0)) + @as(i64, @bitCast(src1))),
-                    .Sub => src0 = @bitCast(@as(i64, @bitCast(src0)) - @as(i64, @bitCast(src1))),
-                    .Mul => src0 = @bitCast(@as(i64, @bitCast(src0)) * @as(i64, @bitCast(src1))),
-                    .Div => src0 = @bitCast(@divTrunc(@as(i64, @bitCast(src0)), @as(i64, @bitCast(src1)))),
-                    .Mod => src0 = @bitCast(@rem(@as(i64, @bitCast(src0)), @as(i64, @bitCast(src1)))),
-                }
-
-                ir_stack_write_u64(c, dst, src0);
-            },
-            .Unary_Op => |op| {
-                var dst = ir_grab_pointer_from_lvalue(c, op.dst);
-                var src = ir_grab_value_from_rvalue(c, op.src);
-
-                switch (op.tag) {
-                    .Not => src = @intFromBool(src == 0),
-                    .Neg => src = @bitCast(-@as(i64, @bitCast(src))),
-                }
-
-                ir_stack_write_u64(c, dst, src);
-            },
-            .Jmpc => |jmpc| {
-                var src0 = ir_grab_value_from_rvalue(c, jmpc.src0);
-                var src1 = ir_grab_value_from_rvalue(c, jmpc.src1);
-
-                switch (jmpc.tag) {
-                    .Eq => src0 = @intFromBool(src0 == src1),
-                    .Neq => src0 = @intFromBool(src0 != src1),
-                    .Lt => src0 = @intFromBool(@as(i64, @bitCast(src0)) < @as(i64, @bitCast(src1))),
-                    .Leq => src0 = @intFromBool(@as(i64, @bitCast(src0)) <= @as(i64, @bitCast(src1))),
-                    .Gt => src0 = @intFromBool(@as(i64, @bitCast(src0)) > @as(i64, @bitCast(src1))),
-                    .Geq => src0 = @intFromBool(@as(i64, @bitCast(src0)) >= @as(i64, @bitCast(src1))),
-                }
-
-                if (src0 != 0) {
-                    ip = labels[jmpc.label];
-                    continue;
-                }
-            },
-            .Instr => |instr| {
-                switch (instr) {
-                    .Print => |tmp| {
-                        var src: i64 = @bitCast(ir_grab_value_from_rvalue(c, tmp));
-                        std.debug.print("{}\n", .{src});
-                    },
-                    .Mov => |mov| {
-                        var dst = ir_grab_pointer_from_lvalue(c, mov.dst);
-                        var src = ir_grab_value_from_rvalue(c, mov.src);
-
-                        ir_stack_write_u64(c, dst, src);
-                    },
-                    .Jmp => |label| {
-                        ip = labels[label];
-                        continue;
-                    },
-                    .Push_Frame_Pointer => |depth| {
-                        var i = depth;
-                        var rbp = c.rbp;
-                        while (i >= 0) : (i -= 1) {
-                            rbp = ir_stack_read_u64(c, rbp - -LF_RBP_OFFSET);
-                        }
-
-                        ir_stack_push(c, rbp);
-                    },
-                    .Push => |src| {
-                        var value = ir_grab_value_from_rvalue(c, src);
-                        ir_stack_push(c, value);
-                    },
-                    .Pop => |count| {
-                        c.rsp -= count;
-                    },
-                    .Call => |src| {
-                        ir_stack_push(c, ip);
-                        ir_stack_push(c, c.rbp);
-
-                        var label = ir_grab_value_from_rvalue(c, src);
-                        ip = labels[label];
-                        continue;
-                    },
-                    .Ret => |label| {
-                        ip = labels[label];
-                        continue;
-                    },
-                    .Exit => {
-                        break;
-                    },
-                }
-            },
-            .Meta => |meta| {
-                switch (meta) {
-                    .GFB => |gfb| {
-                        c.rbp = c.rsp;
-                        c.rsp += gfb.stack_space_used;
-                    },
-                    .GFE => |gfe| {
-                        c.rsp -= gfe.stack_space_used;
-                        c.rbp = ir_stack_pop(c);
-                        ip = ir_stack_pop(c);
-                    },
-                    .Label => {},
-                }
-            },
-        }
-
-        ip += 1;
-    }
-}
-
 pub fn compile() void {
     var args = std.process.args();
     var filepath: [:0]const u8 = "examples/debug";
@@ -4244,23 +2405,9 @@ pub fn compile() void {
         filepath = arg;
     }
 
-    var source_code = utils.read_entire_file(gpa, filepath) catch {
-        std.debug.print("error: failed to read file '{s}'.\n", .{filepath});
-        std.os.exit(1);
-    };
-    var ast_arena = ArenaAllocator.init(std.heap.page_allocator);
-
     var compiler = Compiler{
-        .filepath = filepath,
-        .source_code = source_code,
         .globals = .{},
         .local_functions = .{},
-        .ast_arena = ast_arena,
-        .ast_arena_allocator = ast_arena.allocator(),
-        .symbols = SymbolTable.init(gpa),
-        .global_scope = undefined,
-        .current_scope = undefined,
-        .main_function = undefined,
         .ir_instrs = IrInstrList.init(gpa),
         .stack = &[0]u8{},
     };

@@ -1,15 +1,9 @@
 const std = @import("std");
 const Lexer = @import("lexer.zig");
+const Parser = @import("parser.zig");
+const Ast = @import("ast.zig");
 
 pub fn main() void {
-    var lexer = Lexer.init("examples/debug");
-
-    while (true) {
-        var token = lexer.grab();
-        lexer.advance();
-
-        std.debug.print("{}\n", .{token});
-
-        if (token.tag == .End_Of_File) break;
-    }
+    var ast = Parser.parse("examples/debug");
+    _ = ast;
 }
