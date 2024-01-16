@@ -76,7 +76,7 @@ bar := proc(aa: struct { x: int }) -> void
   // f := cast(bool, 2);
 
   g := &a[0];      // &[3]int
-  h: **[3]int = &g;
+  h: *[3]int = &g;
   i := &a;         // &[2][3]int
 
   if false then {} else {}
@@ -116,9 +116,9 @@ main := proc() -> void
   val3();
 
   if !true || false && true
-    ;
+    { }
   else
-    ;
+    { }
 
   val4: int;
   val5: Faz = .{ x = .{ 4, 2 } };
