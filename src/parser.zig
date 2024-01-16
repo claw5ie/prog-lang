@@ -84,11 +84,12 @@ pub fn parse(filepath: []const u8) Ast {
 
     return .{
         .globals = globals,
+        .locals = .{},
         .ast_arena = ast_arena,
-        .ast_arena_allocator = ast_arena_allocator, // can't do that, because it contains pointer to 'ast_arena', which is stack allocated.
         .symbols = p.symbols,
         .global_scope = global_scope,
         .next_label = p.next_label,
+        .filepath = filepath,
     };
 }
 
@@ -154,24 +155,12 @@ fn insert_existing_symbol(p: *This, symbol: *Ast.Symbol) void {
 }
 
 fn extract_type(p: *This, expr: Ast.Expr) *Ast.Type {
-    switch (expr.payload) {
-        .Type => |_type| {
-            return _type;
-        },
-        .Identifier => |id| {
-            var _type = parser_create(p, Ast.Type);
-            _type.* = .{
-                .payload = .{ .Identifier = id },
-                .size = undefined,
-                .line_info = expr.line_info,
-            };
-
-            return _type;
-        },
-        else => {
-            common.print_error(p.lexer.filepath, expr.line_info, "expression doesn't look like a type.", .{});
-            std.os.exit(1);
-        },
+    var ok = Ast.extract_type(p.ast_arena_allocator, expr);
+    if (ok) |_type| {
+        return _type;
+    } else {
+        common.print_error(p.lexer.filepath, expr.line_info, "expression doesn't look like a type.", .{});
+        std.os.exit(1);
     }
 }
 

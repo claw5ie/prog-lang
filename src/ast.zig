@@ -9,12 +9,14 @@ const ArenaAllocator = std.heap.ArenaAllocator;
 const Allocator = std.mem.Allocator;
 
 globals: SymbolList,
+locals: SymbolList,
 ast_arena: ArenaAllocator,
-ast_arena_allocator: Allocator,
 symbols: SymbolTable,
 
 global_scope: *Scope,
 next_label: Ir.Label,
+
+filepath: []const u8,
 
 pub const FunctionDepth = i32;
 
@@ -516,3 +518,26 @@ pub const SymbolTableContext = struct {
 };
 
 pub const SymbolTable = std.HashMap(SymbolKey, *Symbol, SymbolTableContext, 80);
+
+pub fn extract_type(allocator: Allocator, expr: Expr) ?*Type {
+    switch (expr.payload) {
+        .Type => |_type| {
+            return _type;
+        },
+        .Identifier => |id| {
+            var _type = allocator.create(Type) catch {
+                std.os.exit(1);
+            };
+            _type.* = .{
+                .payload = .{ .Identifier = id },
+                .size = undefined,
+                .line_info = expr.line_info,
+            };
+
+            return _type;
+        },
+        else => {
+            return null;
+        },
+    }
+}
