@@ -103,7 +103,8 @@ main := proc() -> void
 
   switch val0
     {
-      0, 1:
+      0:
+      1:
       {
         2 + 2;
       }

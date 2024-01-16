@@ -72,12 +72,18 @@ pub fn parse(filepath: []const u8) Ast {
     var globals: Ast.SymbolList = .{};
 
     while (p.peek() != .End_Of_File) {
-        var symbol = parse_symbol(p);
-        var node = parser_create(p, Ast.SymbolList.Node);
-        node.* = .{
-            .payload = symbol,
-        };
-        globals.insert_last(node);
+        var has_symbol = parse_symbol(p);
+        if (has_symbol) |symbol| {
+            var node = create(p, Ast.SymbolList.Node);
+            node.* = .{
+                .payload = symbol,
+            };
+            globals.insert_last(node);
+        } else {
+            var line_info = p.grab().line_info;
+            common.print_error(p.lexer.filepath, line_info, "expected ':' or ':=' to start definition.", .{});
+            std.os.exit(1);
+        }
     }
 
     std.debug.assert(p.current_scope == global_scope);
@@ -94,14 +100,14 @@ pub fn parse(filepath: []const u8) Ast {
     };
 }
 
-fn parser_create(p: *This, comptime T: type) *T {
+fn create(p: *This, comptime T: type) *T {
     return p.ast_arena_allocator.create(T) catch {
         std.os.exit(1);
     };
 }
 
 fn create_scope(p: *This) *Ast.Scope {
-    var result = parser_create(p, Ast.Scope);
+    var result = create(p, Ast.Scope);
     result.* = .{
         .parent = p.current_scope,
     };
@@ -118,7 +124,7 @@ fn pop_scope(p: *This) void {
 }
 
 fn create_symbol(p: *This, token: Lexer.Token) *Ast.Symbol {
-    var symbol = parser_create(p, Ast.Symbol);
+    var symbol = create(p, Ast.Symbol);
     symbol.* = .{
         .payload = undefined,
         .key = .{
@@ -172,8 +178,6 @@ fn parse_type(p: *This) *Ast.Type {
 fn parse_type_function(p: *This) Ast.TypePayload {
     p.expect(.Open_Paren);
 
-    push_scope(p);
-
     var params = Ast.SymbolList{};
 
     var tt = p.peek();
@@ -195,7 +199,7 @@ fn parse_type_function(p: *This) Ast.TypePayload {
             .tmp = undefined,
         } };
 
-        var node = parser_create(p, Ast.SymbolList.Node);
+        var node = create(p, Ast.SymbolList.Node);
         node.* = .{
             .payload = symbol,
         };
@@ -216,7 +220,7 @@ fn parse_type_function(p: *This) Ast.TypePayload {
         p.advance();
         return_type = parse_type(p);
     } else {
-        return_type = parser_create(p, Ast.Type);
+        return_type = create(p, Ast.Type);
         return_type.* = .{
             .payload = .Void,
             .size = undefined,
@@ -224,18 +228,14 @@ fn parse_type_function(p: *This) Ast.TypePayload {
         };
     }
 
-    var scope = p.current_scope;
-
-    pop_scope(p);
-
     return .{ .Function = .{
         .params = params,
         .return_type = return_type,
-        .scope = scope,
+        .scope = p.current_scope,
     } };
 }
 
-fn parse_struct_fields(p: *This, is_struct: bool) Ast.TypeStruct {
+fn parse_struct_fields(p: *This) Ast.TypeStruct {
     p.expect(.Open_Curly);
 
     push_scope(p);
@@ -253,18 +253,11 @@ fn parse_struct_fields(p: *This, is_struct: bool) Ast.TypeStruct {
 
         var _type = parse_type(p);
         var symbol = insert_symbol(p, id);
+        symbol.payload = .{ .Struct_Field = .{
+            ._type = _type,
+        } };
 
-        if (is_struct) {
-            symbol.payload = .{ .Struct_Field = .{
-                ._type = _type,
-            } };
-        } else {
-            symbol.payload = .{ .Union_Field = .{
-                ._type = _type,
-            } };
-        }
-
-        var node = parser_create(p, Ast.SymbolList.Node);
+        var node = create(p, Ast.SymbolList.Node);
         node.* = .{
             .payload = symbol,
         };
@@ -284,21 +277,14 @@ fn parse_struct_fields(p: *This, is_struct: bool) Ast.TypeStruct {
     return _struct;
 }
 
-fn is_def(p: *This) bool {
-    var fst = p.peek();
-    var snd = p.peek_ahead(1);
-    return fst == .Identifier and (snd == .Colon_Equal or snd == .Colon);
-}
+fn parse_symbol(p: *This) ?*Ast.Symbol {
+    if (p.peek() != .Identifier) return null;
 
-fn parse_symbol(p: *This) *Ast.Symbol {
-    var id = p.grab();
-    p.expect(.Identifier);
-
-    var symbol = insert_symbol(p, id);
-
-    switch (p.peek()) {
+    switch (p.peek_ahead(1)) {
         .Colon_Equal => {
-            p.advance();
+            var id = p.grab();
+            var symbol = insert_symbol(p, id);
+            p.advance_many(2);
 
             if (p.peek() == .Proc) {
                 p.function_depth += 1;
@@ -306,8 +292,7 @@ fn parse_symbol(p: *This) *Ast.Symbol {
                 var _type = parse_type(p);
 
                 if (p.peek() == .Open_Curly) {
-                    var previous_scope = p.current_scope;
-                    p.current_scope = _type.payload.Function.scope;
+                    push_scope(p);
 
                     var it = _type.payload.Function.params.iterator();
                     while (it.next()) |param_ptr| {
@@ -318,7 +303,7 @@ fn parse_symbol(p: *This) *Ast.Symbol {
                         }
                     }
 
-                    var block = parse_block_given_scope(p, p.current_scope);
+                    var block = parse_stmt_block(p);
 
                     symbol.payload = .{ .Function = .{
                         ._type = _type,
@@ -326,7 +311,8 @@ fn parse_symbol(p: *This) *Ast.Symbol {
                         .label = p.grab_label(),
                         .depth = p.function_depth,
                     } };
-                    p.current_scope = previous_scope;
+
+                    pop_scope(p);
                 } else {
                     p.expect(.Semicolon);
                     symbol.payload = .{ .Type = _type };
@@ -336,7 +322,7 @@ fn parse_symbol(p: *This) *Ast.Symbol {
 
                 return symbol;
             } else {
-                var expr = parser_create(p, Ast.Expr);
+                var expr = create(p, Ast.Expr);
                 expr.* = parse_expr(p);
                 p.expect(.Semicolon);
 
@@ -348,14 +334,16 @@ fn parse_symbol(p: *This) *Ast.Symbol {
             }
         },
         .Colon => {
-            p.advance();
+            var id = p.grab();
+            var symbol = insert_symbol(p, id);
+            p.advance_many(2);
 
             var expr: ?*Ast.Expr = null;
             var _type = parse_type(p);
 
             if (p.peek() == .Equal) {
                 p.advance();
-                expr = parser_create(p, Ast.Expr);
+                expr = create(p, Ast.Expr);
                 expr.?.* = parse_expr(p);
             }
 
@@ -370,9 +358,7 @@ fn parse_symbol(p: *This) *Ast.Symbol {
             return symbol;
         },
         else => {
-            var token = p.grab();
-            common.print_error(p.lexer.filepath, token.line_info, "expected ':' or ':=' to define symbol.", .{});
-            std.os.exit(1);
+            return null;
         },
     }
 }
@@ -391,7 +377,7 @@ fn parse_expr_list(p: *This) Ast.ExprList {
                 var id = p.grab();
                 p.advance_many(2);
 
-                var value = parser_create(p, Ast.Expr);
+                var value = create(p, Ast.Expr);
                 value.* = parse_expr(p);
 
                 break :expr .{
@@ -407,7 +393,7 @@ fn parse_expr_list(p: *This) Ast.ExprList {
             }
         };
 
-        var node = parser_create(p, Ast.ExprList.Node);
+        var node = create(p, Ast.ExprList.Node);
         node.* = .{
             .payload = expr,
         };
@@ -439,8 +425,8 @@ fn parse_prec(p: *This, min_prec: i32) Ast.Expr {
         while (curr_prec == prec_of_op(op)) {
             p.advance();
 
-            var lhs_ptr = parser_create(p, Ast.Expr);
-            var rhs_ptr = parser_create(p, Ast.Expr);
+            var lhs_ptr = create(p, Ast.Expr);
+            var rhs_ptr = create(p, Ast.Expr);
             lhs_ptr.* = lhs;
             rhs_ptr.* = parse_prec(p, curr_prec + 1);
             lhs = .{
@@ -478,7 +464,7 @@ fn parse_highest_prec(p: *This) Ast.Expr {
             .Ref,
             .Not,
             => {
-                var subexpr = parser_create(p, Ast.Expr);
+                var subexpr = create(p, Ast.Expr);
                 subexpr.* = parse_highest_prec(p);
 
                 break :payload .{ .Unary_Op = .{
@@ -514,9 +500,9 @@ fn parse_highest_prec(p: *This) Ast.Expr {
                 }
             },
             .If => {
-                var cond = parser_create(p, Ast.Expr);
-                var if_true = parser_create(p, Ast.Expr);
-                var if_false = parser_create(p, Ast.Expr);
+                var cond = create(p, Ast.Expr);
+                var if_true = create(p, Ast.Expr);
+                var if_false = create(p, Ast.Expr);
 
                 cond.* = parse_expr(p);
                 if (p.peek() == .Then) {
@@ -556,7 +542,7 @@ fn parse_highest_prec(p: *This) Ast.Expr {
             },
             .Mul => {
                 var subtype = parse_type(p);
-                var _type = parser_create(p, Ast.Type);
+                var _type = create(p, Ast.Type);
                 _type.* = .{
                     .payload = .{ .Pointer = subtype },
                     .size = undefined,
@@ -566,12 +552,12 @@ fn parse_highest_prec(p: *This) Ast.Expr {
                 break :payload .{ .Type = _type };
             },
             .Open_Bracket => {
-                var expr = parser_create(p, Ast.Expr);
+                var expr = create(p, Ast.Expr);
                 expr.* = parse_expr(p);
                 p.expect(.Close_Bracket);
 
                 var subtype = parse_type(p);
-                var _type = parser_create(p, Ast.Type);
+                var _type = create(p, Ast.Type);
                 _type.* = .{
                     .payload = .{ .Array = .{
                         .expr = expr,
@@ -585,8 +571,8 @@ fn parse_highest_prec(p: *This) Ast.Expr {
                 break :payload .{ .Type = _type };
             },
             .Struct => {
-                var _struct = parse_struct_fields(p, true);
-                var _type = parser_create(p, Ast.Type);
+                var _struct = parse_struct_fields(p);
+                var _type = create(p, Ast.Type);
                 _type.* = .{
                     .payload = .{ .Struct = _struct },
                     .size = undefined,
@@ -596,8 +582,8 @@ fn parse_highest_prec(p: *This) Ast.Expr {
                 break :payload .{ .Type = _type };
             },
             .Union => {
-                var _union = parse_struct_fields(p, false);
-                var _type = parser_create(p, Ast.Type);
+                var _union = parse_struct_fields(p);
+                var _type = create(p, Ast.Type);
                 _type.* = .{
                     .payload = .{ .Union = _union },
                     .size = undefined,
@@ -627,7 +613,7 @@ fn parse_highest_prec(p: *This) Ast.Expr {
                         .value = undefined,
                     } };
 
-                    var node = parser_create(p, Ast.SymbolList.Node);
+                    var node = create(p, Ast.SymbolList.Node);
                     node.* = .{
                         .payload = symbol,
                     };
@@ -644,7 +630,7 @@ fn parse_highest_prec(p: *This) Ast.Expr {
 
                 p.expect(.Close_Curly);
 
-                var _type = parser_create(p, Ast.Type);
+                var _type = create(p, Ast.Type);
                 _type.* = .{
                     .payload = .{ .Enum = _enum },
                     .size = undefined,
@@ -654,7 +640,7 @@ fn parse_highest_prec(p: *This) Ast.Expr {
                 break :payload .{ .Type = _type };
             },
             .Proc => {
-                var _type = parser_create(p, Ast.Type);
+                var _type = create(p, Ast.Type);
                 _type.* = .{
                     .payload = parse_type_function(p),
                     .size = undefined,
@@ -664,7 +650,7 @@ fn parse_highest_prec(p: *This) Ast.Expr {
                 break :payload .{ .Type = _type };
             },
             .Void => {
-                var _type = parser_create(p, Ast.Type);
+                var _type = create(p, Ast.Type);
                 _type.* = .{
                     .payload = .Void,
                     .size = undefined,
@@ -673,7 +659,7 @@ fn parse_highest_prec(p: *This) Ast.Expr {
                 break :payload .{ .Type = _type };
             },
             .Bool => {
-                var _type = parser_create(p, Ast.Type);
+                var _type = create(p, Ast.Type);
                 _type.* = .{
                     .payload = .Bool,
                     .size = undefined,
@@ -682,7 +668,7 @@ fn parse_highest_prec(p: *This) Ast.Expr {
                 break :payload .{ .Type = _type };
             },
             .Int => {
-                var _type = parser_create(p, Ast.Type);
+                var _type = create(p, Ast.Type);
                 _type.* = .{
                     .payload = .Int64,
                     .size = undefined,
@@ -702,12 +688,12 @@ fn parse_highest_prec(p: *This) Ast.Expr {
                 if (p.peek() == .Close_Paren) {
                     p.advance();
 
-                    var expr = parser_create(p, Ast.Expr);
+                    var expr = create(p, Ast.Expr);
                     expr.* = lhs;
                     break :payload .{ .Cast1 = expr };
                 } else {
                     var _type = extract_type(p, lhs);
-                    var rhs = parser_create(p, Ast.Expr);
+                    var rhs = create(p, Ast.Expr);
                     rhs.* = parse_expr(p);
 
                     if (p.peek() == .Comma) {
@@ -746,7 +732,7 @@ fn parse_postfix_unary_ops(p: *This, inner: *Ast.Expr) void {
                 var tt = p.peek();
                 while (tt != .End_Of_File and tt != .Close_Paren) {
                     var expr = parse_expr(p);
-                    var node = parser_create(p, Ast.ExprList.Node);
+                    var node = create(p, Ast.ExprList.Node);
                     node.* = .{
                         .payload = expr,
                     };
@@ -761,7 +747,7 @@ fn parse_postfix_unary_ops(p: *This, inner: *Ast.Expr) void {
 
                 p.expect(.Close_Paren);
 
-                var lhs = parser_create(p, Ast.Expr);
+                var lhs = create(p, Ast.Expr);
                 lhs.* = inner.*;
                 inner.* = .{
                     .payload = .{ .Call = .{
@@ -776,11 +762,11 @@ fn parse_postfix_unary_ops(p: *This, inner: *Ast.Expr) void {
                 var line_info = p.grab().line_info;
                 p.advance();
 
-                var expr = parser_create(p, Ast.Expr);
+                var expr = create(p, Ast.Expr);
                 expr.* = parse_expr(p);
                 p.expect(.Close_Bracket);
 
-                var lhs = parser_create(p, Ast.Expr);
+                var lhs = create(p, Ast.Expr);
                 lhs.* = inner.*;
                 inner.* = .{
                     .payload = .{ .Index = .{
@@ -797,7 +783,7 @@ fn parse_postfix_unary_ops(p: *This, inner: *Ast.Expr) void {
                 if (p.peek() == .Mul) {
                     p.advance();
 
-                    var lhs = parser_create(p, Ast.Expr);
+                    var lhs = create(p, Ast.Expr);
                     lhs.* = inner.*;
                     inner.* = .{
                         .payload = .{ .Unary_Op = .{
@@ -822,7 +808,7 @@ fn parse_postfix_unary_ops(p: *This, inner: *Ast.Expr) void {
                     var id = p.grab();
                     p.expect(.Identifier);
 
-                    var lhs = parser_create(p, Ast.Expr);
+                    var lhs = create(p, Ast.Expr);
                     lhs.* = inner.*;
                     inner.* = .{
                         .payload = .{ .Field = .{
@@ -893,228 +879,223 @@ fn token_tag_to_expr_unary_op_tag(op: Lexer.TokenTag) Ast.ExprUnaryOpTag {
 }
 
 fn parse_stmt(p: *This) Ast.Stmt {
-    var result: Ast.Stmt = .{
-        .payload = undefined,
-        .line_info = p.grab().line_info,
-    };
+    var line_info = p.grab().line_info;
 
-    result.payload = payload: {
-        switch (p.peek()) {
-            .Print => {
+    switch (p.peek()) {
+        .Print => {
+            p.advance();
+
+            var expr = create(p, Ast.Expr);
+            expr.* = parse_expr(p);
+            p.expect(.Semicolon);
+
+            return .{
+                .payload = .{ .Print = expr },
+                .line_info = line_info,
+            };
+        },
+        .Open_Curly => {
+            push_scope(p);
+            var block = parse_stmt_block(p);
+            pop_scope(p);
+
+            return .{
+                .payload = .{ .Block = block },
+                .line_info = line_info,
+            };
+        },
+        .If => {
+            p.advance();
+
+            var cond = create(p, Ast.Expr);
+            cond.* = parse_expr(p);
+
+            if (p.peek() == .Then) {
                 p.advance();
+            }
 
-                var expr = parser_create(p, Ast.Expr);
-                expr.* = parse_expr(p);
-                p.expect(.Semicolon);
+            var if_true = create(p, Ast.Stmt);
+            var if_false: ?*Ast.Stmt = null;
 
-                break :payload .{ .Print = expr };
-            },
-            .Open_Curly => {
-                break :payload .{ .Block = parse_scoped_block(p) };
-            },
-            .If => {
+            if_true.* = parse_stmt(p);
+            if (p.peek() == .Else) {
                 p.advance();
+                if_false = create(p, Ast.Stmt);
+                if_false.?.* = parse_stmt(p);
+            }
 
-                var cond = parser_create(p, Ast.Expr);
-                cond.* = parse_expr(p);
-
-                if (p.peek() == .Then) {
-                    p.advance();
-                }
-
-                var if_true = parse_stmt_or_scoped_block(p);
-                var if_false = Ast.StmtBlock{
-                    .stmts = .{},
-                    .scope = null,
-                };
-
-                if (p.peek() == .Else) {
-                    p.advance();
-                    if_false = parse_stmt_or_scoped_block(p);
-                }
-
-                break :payload .{ .If = .{
+            return .{
+                .payload = .{ .If = .{
                     .cond = cond,
                     .if_true = if_true,
                     .if_false = if_false,
-                } };
-            },
-            .While => {
+                } },
+                .line_info = line_info,
+            };
+        },
+        .While => {
+            p.advance();
+
+            var cond = create(p, Ast.Expr);
+            cond.* = parse_expr(p);
+
+            if (p.peek() == .Do) {
                 p.advance();
+            }
 
-                var cond = parser_create(p, Ast.Expr);
-                cond.* = parse_expr(p);
+            var block = create(p, Ast.Stmt);
+            block.* = parse_stmt(p);
 
-                if (p.peek() == .Do) {
-                    p.advance();
-                }
-
-                var block = parse_stmt_or_scoped_block(p);
-
-                break :payload .{ .While = .{
+            return .{
+                .payload = .{ .While = .{
                     .cond = cond,
                     .block = block,
-                } };
-            },
-            .Do => {
-                p.advance();
+                } },
+                .line_info = line_info,
+            };
+        },
+        .Do => {
+            p.advance();
 
-                var block = parse_stmt_or_scoped_block(p);
+            var block = create(p, Ast.Stmt);
+            block.* = parse_stmt(p);
 
-                p.expect(.While);
+            p.expect(.While);
 
-                var cond = parser_create(p, Ast.Expr);
-                cond.* = parse_expr(p);
+            var cond = create(p, Ast.Expr);
+            cond.* = parse_expr(p);
 
-                p.expect(.Semicolon);
+            p.expect(.Semicolon);
 
-                break :payload .{ .While = .{
+            return .{
+                .payload = .{ .While = .{
                     .block = block,
                     .cond = cond,
                     .is_do_while = true,
-                } };
-            },
-            .Break => {
-                p.advance();
-                p.expect(.Semicolon);
-                break :payload .Break;
-            },
-            .Continue => {
-                p.advance();
-                p.expect(.Semicolon);
-                break :payload .Continue;
-            },
-            .Switch => {
-                p.advance();
+                } },
+                .line_info = line_info,
+            };
+        },
+        .Break => {
+            p.advance();
+            p.expect(.Semicolon);
+            return .{
+                .payload = .Break,
+                .line_info = line_info,
+            };
+        },
+        .Continue => {
+            p.advance();
+            p.expect(.Semicolon);
+            return .{
+                .payload = .Continue,
+                .line_info = line_info,
+            };
+        },
+        .Switch => {
+            p.advance();
 
-                var cond = parser_create(p, Ast.Expr);
-                cond.* = parse_expr(p);
+            var cond = create(p, Ast.Expr);
+            cond.* = parse_expr(p);
 
-                p.expect(.Open_Curly);
+            push_scope(p);
+            var block = parse_stmt_block(p);
+            pop_scope(p);
 
-                var cases = Ast.SwitchCaseList{};
-
-                var tt = p.peek();
-                while (tt != .End_Of_File and tt != .Close_Curly) {
-                    while (true) {
-                        var value = parser_create(p, Ast.Expr);
-                        value.* = parse_expr(p);
-
-                        push_scope(p);
-
-                        var case = Ast.SwitchCase{
-                            .value = value,
-                            .block = .{
-                                .stmts = .{},
-                                .scope = p.current_scope,
-                            },
-                            .should_fallthrough = true,
-                        };
-
-                        pop_scope(p);
-
-                        var node = parser_create(p, Ast.SwitchCaseList.Node);
-                        node.* = .{
-                            .payload = case,
-                        };
-                        cases.insert_last(node);
-
-                        tt = p.peek();
-                        if (tt != .End_Of_File and tt != .Colon) {
-                            p.expect(.Comma);
-                            tt = p.peek();
-                        }
-
-                        if (tt == .End_Of_File or tt == .Colon) {
-                            break;
-                        }
-                    }
-
-                    p.expect(.Colon);
-
-                    var case = cases.grab_last();
-                    case.should_fallthrough = false;
-                    case.block.stmts = parse_block_given_scope(p, case.block.scope.?);
-
-                    tt = p.peek();
-                }
-
-                p.expect(.Close_Curly);
-
-                break :payload .{ .Switch = .{
+            return .{
+                .payload = .{ .Switch = .{
                     .cond = cond,
-                    .cases = cases,
-                } };
-            },
-            .Return => {
+                    .cases = block,
+                } },
+                .line_info = line_info,
+            };
+        },
+        .Return => {
+            p.advance();
+
+            if (p.peek() == .Semicolon) {
                 p.advance();
 
-                if (p.peek() == .Semicolon) {
-                    p.advance();
+                return .{
+                    .payload = .Return,
+                    .line_info = line_info,
+                };
+            }
 
-                    break :payload .Return;
-                }
+            var expr = create(p, Ast.Expr);
+            expr.* = parse_expr(p);
+            p.expect(.Semicolon);
 
-                var expr = parser_create(p, Ast.Expr);
-                expr.* = parse_expr(p);
-                p.expect(.Semicolon);
+            return .{
+                .payload = .{ .Return_Expr = expr },
+                .line_info = line_info,
+            };
+        },
+        else => {
+            var has_symbol = parse_symbol(p);
 
-                break :payload .{ .Return_Expr = expr };
-            },
-            else => {
-                if (is_def(p)) {
-                    var symbol = parse_symbol(p);
-                    break :payload .{ .Symbol = symbol };
-                } else {
-                    var lhs = parser_create(p, Ast.Expr);
-                    lhs.* = parse_expr(p);
+            if (has_symbol) |symbol| {
+                return .{
+                    .payload = .{ .Symbol = symbol },
+                    .line_info = line_info,
+                };
+            } else {
+                var lhs = create(p, Ast.Expr);
+                lhs.* = parse_expr(p);
 
-                    if (p.peek() == .Equal) {
+                switch (p.peek()) {
+                    .Equal => {
                         p.advance();
 
-                        var rhs = parser_create(p, Ast.Expr);
+                        var rhs = create(p, Ast.Expr);
                         rhs.* = parse_expr(p);
                         p.expect(.Semicolon);
 
-                        break :payload .{ .Assign = .{
-                            .lhs = lhs,
-                            .rhs = rhs,
-                        } };
-                    }
+                        return .{
+                            .payload = .{ .Assign = .{
+                                .lhs = lhs,
+                                .rhs = rhs,
+                            } },
+                            .line_info = line_info,
+                        };
+                    },
+                    .Colon => {
+                        p.advance();
 
-                    p.expect(.Semicolon);
+                        var stmt = create(p, Ast.Stmt);
+                        stmt.* = parse_stmt(p);
 
-                    break :payload .{ .Expr = lhs };
+                        return .{
+                            .payload = .{ .Case = .{
+                                .expr = lhs,
+                                .stmt = stmt,
+                            } },
+                            .line_info = line_info,
+                        };
+                    },
+                    else => {
+                        p.expect(.Semicolon);
+
+                        return .{
+                            .payload = .{ .Expr = lhs },
+                            .line_info = line_info,
+                        };
+                    },
                 }
-            },
-        }
-    };
-
-    return result;
+            }
+        },
+    }
 }
 
-fn parse_scoped_block(p: *This) Ast.StmtBlock {
-    var scope = create_scope(p);
-    var stmts = parse_block_given_scope(p, scope);
-    return .{
-        .stmts = stmts,
-        .scope = scope,
-    };
-}
-
-fn parse_block_given_scope(p: *This, scope: *Ast.Scope) Ast.StmtList {
-    // Previous scope may not be its parent.
-    var previous_scope = p.current_scope;
-    p.current_scope = scope;
-
-    var block = Ast.StmtList{};
-
+fn parse_stmt_block(p: *This) Ast.StmtBlock {
     p.expect(.Open_Curly);
+
+    var block = Ast.StmtBlock{};
 
     var tt = p.peek();
     while (tt != .End_Of_File and tt != .Close_Curly) {
         var stmt = parse_stmt(p);
-        var node = parser_create(p, Ast.StmtList.Node);
+        var node = create(p, Ast.StmtBlock.Node);
         node.* = .{
             .payload = stmt,
         };
@@ -1125,38 +1106,5 @@ fn parse_block_given_scope(p: *This, scope: *Ast.Scope) Ast.StmtList {
 
     p.expect(.Close_Curly);
 
-    p.current_scope = previous_scope;
-
     return block;
-}
-
-fn parse_stmt_or_scoped_block(p: *This) Ast.StmtBlock {
-    var result = Ast.StmtBlock{
-        .stmts = .{},
-        .scope = null,
-    };
-
-    switch (p.peek()) {
-        .Open_Curly => {
-            result = parse_scoped_block(p);
-        },
-        .Semicolon => {
-            p.advance();
-        },
-        else => {
-            var stmt = parse_stmt(p);
-            var node = parser_create(p, Ast.StmtList.Node);
-            node.* = .{
-                .payload = stmt,
-            };
-            result.stmts.insert_last(node);
-
-            if (stmt.payload == .Symbol) {
-                common.print_error(p.lexer.filepath, stmt.line_info, "definitions are not allowed inside a single statement block.", .{});
-                std.os.exit(1);
-            }
-        },
-    }
-
-    return result;
 }

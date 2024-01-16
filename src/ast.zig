@@ -375,6 +375,7 @@ pub const StmtTag = enum {
     Break,
     Continue,
     Switch,
+    Case,
     Return,
     Return_Expr,
     Symbol,
@@ -387,19 +388,23 @@ pub const StmtPayload = union(StmtTag) {
     Block: StmtBlock,
     If: struct {
         cond: *Expr,
-        if_true: StmtBlock,
-        if_false: StmtBlock,
+        if_true: *Stmt,
+        if_false: ?*Stmt,
     },
     While: struct {
         cond: *Expr,
-        block: StmtBlock,
+        block: *Stmt,
         is_do_while: bool = false,
     },
     Break: void,
     Continue: void,
     Switch: struct {
         cond: *Expr,
-        cases: SwitchCaseList,
+        cases: StmtBlock,
+    },
+    Case: struct {
+        expr: *Expr,
+        stmt: *Stmt,
     },
     Return: void,
     Return_Expr: *Expr,
@@ -416,20 +421,7 @@ pub const Stmt = struct {
     line_info: LineInfo,
 };
 
-pub const StmtList = notstd.DoublyLinkedList(Stmt);
-
-pub const SwitchCase = struct {
-    value: *Expr,
-    block: StmtBlock,
-    should_fallthrough: bool,
-};
-
-pub const SwitchCaseList = notstd.DoublyLinkedList(SwitchCase);
-
-pub const StmtBlock = struct {
-    stmts: StmtList,
-    scope: ?*Scope,
-};
+pub const StmtBlock = notstd.DoublyLinkedList(Stmt);
 
 pub const SymbolVariable = struct {
     _type: ?*Type,
@@ -446,16 +438,12 @@ pub const SymbolParameter = struct {
 
 pub const SymbolFunction = struct {
     _type: *Type,
-    block: StmtList,
+    block: StmtBlock,
     label: Ir.Label,
     depth: FunctionDepth,
 };
 
 pub const SymbolStructField = struct {
-    _type: *Type,
-};
-
-pub const SymbolUnionField = struct {
     _type: *Type,
 };
 
@@ -474,7 +462,6 @@ pub const SymbolTag = enum {
     Parameter,
     Function,
     Struct_Field,
-    Union_Field,
     Enum_Field,
     Type,
     Definition,
@@ -485,7 +472,6 @@ pub const SymbolPayload = union(SymbolTag) {
     Parameter: SymbolParameter,
     Function: SymbolFunction,
     Struct_Field: SymbolStructField,
-    Union_Field: SymbolUnionField,
     Enum_Field: SymbolEnumField,
     Type: *Type,
     Definition: SymbolDefinition,

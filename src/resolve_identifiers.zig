@@ -161,7 +161,6 @@ fn resolve_symbol(ast: *Ast, symbol: *Ast.Symbol) void {
             resolve_type(ast, _type);
         },
         .Struct_Field,
-        .Union_Field,
         .Enum_Field,
         .Definition,
         => unreachable,
@@ -185,7 +184,7 @@ fn resolve_type(ast: *Ast, _type: *Ast.Type) void {
         .Union => |_union| {
             var it = _union.fields.iterator();
             while (it.next()) |field| {
-                resolve_type(ast, field.*.payload.Union_Field._type);
+                resolve_type(ast, field.*.payload.Struct_Field._type);
             }
         },
         .Enum => |_enum| {
@@ -229,7 +228,7 @@ fn resolve_type(ast: *Ast, _type: *Ast.Type) void {
 }
 
 fn resolve_block(ast: *Ast, block: Ast.StmtBlock) void {
-    var it = block.stmts.iterator();
+    var it = block.iterator();
     while (it.next()) |stmt| {
         resolve_stmt(ast, stmt);
     }
@@ -245,23 +244,22 @@ fn resolve_stmt(ast: *Ast, stmt: *Ast.Stmt) void {
         },
         .If => |_if| {
             resolve_expr(ast, _if.cond);
-            resolve_block(ast, _if.if_true);
-            resolve_block(ast, _if.if_false);
+            resolve_stmt(ast, _if.if_true);
+            if (_if.if_false) |if_false| resolve_stmt(ast, if_false);
         },
         .While => |_while| {
             resolve_expr(ast, _while.cond);
-            resolve_block(ast, _while.block);
+            resolve_stmt(ast, _while.block);
         },
         .Break => {},
         .Continue => {},
         .Switch => |_switch| {
             resolve_expr(ast, _switch.cond);
-
-            var it = _switch.cases.iterator();
-            while (it.next()) |case| {
-                resolve_expr(ast, case.value);
-                resolve_block(ast, case.block);
-            }
+            resolve_block(ast, _switch.cases);
+        },
+        .Case => |case| {
+            resolve_expr(ast, case.expr);
+            resolve_stmt(ast, case.stmt);
         },
         .Return => {},
         .Return_Expr => |expr| {

@@ -279,12 +279,6 @@ pub fn grab_label(ir: *This) Label {
     return result;
 }
 
-pub fn grab_buncha_labels(ir: *This, count: u32) Label {
-    var result = ir.next_label;
-    ir.next_label += count;
-    return result;
-}
-
 fn generate_instr(ir: *This, instr: Instr) void {
     ir.instrs.append(instr) catch {
         std.os.exit(1);
@@ -347,7 +341,6 @@ fn generate_global_symbol(ir: *This, symbol: *Ast.Symbol) void {
         .Parameter,
         .Definition,
         .Struct_Field,
-        .Union_Field,
         .Enum_Field,
         => unreachable,
     }
@@ -369,7 +362,6 @@ fn generate_local_symbol(ir: *This, symbol: *Ast.Symbol) void {
         .Parameter,
         .Definition,
         .Struct_Field,
-        .Union_Field,
         .Enum_Field,
         => unreachable,
     }
@@ -437,14 +429,12 @@ fn generate_function(ir: *This, function: *const Ast.SymbolFunction, first_arg_o
 fn generate_block(ir: *This, ctx: *const StmtContext, block: Ast.StmtBlock) void {
     var old_next_local = ir.next_local;
 
-    var it = block.stmts.iterator();
+    var it = block.iterator();
     while (it.next()) |stmt| {
         generate_stmt(ir, ctx, stmt);
     }
 
-    if (block.scope != null) {
-        ir.next_local = old_next_local;
-    }
+    ir.next_local = old_next_local;
 }
 
 fn generate_stmt(ir: *This, ctx: *const StmtContext, stmt: *Ast.Stmt) void {
@@ -462,48 +452,21 @@ fn generate_stmt(ir: *This, ctx: *const StmtContext, stmt: *Ast.Stmt) void {
             generate_block(ir, ctx, block);
         },
         .If => |_if| {
-            var is_if_true_there: u2 = @intFromBool(_if.if_true.stmts.count != 0);
-            var is_if_false_there: u2 = @intFromBool(_if.if_false.stmts.count != 0);
-            switch ((is_if_true_there << 1) | is_if_false_there) {
-                0b00 => {
-                    _ = generate_rvalue(ir, _if.cond, null);
-                },
-                0b01 => {
-                    var end_label = ir.grab_label();
+            var false_label = ir.grab_label();
+            var end_label = ir.grab_label();
 
-                    generate_jump(ir, _if.cond, true, end_label);
-                    generate_block(ir, ctx, _if.if_false);
-                    generate_instr(ir, .{ .Meta = .{
-                        .Label = end_label,
-                    } });
-                },
-                0b10 => {
-                    var end_label = ir.grab_label();
-
-                    generate_jump(ir, _if.cond, false, end_label);
-                    generate_block(ir, ctx, _if.if_true);
-                    generate_instr(ir, .{ .Meta = .{
-                        .Label = end_label,
-                    } });
-                },
-                0b11 => {
-                    var false_label = ir.grab_label();
-                    var end_label = ir.grab_label();
-
-                    generate_jump(ir, _if.cond, false, false_label);
-                    generate_block(ir, ctx, _if.if_true);
-                    generate_instr(ir, .{ .Instr = .{
-                        .Jmp = end_label,
-                    } });
-                    generate_instr(ir, .{ .Meta = .{
-                        .Label = false_label,
-                    } });
-                    generate_block(ir, ctx, _if.if_false);
-                    generate_instr(ir, .{ .Meta = .{
-                        .Label = end_label,
-                    } });
-                },
-            }
+            generate_jump(ir, _if.cond, false, false_label);
+            generate_stmt(ir, ctx, _if.if_true);
+            generate_instr(ir, .{ .Instr = .{
+                .Jmp = end_label,
+            } });
+            generate_instr(ir, .{ .Meta = .{
+                .Label = false_label,
+            } });
+            if (_if.if_false) |if_false| generate_stmt(ir, ctx, if_false);
+            generate_instr(ir, .{ .Meta = .{
+                .Label = end_label,
+            } });
         },
         .While => |_while| {
             var block_label = ir.grab_label();
@@ -524,7 +487,7 @@ fn generate_stmt(ir: *This, ctx: *const StmtContext, stmt: *Ast.Stmt) void {
             new_ctx.loop_cond_label = cond_label;
             new_ctx.loop_end_label = end_label;
 
-            generate_block(ir, &new_ctx, _while.block);
+            generate_stmt(ir, &new_ctx, _while.block);
             generate_instr(ir, .{ .Meta = .{
                 .Label = cond_label,
             } });
@@ -542,51 +505,48 @@ fn generate_stmt(ir: *This, ctx: *const StmtContext, stmt: *Ast.Stmt) void {
         },
         .Switch => |_switch| {
             var cond_tmp = generate_expr(ir, _switch.cond);
-
-            var first_case_label = ir.grab_buncha_labels(@intCast(_switch.cases.count));
             var end_label = ir.grab_label();
 
-            {
-                var label = first_case_label;
-                var it = _switch.cases.iterator();
-                while (it.next()) |case| {
-                    var case_tmp = generate_short_lived_rvalue(ir, case.value);
+            var it = _switch.cases.iterator();
+            while (it.next()) |top_level_case| {
+                var case_beg_label = ir.grab_label();
+                var case_end_label = ir.grab_label();
+
+                var substmt = top_level_case;
+                while (true) {
+                    var case = &substmt.payload.Case;
+                    var case_tmp = generate_expr(ir, case.expr);
+
                     generate_instr(ir, .{ .Jmpc = .{
                         .tag = .Eq,
                         .src0 = cond_tmp.as_rvalue(),
-                        .src1 = case_tmp,
-                        .label = label,
+                        .src1 = case_tmp.as_rvalue(),
+                        .label = case_beg_label,
                     } });
-                    label += 1;
+
+                    substmt = case.stmt;
+                    if (substmt.payload != .Case) break;
                 }
-            }
-
-            generate_instr(ir, .{ .Instr = .{
-                .Jmp = end_label,
-            } });
-
-            {
-                var label = first_case_label;
-                var it = _switch.cases.iterator();
-                while (it.next()) |case| {
-                    generate_instr(ir, .{ .Meta = .{
-                        .Label = label,
-                    } });
-                    generate_block(ir, ctx, case.block);
-                    label += 1;
-
-                    if (!case.should_fallthrough) {
-                        generate_instr(ir, .{ .Instr = .{
-                            .Jmp = end_label,
-                        } });
-                    }
-                }
+                generate_instr(ir, .{ .Instr = .{
+                    .Jmp = case_end_label,
+                } });
+                generate_instr(ir, .{ .Meta = .{
+                    .Label = case_beg_label,
+                } });
+                generate_stmt(ir, ctx, substmt);
+                generate_instr(ir, .{ .Instr = .{
+                    .Jmp = end_label,
+                } });
+                generate_instr(ir, .{ .Meta = .{
+                    .Label = case_end_label,
+                } });
             }
 
             generate_instr(ir, .{ .Meta = .{
                 .Label = end_label,
             } });
         },
+        .Case => unreachable,
         .Return => {
             generate_instr(ir, .{ .Instr = .{
                 .Ret = ctx.function_end_label,
@@ -865,7 +825,6 @@ fn generate_rvalue(ir: *This, expr: *Ast.Expr, has_dst_tmp: ?*Lvalue) Rvalue {
                         break :result .{ .Imm = @intCast(field.value) };
                     },
                     .Struct_Field,
-                    .Union_Field,
                     .Type,
                     .Definition,
                     => unreachable,

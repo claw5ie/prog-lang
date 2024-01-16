@@ -129,7 +129,6 @@ fn typecheck_symbol(ast: *Ast, symbol: *Ast.Symbol) void {
             typecheck_type_flags(ast, _type, 0);
         },
         .Struct_Field,
-        .Union_Field,
         .Enum_Field,
         .Definition,
         => unreachable,
@@ -193,7 +192,7 @@ fn typecheck_type_aux(ast: *Ast, _type: *Ast.Type, flags: u8) Ast.TypecheckingSt
 
             var it = _union.fields.iterator();
             while (it.next()) |field_ptr| {
-                var field = &field_ptr.*.payload.Union_Field;
+                var field = &field_ptr.*.payload.Struct_Field;
                 var stage = typecheck_type_aux(ast, field._type, _flags);
                 result = min_enum(result, stage);
                 size = @max(size, field._type.size);
@@ -310,7 +309,7 @@ fn typecheck_type_aux(ast: *Ast, _type: *Ast.Type, flags: u8) Ast.TypecheckingSt
 }
 
 fn typecheck_block(ast: *Ast, ctx: *const TypecheckerStmtContext, block: Ast.StmtBlock) void {
-    var it = block.stmts.iterator();
+    var it = block.iterator();
     while (it.next()) |stmt| {
         typecheck_stmt(ast, ctx, stmt);
     }
@@ -331,8 +330,10 @@ fn typecheck_stmt(ast: *Ast, ctx: *const TypecheckerStmtContext, stmt: *Ast.Stmt
                 std.os.exit(1);
             }
 
-            typecheck_block(ast, ctx, _if.if_true);
-            typecheck_block(ast, ctx, _if.if_false);
+            // TODO: reject symbols definition in single statements.
+
+            typecheck_stmt(ast, ctx, _if.if_true);
+            if (_if.if_false) |if_false| typecheck_stmt(ast, ctx, if_false);
         },
         .While => |_while| {
             var cond_type = typecheck_expr(ast, &BOOL_TYPE_HINT, _while.cond);
@@ -343,7 +344,7 @@ fn typecheck_stmt(ast: *Ast, ctx: *const TypecheckerStmtContext, stmt: *Ast.Stmt
 
             var new_ctx = ctx.*;
             new_ctx.is_in_loop = true;
-            typecheck_block(ast, &new_ctx, _while.block);
+            typecheck_stmt(ast, &new_ctx, _while.block);
         },
         .Break => {
             if (!ctx.is_in_loop) {
@@ -367,17 +368,32 @@ fn typecheck_stmt(ast: *Ast, ctx: *const TypecheckerStmtContext, stmt: *Ast.Stmt
             }
 
             var it = _switch.cases.iterator();
-            while (it.next()) |case| {
-                var case_type = typecheck_expr(ast, cond_type, case.value);
-                if (!cond_type.eql(case_type)) {
-                    common.print_error(ast.filepath, case.value.line_info, "mismatched types: '{}' and '{}'.", .{ cond_type, case_type });
-                    common.print_note(ast.filepath, case.value.line_info, "switch case is here.", .{});
-                    common.print_note(ast.filepath, _switch.cond.line_info, "switch condition is here.", .{});
+            while (it.next()) |top_level_case| {
+                if (top_level_case.payload != .Case) {
+                    common.print_error(ast.filepath, top_level_case.line_info, "statement outside of 'case'.", .{});
                     std.os.exit(1);
                 }
 
-                typecheck_block(ast, ctx, case.block);
+                var substmt = top_level_case;
+                while (true) {
+                    var case = &substmt.payload.Case;
+                    var case_type = typecheck_expr(ast, cond_type, case.expr);
+                    if (!cond_type.eql(case_type)) {
+                        common.print_error(ast.filepath, case.expr.line_info, "mismatched types: '{}' and '{}'.", .{ cond_type, case_type });
+                        common.print_note(ast.filepath, case.expr.line_info, "switch case is here.", .{});
+                        common.print_note(ast.filepath, _switch.cond.line_info, "switch condition is here.", .{});
+                        std.os.exit(1);
+                    }
+
+                    substmt = case.stmt;
+                    if (substmt.payload != .Case) break;
+                }
+                typecheck_stmt(ast, ctx, substmt);
             }
+        },
+        .Case => |case| {
+            common.print_error(ast.filepath, case.expr.line_info, "case outside of switch statement.", .{});
+            std.os.exit(1);
         },
         .Return => {
             if (!ctx.return_type.is(.Void)) {
@@ -717,9 +733,6 @@ fn typecheck_expr_allow_void(ast: *Ast, type_hint: ?*Ast.Type, expr: *Ast.Expr) 
                     .Struct_Field => |struct_field| {
                         expr._type = struct_field._type.extract_ptr();
                     },
-                    .Union_Field => |struct_field| {
-                        expr._type = struct_field._type.extract_ptr();
-                    },
                     else => unreachable,
                 }
             } else {
@@ -789,7 +802,6 @@ fn typecheck_expr_allow_void(ast: *Ast, type_hint: ?*Ast.Type, expr: *Ast.Expr) 
                         if (found_symbol) |symbol| {
                             var subhint = switch (symbol.payload) {
                                 .Struct_Field => |field| field._type.extract_ptr(),
-                                .Union_Field => |field| field._type.extract_ptr(),
                                 else => unreachable,
                             };
                             var subexpr_type = typecheck_expr(ast, subhint, designator.expr);
@@ -900,7 +912,6 @@ fn typecheck_expr_allow_void(ast: *Ast, type_hint: ?*Ast.Type, expr: *Ast.Expr) 
                 },
                 .Type,
                 .Struct_Field,
-                .Union_Field,
                 .Enum_Field,
                 .Definition,
                 => unreachable,
