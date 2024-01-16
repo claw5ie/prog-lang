@@ -76,7 +76,7 @@ bar := proc(aa: struct { x: int }) -> void
   // f := cast(bool, 2);
 
   g := &a[0];      // &[3]int
-  h: *[3]int = &g;
+  h: **[3]int = &g;
   i := &a;         // &[2][3]int
 
   if false then {} else {}
@@ -102,13 +102,13 @@ main := proc() -> void
   val2: bool = false;
 
   switch val0
-  {
-    0, 1:
     {
-      2 + 2;
+      0, 1:
+      {
+        2 + 2;
+      }
+      2: {}
     }
-    2: {}
-  }
 
   val0 = 4;
   val3: proc() = main;

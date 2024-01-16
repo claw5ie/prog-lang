@@ -10,13 +10,16 @@ const Allocator = std.mem.Allocator;
 
 globals: SymbolList,
 locals: SymbolList,
-ast_arena: ArenaAllocator,
+main: *Symbol,
 symbols: SymbolTable,
+ast_arena: ArenaAllocator,
 
 global_scope: *Scope,
 next_label: Ir.Label,
 
 filepath: []const u8,
+
+const This = @This();
 
 pub const FunctionDepth = i32;
 
@@ -80,16 +83,16 @@ pub const TypecheckingStage = enum {
 };
 
 pub const Type = struct {
-    const FlagType = u16;
-    const Is_Integer: FlagType = 0x1;
-    const Is_Integral: FlagType = 0x2;
-    const Is_Comparable: FlagType = 0x4;
-    const Is_Ptr: FlagType = 0x8;
-    const Is_Void_Ptr: FlagType = 0x10;
-    const Can_Be_Dereferenced: FlagType = 0x20;
-    const Is_Pointer_To_Struct: FlagType = 0x40;
-    const Is_Pointer_To_Union: FlagType = 0x80;
-    const Is_Pointer_To_Array: FlagType = 0x100;
+    pub const FlagType = u16;
+    pub const Is_Integer: FlagType = 0x1;
+    pub const Is_Integral: FlagType = 0x2;
+    pub const Is_Comparable: FlagType = 0x4;
+    pub const Is_Ptr: FlagType = 0x8;
+    pub const Is_Void_Ptr: FlagType = 0x10;
+    pub const Can_Be_Dereferenced: FlagType = 0x20;
+    pub const Is_Pointer_To_Struct: FlagType = 0x40;
+    pub const Is_Pointer_To_Union: FlagType = 0x80;
+    pub const Is_Pointer_To_Array: FlagType = 0x100;
 
     payload: TypePayload,
     size: TypeSize,
@@ -518,6 +521,12 @@ pub const SymbolTableContext = struct {
 };
 
 pub const SymbolTable = std.HashMap(SymbolKey, *Symbol, SymbolTableContext, 80);
+
+pub fn ast_create(ast: *This, comptime T: type) *T {
+    return ast.ast_arena.allocator().create(T) catch {
+        std.os.exit(1);
+    };
+}
 
 pub fn extract_type(allocator: Allocator, expr: Expr) ?*Type {
     switch (expr.payload) {

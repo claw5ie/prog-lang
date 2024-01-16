@@ -85,8 +85,9 @@ pub fn parse(filepath: []const u8) Ast {
     return .{
         .globals = globals,
         .locals = .{},
-        .ast_arena = ast_arena,
+        .main = undefined,
         .symbols = p.symbols,
+        .ast_arena = ast_arena,
         .global_scope = global_scope,
         .next_label = p.next_label,
         .filepath = filepath,

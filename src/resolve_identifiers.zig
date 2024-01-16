@@ -2,12 +2,6 @@ const std = @import("std");
 const common = @import("common.zig");
 const Ast = @import("ast.zig");
 
-fn ast_create(ast: *Ast, comptime T: type) *T {
-    return ast.ast_arena.allocator().create(T) catch {
-        std.os.exit(1);
-    };
-}
-
 inline fn extract_type(ast: *Ast, expr: Ast.Expr) *Ast.Type {
     var ok = Ast.extract_type(ast.ast_arena.allocator(), expr);
     if (ok) |_type| {
@@ -61,7 +55,7 @@ fn is_expr_a_type(ast: *Ast, expr: *Ast.Expr) bool {
             var is_type = false;
             var symbol = find_symbol(ast, ident, &is_type);
             if (is_type) {
-                var _type = ast_create(ast, Ast.Type);
+                var _type = ast.ast_create(Ast.Type);
                 _type.* = .{
                     .payload = .{ .Symbol = symbol },
                     .size = undefined,
@@ -126,6 +120,18 @@ pub fn resolve(ast: *Ast) void {
     while (it.next()) |symbol| {
         resolve_identifiers_symbol(ast, symbol.*);
     }
+
+    var is_type = false;
+    var symbol = find_symbol(ast, .{
+        .token = .{
+            .tag = .Identifier,
+            .text = "main",
+            .line_info = .{},
+        },
+        .scope = ast.global_scope,
+    }, &is_type);
+
+    ast.main = symbol;
 }
 
 fn resolve_identifiers_symbol(ast: *Ast, symbol: *Ast.Symbol) void {
@@ -265,7 +271,7 @@ fn resolve_identifiers_stmt(ast: *Ast, stmt: *Ast.Stmt) void {
             resolve_identifiers_symbol(ast, symbol);
 
             if (symbol.payload == .Function) {
-                var node = ast_create(ast, Ast.SymbolList.Node);
+                var node = ast.ast_create(Ast.SymbolList.Node);
                 node.* = .{
                     .payload = symbol,
                 };
@@ -362,7 +368,7 @@ fn resolve_identifiers_expr(ast: *Ast, expr: *Ast.Expr) void {
             var symbol = find_symbol(ast, ident, &is_type);
 
             if (is_type) {
-                var _type = ast_create(ast, Ast.Type);
+                var _type = ast.ast_create(Ast.Type);
                 _type.* = .{
                     .payload = .{ .Symbol = symbol },
                     .size = undefined,
