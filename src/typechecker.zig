@@ -575,7 +575,7 @@ fn typecheck_expr_allow_void(ast: *Ast, type_hint: ?*Ast.Type, expr: *Ast.Expr) 
                         std.os.exit(1);
                     }
 
-                    expr._type = ast.ast_create(Ast.Type);
+                    expr._type = ast.create(Ast.Type);
                     expr._type.* = .{
                         .payload = .{ .Pointer = subexpr_type },
                         .size = 8,

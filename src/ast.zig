@@ -522,7 +522,7 @@ pub const SymbolTableContext = struct {
 
 pub const SymbolTable = std.HashMap(SymbolKey, *Symbol, SymbolTableContext, 80);
 
-pub fn ast_create(ast: *This, comptime T: type) *T {
+pub fn create(ast: *This, comptime T: type) *T {
     return ast.ast_arena.allocator().create(T) catch {
         std.os.exit(1);
     };
