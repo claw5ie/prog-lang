@@ -449,275 +449,350 @@ fn parse_prec(p: *This, min_prec: i32) Ast.Expr {
     return lhs;
 }
 
-fn parse_highest_prec(p: *This) Ast.Expr {
+fn parse_highest_prec_base(p: *This) Ast.Expr {
     var token = p.grab();
     p.advance();
 
-    var result = Ast.Expr{
-        .payload = undefined,
-        ._type = undefined,
-        .line_info = token.line_info,
-    };
-    result.payload = payload: {
-        switch (token.tag) {
-            .Sub,
-            .Ref,
-            .Not,
-            => {
-                var subexpr = create(p, Ast.Expr);
-                subexpr.* = parse_highest_prec(p);
+    switch (token.tag) {
+        .Sub,
+        .Ref,
+        .Not,
+        => {
+            var subexpr = create(p, Ast.Expr);
+            subexpr.* = parse_highest_prec_base(p);
 
-                break :payload .{ .Unary_Op = .{
+            return .{
+                .payload = .{ .Unary_Op = .{
                     .tag = token_tag_to_expr_unary_op_tag(token.tag),
                     .subexpr = subexpr,
-                } };
-            },
-            .And => {
-                common.print_error(p.lexer.filepath, token.line_info, "can't take a reference of rvalue.", .{});
-                std.os.exit(1);
-            },
-            .Open_Paren => {
-                var expr = parse_expr(p);
-                p.expect(.Close_Paren);
+                } },
+                ._type = undefined,
+                .line_info = token.line_info,
+            };
+        },
+        .And => {
+            common.print_error(p.lexer.filepath, token.line_info, "can't take a reference of rvalue.", .{});
+            std.os.exit(1);
+        },
+        .Open_Paren => {
+            var expr = parse_expr(p);
+            p.expect(.Close_Paren);
 
-                break :payload expr.payload;
-            },
-            .Dot => {
-                switch (p.peek()) {
-                    .Open_Curly => break :payload .{ .Expr_List = parse_expr_list(p) },
-                    .Identifier => {
-                        var id = p.grab();
-                        p.advance();
-
-                        break :payload .{ .Enum_Field = id };
-                    },
-                    else => {
-                        var _token = p.grab();
-                        common.print_error(p.lexer.filepath, _token.line_info, "unexpected '{s}' after '.' operator.", .{_token.text});
-                        common.print_note(p.lexer.filepath, _token.line_info, "expected designator list or identifier.", .{});
-                        std.os.exit(1);
-                    },
-                }
-            },
-            .If => {
-                var cond = create(p, Ast.Expr);
-                var if_true = create(p, Ast.Expr);
-                var if_false = create(p, Ast.Expr);
-
-                cond.* = parse_expr(p);
-                if (p.peek() == .Then) {
+            return .{
+                .payload = expr.payload,
+                ._type = undefined,
+                .line_info = token.line_info,
+            };
+        },
+        .Dot => {
+            switch (p.peek()) {
+                .Open_Curly => return .{
+                    .payload = .{ .Expr_List = parse_expr_list(p) },
+                    ._type = undefined,
+                    .line_info = token.line_info,
+                },
+                .Identifier => {
+                    var id = p.grab();
                     p.advance();
-                }
-                if_true.* = parse_expr(p);
-                p.expect(.Else);
-                if_false.* = parse_expr(p);
 
-                break :payload .{ .If = .{
+                    return .{
+                        .payload = .{ .Enum_Field = id },
+                        ._type = undefined,
+                        .line_info = token.line_info,
+                    };
+                },
+                else => {
+                    var _token = p.grab();
+                    common.print_error(p.lexer.filepath, _token.line_info, "unexpected '{s}' after '.' operator.", .{_token.text});
+                    common.print_note(p.lexer.filepath, _token.line_info, "expected designator list or identifier.", .{});
+                    std.os.exit(1);
+                },
+            }
+        },
+        .If => {
+            var cond = create(p, Ast.Expr);
+            var if_true = create(p, Ast.Expr);
+            var if_false = create(p, Ast.Expr);
+
+            cond.* = parse_expr(p);
+            if (p.peek() == .Then) {
+                p.advance();
+            }
+            if_true.* = parse_expr(p);
+            p.expect(.Else);
+            if_false.* = parse_expr(p);
+
+            return .{
+                .payload = .{ .If = .{
                     .cond = cond,
                     .if_true = if_true,
                     .if_false = if_false,
-                } };
-            },
-            .False,
-            .True,
-            => {
-                break :payload .{ .Bool = token.tag == .True };
-            },
-            .Null => {
-                break :payload .Null;
-            },
-            .Identifier => {
-                break :payload .{ .Identifier = .{
+                } },
+                ._type = undefined,
+                .line_info = token.line_info,
+            };
+        },
+        .False,
+        .True,
+        => {
+            return .{
+                .payload = .{ .Bool = token.tag == .True },
+                ._type = undefined,
+                .line_info = token.line_info,
+            };
+        },
+        .Null => {
+            return .{
+                .payload = .Null,
+                ._type = undefined,
+                .line_info = token.line_info,
+            };
+        },
+        .Identifier => {
+            return .{
+                .payload = .{ .Identifier = .{
                     .token = token,
                     .scope = p.current_scope,
+                } },
+                ._type = undefined,
+                .line_info = token.line_info,
+            };
+        },
+        .Integer => {
+            var value: i64 = 0;
+            for (token.text) |ch| {
+                value = 10 * value + (ch - '0');
+            }
+
+            return .{
+                .payload = .{ .Int64 = value },
+                ._type = undefined,
+                .line_info = token.line_info,
+            };
+        },
+        .Mul => {
+            var subtype = parse_type(p);
+            var _type = create(p, Ast.Type);
+            _type.* = .{
+                .payload = .{ .Pointer = subtype },
+                .size = undefined,
+                .line_info = token.line_info,
+            };
+
+            return .{
+                .payload = .{ .Type = _type },
+                ._type = undefined,
+                .line_info = token.line_info,
+            };
+        },
+        .Open_Bracket => {
+            var expr = create(p, Ast.Expr);
+            expr.* = parse_expr(p);
+            p.expect(.Close_Bracket);
+
+            var subtype = parse_type(p);
+            var _type = create(p, Ast.Type);
+            _type.* = .{
+                .payload = .{ .Array = .{
+                    .expr = expr,
+                    .count = undefined,
+                    .subtype = subtype,
+                } },
+                .size = undefined,
+                .line_info = token.line_info,
+            };
+
+            return .{
+                .payload = .{ .Type = _type },
+                ._type = undefined,
+                .line_info = token.line_info,
+            };
+        },
+        .Struct => {
+            var _struct = parse_struct_fields(p);
+            var _type = create(p, Ast.Type);
+            _type.* = .{
+                .payload = .{ .Struct = _struct },
+                .size = undefined,
+                .line_info = token.line_info,
+            };
+
+            return .{
+                .payload = .{ .Type = _type },
+                ._type = undefined,
+                .line_info = token.line_info,
+            };
+        },
+        .Union => {
+            var _union = parse_struct_fields(p);
+            var _type = create(p, Ast.Type);
+            _type.* = .{
+                .payload = .{ .Union = _union },
+                .size = undefined,
+                .line_info = token.line_info,
+            };
+
+            return .{
+                .payload = .{ .Type = _type },
+                ._type = undefined,
+                .line_info = token.line_info,
+            };
+        },
+        .Enum => {
+            p.expect(.Open_Curly);
+
+            push_scope(p);
+
+            var _enum = Ast.TypeStruct{
+                .fields = .{},
+                .scope = p.current_scope,
+            };
+
+            var tt = p.peek();
+            while (tt != .End_Of_File and tt != .Close_Curly) {
+                var id = p.grab();
+                p.expect(.Identifier);
+
+                var symbol = insert_symbol(p, id);
+                symbol.payload = .{ .Enum_Field = .{
+                    ._type = undefined,
+                    .value = undefined,
                 } };
-            },
-            .Integer => {
-                var value: i64 = 0;
-                for (token.text) |ch| {
-                    value = 10 * value + (ch - '0');
-                }
 
-                break :payload .{ .Int64 = value };
-            },
-            .Mul => {
-                var subtype = parse_type(p);
-                var _type = create(p, Ast.Type);
-                _type.* = .{
-                    .payload = .{ .Pointer = subtype },
-                    .size = undefined,
-                    .line_info = token.line_info,
+                var node = create(p, Ast.SymbolList.Node);
+                node.* = .{
+                    .payload = symbol,
                 };
+                _enum.fields.insert_last(node);
 
-                break :payload .{ .Type = _type };
-            },
-            .Open_Bracket => {
-                var expr = create(p, Ast.Expr);
-                expr.* = parse_expr(p);
-                p.expect(.Close_Bracket);
-
-                var subtype = parse_type(p);
-                var _type = create(p, Ast.Type);
-                _type.* = .{
-                    .payload = .{ .Array = .{
-                        .expr = expr,
-                        .count = undefined,
-                        .subtype = subtype,
-                    } },
-                    .size = undefined,
-                    .line_info = token.line_info,
-                };
-
-                break :payload .{ .Type = _type };
-            },
-            .Struct => {
-                var _struct = parse_struct_fields(p);
-                var _type = create(p, Ast.Type);
-                _type.* = .{
-                    .payload = .{ .Struct = _struct },
-                    .size = undefined,
-                    .line_info = token.line_info,
-                };
-
-                break :payload .{ .Type = _type };
-            },
-            .Union => {
-                var _union = parse_struct_fields(p);
-                var _type = create(p, Ast.Type);
-                _type.* = .{
-                    .payload = .{ .Union = _union },
-                    .size = undefined,
-                    .line_info = token.line_info,
-                };
-
-                break :payload .{ .Type = _type };
-            },
-            .Enum => {
-                p.expect(.Open_Curly);
-
-                push_scope(p);
-
-                var _enum = Ast.TypeStruct{
-                    .fields = .{},
-                    .scope = p.current_scope,
-                };
-
-                var tt = p.peek();
-                while (tt != .End_Of_File and tt != .Close_Curly) {
-                    var id = p.grab();
-                    p.expect(.Identifier);
-
-                    var symbol = insert_symbol(p, id);
-                    symbol.payload = .{ .Enum_Field = .{
-                        ._type = undefined,
-                        .value = undefined,
-                    } };
-
-                    var node = create(p, Ast.SymbolList.Node);
-                    node.* = .{
-                        .payload = symbol,
-                    };
-                    _enum.fields.insert_last(node);
-
+                tt = p.peek();
+                if (tt != .End_Of_File and tt != .Close_Curly) {
+                    p.expect(.Comma);
                     tt = p.peek();
-                    if (tt != .End_Of_File and tt != .Close_Curly) {
-                        p.expect(.Comma);
-                        tt = p.peek();
-                    }
                 }
+            }
 
-                pop_scope(p);
+            pop_scope(p);
 
-                p.expect(.Close_Curly);
+            p.expect(.Close_Curly);
 
-                var _type = create(p, Ast.Type);
-                _type.* = .{
-                    .payload = .{ .Enum = _enum },
-                    .size = undefined,
+            var _type = create(p, Ast.Type);
+            _type.* = .{
+                .payload = .{ .Enum = _enum },
+                .size = undefined,
+                .line_info = token.line_info,
+            };
+
+            return .{
+                .payload = .{ .Type = _type },
+                ._type = undefined,
+                .line_info = token.line_info,
+            };
+        },
+        .Proc => {
+            var _type = create(p, Ast.Type);
+            _type.* = .{
+                .payload = parse_type_function(p),
+                .size = undefined,
+                .line_info = token.line_info,
+            };
+
+            return .{
+                .payload = .{ .Type = _type },
+                ._type = undefined,
+                .line_info = token.line_info,
+            };
+        },
+        .Void => {
+            var _type = create(p, Ast.Type);
+            _type.* = .{
+                .payload = .Void,
+                .size = undefined,
+                .line_info = token.line_info,
+            };
+            return .{
+                .payload = .{ .Type = _type },
+                ._type = undefined,
+                .line_info = token.line_info,
+            };
+        },
+        .Bool => {
+            var _type = create(p, Ast.Type);
+            _type.* = .{
+                .payload = .Bool,
+                .size = undefined,
+                .line_info = token.line_info,
+            };
+            return .{
+                .payload = .{ .Type = _type },
+                ._type = undefined,
+                .line_info = token.line_info,
+            };
+        },
+        .Int => {
+            var _type = create(p, Ast.Type);
+            _type.* = .{
+                .payload = .Int64,
+                .size = undefined,
+                .line_info = token.line_info,
+            };
+            return .{
+                .payload = .{ .Type = _type },
+                ._type = undefined,
+                .line_info = token.line_info,
+            };
+        },
+        .Cast => {
+            p.expect(.Open_Paren);
+
+            var lhs = parse_expr(p);
+
+            if (p.peek() == .Comma) {
+                p.advance();
+            }
+
+            if (p.peek() == .Close_Paren) {
+                p.advance();
+
+                var expr = create(p, Ast.Expr);
+                expr.* = lhs;
+                return .{
+                    .payload = .{ .Cast1 = expr },
+                    ._type = undefined,
                     .line_info = token.line_info,
                 };
-
-                break :payload .{ .Type = _type };
-            },
-            .Proc => {
-                var _type = create(p, Ast.Type);
-                _type.* = .{
-                    .payload = parse_type_function(p),
-                    .size = undefined,
-                    .line_info = token.line_info,
-                };
-
-                break :payload .{ .Type = _type };
-            },
-            .Void => {
-                var _type = create(p, Ast.Type);
-                _type.* = .{
-                    .payload = .Void,
-                    .size = undefined,
-                    .line_info = token.line_info,
-                };
-                break :payload .{ .Type = _type };
-            },
-            .Bool => {
-                var _type = create(p, Ast.Type);
-                _type.* = .{
-                    .payload = .Bool,
-                    .size = undefined,
-                    .line_info = token.line_info,
-                };
-                break :payload .{ .Type = _type };
-            },
-            .Int => {
-                var _type = create(p, Ast.Type);
-                _type.* = .{
-                    .payload = .Int64,
-                    .size = undefined,
-                    .line_info = token.line_info,
-                };
-                break :payload .{ .Type = _type };
-            },
-            .Cast => {
-                p.expect(.Open_Paren);
-
-                var lhs = parse_expr(p);
+            } else {
+                var _type = extract_type(p, lhs);
+                var rhs = create(p, Ast.Expr);
+                rhs.* = parse_expr(p);
 
                 if (p.peek() == .Comma) {
                     p.advance();
                 }
 
-                if (p.peek() == .Close_Paren) {
-                    p.advance();
+                p.expect(.Close_Paren);
 
-                    var expr = create(p, Ast.Expr);
-                    expr.* = lhs;
-                    break :payload .{ .Cast1 = expr };
-                } else {
-                    var _type = extract_type(p, lhs);
-                    var rhs = create(p, Ast.Expr);
-                    rhs.* = parse_expr(p);
-
-                    if (p.peek() == .Comma) {
-                        p.advance();
-                    }
-
-                    p.expect(.Close_Paren);
-
-                    break :payload .{ .Cast2 = .{
+                return .{
+                    .payload = .{ .Cast2 = .{
                         ._type = _type,
                         .expr = rhs,
-                    } };
-                }
-            },
-            else => {
-                common.print_error(p.lexer.filepath, token.line_info, "'{s}' doesn't start expression.", .{token.text});
-                std.os.exit(1);
-            },
-        }
-    };
+                    } },
+                    ._type = undefined,
+                    .line_info = token.line_info,
+                };
+            }
+        },
+        else => {
+            common.print_error(p.lexer.filepath, token.line_info, "'{s}' doesn't start expression.", .{token.text});
+            std.os.exit(1);
+        },
+    }
+}
 
-    parse_postfix_unary_ops(p, &result);
-
-    return result;
+fn parse_highest_prec(p: *This) Ast.Expr {
+    var lhs = parse_highest_prec_base(p);
+    parse_postfix_unary_ops(p, &lhs);
+    return lhs;
 }
 
 fn parse_postfix_unary_ops(p: *This, inner: *Ast.Expr) void {
