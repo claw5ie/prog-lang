@@ -47,7 +47,6 @@ pub const TypeTag = enum {
     Void,
     Bool,
     Int64,
-    Symbol,
     Identifier,
 };
 
@@ -69,7 +68,6 @@ pub const TypePayload = union(TypeTag) {
     Void: void,
     Bool: void,
     Int64: void,
-    Symbol: *Symbol,
     Identifier: Identifier,
 };
 
@@ -77,30 +75,38 @@ pub const TypeSize = u31;
 
 pub const TypecheckingStage = enum {
     Not_Typechecked,
-    Being_Typechecked,
+    Being_Shallow_Typechecked,
     Shallow_Typechecked,
+    Being_Fully_Typechecked,
     Fully_Typechecked,
 };
 
 pub const Type = struct {
-    pub const FlagType = u16;
-    pub const Is_Integer: FlagType = 0x1;
-    pub const Is_Integral: FlagType = 0x2;
-    pub const Is_Comparable: FlagType = 0x4;
-    pub const Is_Ptr: FlagType = 0x8;
-    pub const Is_Void_Ptr: FlagType = 0x10;
-    pub const Can_Be_Dereferenced: FlagType = 0x20;
-    pub const Is_Pointer_To_Struct: FlagType = 0x40;
-    pub const Is_Pointer_To_Union: FlagType = 0x80;
-    pub const Is_Pointer_To_Array: FlagType = 0x100;
+    pub const Flags = packed struct {
+        is_integer: bool = false,
+        is_integral: bool = false,
+        is_comparable: bool = false,
+        is_ptr: bool = false,
+        is_void_ptr: bool = false,
+        can_be_dereferenced: bool = false,
+        is_pointer_to_struct: bool = false,
+        is_pointer_to_union: bool = false,
+        is_pointer_to_array: bool = false,
+    };
 
     payload: TypePayload,
+    symbol: ?*Symbol = null,
     size: TypeSize,
     is_resolved: bool = false,
     typechecking_stage: TypecheckingStage = .Not_Typechecked,
     line_info: LineInfo,
 
     pub fn format(self: Type, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+        if (self.symbol) |symbol| {
+            try writer.writeAll(symbol.key.text);
+            return;
+        }
+
         switch (self.payload) {
             .Struct => try writer.writeAll("<struct>"),
             .Union => try writer.writeAll("<union>"),
@@ -128,56 +134,46 @@ pub const Type = struct {
             .Void => try writer.writeAll("void"),
             .Bool => try writer.writeAll("bool"),
             .Int64 => try writer.writeAll("int64"),
-            .Symbol => |symbol| try writer.writeAll(symbol.key.text),
             .Identifier => unreachable,
         }
     }
 
-    pub fn compare(self: *Type) FlagType {
-        var flags: FlagType = 0;
+    pub fn compare(self: *Type) Flags {
+        var flags: Flags = .{};
 
         switch (self.payload) {
-            .Enum => flags |= Is_Integer | Is_Integral | Is_Comparable,
-            .Function => flags |= Is_Ptr,
-            .Pointer => {
-                flags |= Is_Ptr | Can_Be_Dereferenced;
+            .Enum => {
+                flags.is_integer = true;
+                flags.is_integral = true;
+                flags.is_comparable = true;
+            },
+            .Function => flags.is_ptr = true,
+            .Pointer => |subtype| {
+                flags.is_ptr = true;
+                flags.can_be_dereferenced = true;
 
-                var subtype = self.payload.Pointer.extract_ptr();
                 switch (subtype.payload) {
-                    .Struct => flags |= Is_Pointer_To_Struct,
-                    .Union => flags |= Is_Pointer_To_Union,
-                    .Array => flags |= Is_Pointer_To_Array,
+                    .Struct => flags.is_pointer_to_struct = true,
+                    .Union => flags.is_pointer_to_union = true,
+                    .Array => flags.is_pointer_to_array = true,
                     .Void => {
-                        flags |= Is_Void_Ptr;
-                        flags &= ~Can_Be_Dereferenced;
+                        flags.is_void_ptr = true;
+                        flags.can_be_dereferenced = false;
                     },
                     else => {},
                 }
             },
-            .Bool => flags |= Is_Comparable,
-            .Int64 => flags |= Is_Integer | Is_Integral | Is_Comparable,
-            .Struct,
-            .Union,
-            .Array,
-            .Void,
-            => {},
-            .Symbol,
-            .Identifier,
-            => unreachable,
+            .Bool => flags.is_comparable = true,
+            .Int64 => {
+                flags.is_integer = true;
+                flags.is_integral = true;
+                flags.is_comparable = true;
+            },
+            .Struct, .Union, .Array, .Void => {},
+            .Identifier => unreachable,
         }
 
         return flags;
-    }
-
-    pub fn extract_ptr(self: *Type) *Type {
-        return if (self.payload != .Symbol)
-            self
-        else
-            self.payload.Symbol.payload.Type;
-    }
-
-    pub inline fn is(self: *Type, tag: TypeTag) bool {
-        return self.payload == tag;
     }
 
     pub fn eql(self: *Type, other: *Type) bool {
@@ -213,15 +209,15 @@ pub const Type = struct {
                 var oit = ofunc.params.iterator();
                 while (sit.next()) |sparam| {
                     var oparam = oit.next().?;
-                    var otype = oparam.*.payload.Parameter._type.extract_ptr();
-                    var stype = sparam.*.payload.Parameter._type.extract_ptr();
+                    var otype = oparam.*.payload.Parameter._type;
+                    var stype = sparam.*.payload.Parameter._type;
                     if (!stype.eql(otype)) {
                         return false;
                     }
                 }
 
-                var sreturn_type = sfunc.return_type.extract_ptr();
-                var oreturn_type = ofunc.return_type.extract_ptr();
+                var sreturn_type = sfunc.return_type;
+                var oreturn_type = ofunc.return_type;
 
                 return sreturn_type.eql(oreturn_type);
             },
@@ -233,16 +229,16 @@ pub const Type = struct {
                     return false;
                 }
 
-                var ssubtype = sarray.subtype.extract_ptr();
-                var osubtype = oarray.subtype.extract_ptr();
+                var ssubtype = sarray.subtype;
+                var osubtype = oarray.subtype;
 
                 return ssubtype.eql(osubtype);
             },
             .Pointer => {
-                var stype = self.payload.Pointer.extract_ptr();
-                var otype = other.payload.Pointer.extract_ptr();
+                var stype = self.payload.Pointer;
+                var otype = other.payload.Pointer;
 
-                if (stype.is(.Void) or otype.is(.Void)) {
+                if (stype.payload == .Void or otype.payload == .Void) {
                     return true;
                 }
 
@@ -252,9 +248,7 @@ pub const Type = struct {
             .Bool,
             .Int64,
             => return true,
-            .Symbol,
-            .Identifier,
-            => unreachable,
+            .Identifier => unreachable,
         }
     }
 };

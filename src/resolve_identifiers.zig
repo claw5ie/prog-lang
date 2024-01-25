@@ -55,13 +55,7 @@ fn is_expr_a_type(ast: *Ast, expr: *Ast.Expr) bool {
             var is_type = false;
             var symbol = find_symbol(ast, ident, &is_type);
             if (is_type) {
-                var _type = ast.create(Ast.Type);
-                _type.* = .{
-                    .payload = .{ .Symbol = symbol },
-                    .size = undefined,
-                    .line_info = ident.token.line_info,
-                };
-                expr.payload = .{ .Type = _type };
+                expr.payload = .{ .Type = symbol.payload.Type };
             } else {
                 expr.payload = .{ .Symbol = symbol };
             }
@@ -86,14 +80,9 @@ fn is_symbol_a_type(ast: *Ast, symbol: *Ast.Symbol) bool {
 
             if (is_expr_a_type(ast, definition.expr)) {
                 var subtype = definition.expr.payload.Type;
-                if (subtype.payload == .Symbol) {
-                    symbol.payload = .{ .Type = subtype.payload.Symbol.payload.Type };
-                } else {
-                    var _type = extract_type(ast, definition.expr.*);
-
-                    symbol.payload = .{ .Type = _type };
-                }
-
+                if (subtype.symbol == null)
+                    subtype.symbol = symbol;
+                symbol.payload = .{ .Type = subtype };
                 return true;
             } else {
                 var expr = definition.expr;
@@ -138,7 +127,7 @@ fn resolve_symbol(ast: *Ast, symbol: *Ast.Symbol) void {
     _ = is_symbol_a_type(ast, symbol);
     switch (symbol.payload) {
         .Variable => |*variable| {
-            if (variable._type) |_type| {
+            if (variable._type) |*_type| {
                 resolve_type(ast, _type);
             }
 
@@ -146,28 +135,27 @@ fn resolve_symbol(ast: *Ast, symbol: *Ast.Symbol) void {
                 resolve_expr(ast, expr);
             }
         },
-        .Parameter => |parameter| {
-            resolve_type(ast, parameter._type);
+        .Parameter => |*parameter| {
+            resolve_type(ast, &parameter._type);
         },
-        .Function => |function| {
-            resolve_type(ast, function._type);
+        .Function => |*function| {
+            resolve_type(ast, &function._type);
 
             var it = function.block.iterator();
             while (it.next()) |stmt| {
                 resolve_stmt(ast, stmt);
             }
         },
-        .Type => |_type| {
+        .Type => |*_type| {
             resolve_type(ast, _type);
         },
-        .Struct_Field,
-        .Enum_Field,
-        .Definition,
-        => unreachable,
+        .Struct_Field, .Enum_Field, .Definition => unreachable,
     }
 }
 
-fn resolve_type(ast: *Ast, _type: *Ast.Type) void {
+fn resolve_type(ast: *Ast, type_ptr: **Ast.Type) void {
+    var _type = type_ptr.*;
+
     if (_type.is_resolved) {
         return;
     }
@@ -178,13 +166,13 @@ fn resolve_type(ast: *Ast, _type: *Ast.Type) void {
         .Struct => |_struct| {
             var it = _struct.fields.iterator();
             while (it.next()) |field| {
-                resolve_type(ast, field.*.payload.Struct_Field._type);
+                resolve_type(ast, &field.*.payload.Struct_Field._type);
             }
         },
         .Union => |_union| {
             var it = _union.fields.iterator();
             while (it.next()) |field| {
-                resolve_type(ast, field.*.payload.Struct_Field._type);
+                resolve_type(ast, &field.*.payload.Struct_Field._type);
             }
         },
         .Enum => |_enum| {
@@ -193,32 +181,28 @@ fn resolve_type(ast: *Ast, _type: *Ast.Type) void {
                 field.*.payload.Enum_Field._type = _type;
             }
         },
-        .Function => |function| {
+        .Function => |*function| {
             var it = function.params.iterator();
             while (it.next()) |param| {
-                resolve_type(ast, param.*.payload.Parameter._type);
+                resolve_type(ast, &param.*.payload.Parameter._type);
             }
 
-            resolve_type(ast, function.return_type);
+            resolve_type(ast, &function.return_type);
         },
-        .Array => |array| {
+        .Array => |*array| {
             resolve_expr(ast, array.expr);
-            resolve_type(ast, array.subtype);
+            resolve_type(ast, &array.subtype);
         },
-        .Pointer => |subtype| {
+        .Pointer => |*subtype| {
             resolve_type(ast, subtype);
         },
-        .Void,
-        .Bool,
-        .Int64,
-        .Symbol,
-        => {},
+        .Void, .Bool, .Int64 => {},
         .Identifier => |ident| {
             var is_type = false;
             var symbol = find_symbol(ast, ident, &is_type);
 
             if (is_type) {
-                _type.payload = .{ .Symbol = symbol };
+                type_ptr.* = symbol.payload.Type;
             } else {
                 common.print_error(ast.filepath, ident.token.line_info, "'{s}' is not a type.", .{ident.token.text});
                 std.os.exit(1);
@@ -323,8 +307,8 @@ fn resolve_expr(ast: *Ast, expr: *Ast.Expr) void {
                 } };
             }
         },
-        .Initializer => |init| {
-            resolve_type(ast, init._type);
+        .Initializer => |*init| {
+            resolve_type(ast, &init._type);
 
             var it = init.expr_list.iterator();
             while (it.next()) |subexpr| {
@@ -350,14 +334,14 @@ fn resolve_expr(ast: *Ast, expr: *Ast.Expr) void {
 
             resolve_expr(ast, subexpr);
         },
-        .Cast2 => |cast| {
-            resolve_type(ast, cast._type);
+        .Cast2 => |*cast| {
+            resolve_type(ast, &cast._type);
             resolve_expr(ast, cast.expr);
         },
         .Bool => {},
         .Int64 => {},
         .Null => {},
-        .Type => |_type| {
+        .Type => |*_type| {
             resolve_type(ast, _type);
         },
         .Symbol => {},
@@ -366,13 +350,8 @@ fn resolve_expr(ast: *Ast, expr: *Ast.Expr) void {
             var symbol = find_symbol(ast, ident, &is_type);
 
             if (is_type) {
-                var _type = ast.create(Ast.Type);
-                _type.* = .{
-                    .payload = .{ .Symbol = symbol },
-                    .size = undefined,
-                    .line_info = ident.token.line_info,
-                };
-                expr.payload = .{ .Type = _type };
+                std.debug.assert(symbol.payload.Type.symbol != null);
+                expr.payload = .{ .Type = symbol.payload.Type };
             } else {
                 expr.payload = .{ .Symbol = symbol };
             }
