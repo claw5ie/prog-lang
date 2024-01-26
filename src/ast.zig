@@ -84,7 +84,6 @@ pub const TypecheckingStage = enum {
 pub const Type = struct {
     pub const Flags = packed struct {
         is_integer: bool = false,
-        is_integral: bool = false,
         is_comparable: bool = false,
         is_ptr: bool = false,
         is_void_ptr: bool = false,
@@ -144,7 +143,6 @@ pub const Type = struct {
         switch (self.payload) {
             .Enum => {
                 flags.is_integer = true;
-                flags.is_integral = true;
                 flags.is_comparable = true;
             },
             .Function => flags.is_ptr = true,
@@ -166,7 +164,6 @@ pub const Type = struct {
             .Bool => flags.is_comparable = true,
             .Int64 => {
                 flags.is_integer = true;
-                flags.is_integral = true;
                 flags.is_comparable = true;
             },
             .Struct, .Union, .Array, .Void => {},

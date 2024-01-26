@@ -2,7 +2,7 @@ const std = @import("std");
 const common = @import("common.zig");
 const Ast = @import("ast.zig");
 
-inline fn extract_type(ast: *Ast, expr: Ast.Expr) *Ast.Type {
+fn extract_type(ast: *Ast, expr: Ast.Expr) *Ast.Type {
     var ok = Ast.extract_type(ast.ast_arena.allocator(), expr);
     if (ok) |_type| {
         return _type;

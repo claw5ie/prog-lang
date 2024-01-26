@@ -131,7 +131,7 @@ inline fn typecheck_type(ast: *Ast, _type: *Ast.Type) void {
     typecheck_type_fully(ast, _type, .{ .reject_void_type = true });
 }
 
-inline fn typecheck_type_fully(ast: *Ast, _type: *Ast.Type, flags: TypecheckTypeFlags) void {
+fn typecheck_type_fully(ast: *Ast, _type: *Ast.Type, flags: TypecheckTypeFlags) void {
     typecheck_type_rec(ast, _type, .{ .do_shallow_typecheck = true, .reject_void_type = flags.reject_void_type });
     typecheck_type_rec(ast, _type, .{ .do_shallow_typecheck = false, .reject_void_type = flags.reject_void_type });
 }
@@ -448,7 +448,7 @@ fn typecheck_expr_rec_aux(ast: *Ast, type_hint: ?*Ast.Type, expr: *Ast.Expr) *As
                     var rhs_type = typecheck_expr_rec(ast, lhs_type, op.rhs);
                     var lhs_flags = lhs_type.compare();
 
-                    if (!lhs_flags.is_integral) {
+                    if (!lhs_flags.is_integer) {
                         common.print_error(ast.filepath, op.lhs.line_info, "expected integral type, but got '{}'.", .{lhs_type});
                         std.os.exit(1);
                     } else if (!lhs_type.eql(rhs_type)) {
@@ -805,15 +805,22 @@ fn typecheck_expr_rec_aux(ast: *Ast, type_hint: ?*Ast.Type, expr: *Ast.Expr) *As
             }
         },
         .Cast1 => |subexpr| {
-            var expr_type = typecheck_expr_rec(ast, type_hint, subexpr);
-            _ = expr_type;
-            unreachable;
+            if (type_hint) |hint| {
+                var payload = cast_expr(ast, hint, subexpr);
+                expr.payload = payload;
+                expr._type = hint;
+                return hint;
+            } else {
+                common.print_error(ast.filepath, expr.line_info, "can't infere the type to cast to.", .{});
+                std.os.exit(1);
+            }
         },
         .Cast2 => |cast| {
             typecheck_type(ast, cast._type);
-            var expr_type = typecheck_expr_rec(ast, cast._type, cast.expr);
-            _ = expr_type;
-            unreachable;
+            var payload = cast_expr(ast, cast._type, cast.expr);
+            expr.payload = payload;
+            expr._type = cast._type;
+            return cast._type;
         },
         .Bool => {
             return &BOOL_TYPE_HINT;
@@ -853,4 +860,34 @@ fn typecheck_expr_rec_aux(ast: *Ast, type_hint: ?*Ast.Type, expr: *Ast.Expr) *As
         },
         .Identifier => unreachable,
     }
+}
+
+fn cast_expr(ast: *Ast, _type: *Ast.Type, expr: *Ast.Expr) Ast.ExprPayload {
+    var expr_type = typecheck_expr_rec(ast, null, expr);
+
+    switch (_type.payload) {
+        .Array => {
+            switch (expr_type.payload) {
+                .Pointer, .Array => return expr.payload,
+                else => {},
+            }
+        },
+        .Pointer => {
+            switch (expr_type.payload) {
+                .Array, .Enum, .Function, .Pointer, .Bool, .Int64 => return expr.payload,
+                else => {},
+            }
+        },
+        .Enum, .Function, .Bool, .Int64 => {
+            switch (expr_type.payload) {
+                .Enum, .Function, .Pointer, .Bool, .Int64 => return expr.payload,
+                else => {},
+            }
+        },
+        .Struct, .Union, .Void => {},
+        .Identifier => unreachable,
+    }
+
+    common.print_error(ast.filepath, expr.line_info, "can't cast '{}' to '{}'.", .{ expr_type, _type });
+    std.os.exit(1);
 }

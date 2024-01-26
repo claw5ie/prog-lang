@@ -746,7 +746,7 @@ fn generate_rvalue(ir: *This, expr: *Ast.Expr, dst_tmp: Lvalue) void {
                 } });
             }
         },
-        .Index, .Field, .Initializer, .Expr_List, .Designator, .Cast1, .Cast2 => unreachable,
+        .Index, .Field, .Initializer, .Expr_List, .Designator => unreachable,
         .Bool => |value| {
             var src_tmp: Rvalue = .{ .Imm = @intFromBool(value) };
             generate_instr(ir, .{ .Instr = .{
@@ -814,7 +814,7 @@ fn generate_rvalue(ir: *This, expr: *Ast.Expr, dst_tmp: Lvalue) void {
                 .Struct_Field, .Type, .Definition => unreachable,
             }
         },
-        .Enum_Field_From_Type, .Enum_Field, .Type, .Identifier => unreachable,
+        .Enum_Field_From_Type, .Enum_Field, .Cast1, .Cast2, .Type, .Identifier => unreachable,
     }
 }
 
