@@ -848,11 +848,7 @@ fn typecheck_expr_rec_aux(ast: *Ast, type_hint: ?*Ast.Type, expr: *Ast.Expr) *As
                     typecheck_type(ast, function._type);
                     return function._type;
                 },
-                .Type,
-                .Struct_Field,
-                .Enum_Field,
-                .Definition,
-                => unreachable,
+                .Type, .Struct_Field, .Enum_Field, .Definition => unreachable,
             }
         },
         .Identifier => unreachable,

@@ -454,10 +454,7 @@ fn parse_highest_prec_base(p: *This) Ast.Expr {
     p.advance();
 
     switch (token.tag) {
-        .Sub,
-        .Ref,
-        .Not,
-        => {
+        .Sub, .Ref, .Not => {
             var subexpr = create(p, Ast.Expr);
             subexpr.* = parse_highest_prec_base(p);
 
@@ -532,9 +529,7 @@ fn parse_highest_prec_base(p: *This) Ast.Expr {
                 .line_info = token.line_info,
             };
         },
-        .False,
-        .True,
-        => {
+        .False, .True => {
             return .{
                 .payload = .{ .Bool = token.tag == .True },
                 ._type = undefined,
@@ -906,21 +901,10 @@ fn prec_of_op(op: Lexer.TokenTag) i32 {
     return switch (op) {
         .Or => 0,
         .And => 1,
-        .Eq,
-        .Neq,
-        => 2,
-        .Lt,
-        .Leq,
-        .Gt,
-        .Geq,
-        => 3,
-        .Add,
-        .Sub,
-        => 4,
-        .Mul,
-        .Div,
-        .Mod,
-        => 5,
+        .Eq, .Neq => 2,
+        .Lt, .Leq, .Gt, .Geq => 3,
+        .Add, .Sub => 4,
+        .Mul, .Div, .Mod => 5,
         else => LOWEST_PREC - 1,
     };
 }
