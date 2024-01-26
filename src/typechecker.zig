@@ -2,6 +2,16 @@ const std = @import("std");
 const common = @import("common.zig");
 const Ast = @import("ast.zig");
 
+const TypecheckerStmtContext = struct {
+    return_type: *Ast.Type,
+    is_in_loop: bool,
+};
+
+const TypecheckTypeFlags = packed struct {
+    do_shallow_typecheck: bool = false,
+    reject_void_type: bool = false,
+};
+
 var VOID_TYPE_HINT = Ast.Type{
     .payload = .Void,
     .size = 0,
@@ -25,11 +35,6 @@ var INT64_TYPE_HINT = Ast.Type{
     .size = 8,
     .typechecking_stage = .Fully_Typechecked,
     .line_info = .{},
-};
-
-const TypecheckerStmtContext = struct {
-    return_type: *Ast.Type,
-    is_in_loop: bool,
 };
 
 pub fn reduce_expr(ast: *Ast, expr: *Ast.Expr) void {
@@ -117,20 +122,21 @@ fn typecheck_symbol(ast: *Ast, symbol: *Ast.Symbol) void {
                 typecheck_stmt(ast, &ctx, stmt);
             }
         },
-        .Type => |_type| typecheck_type_flags(ast, _type, false),
+        .Type => |_type| typecheck_type_fully(ast, _type, .{ .reject_void_type = false }),
         .Struct_Field, .Enum_Field, .Definition => unreachable,
     }
 }
 
 inline fn typecheck_type(ast: *Ast, _type: *Ast.Type) void {
-    typecheck_type_flags(ast, _type, true);
+    typecheck_type_fully(ast, _type, .{ .reject_void_type = true });
 }
 
-inline fn typecheck_type_flags(ast: *Ast, _type: *Ast.Type, reject_void_type: bool) void {
-    typecheck_type_fully(ast, _type, reject_void_type);
+inline fn typecheck_type_fully(ast: *Ast, _type: *Ast.Type, flags: TypecheckTypeFlags) void {
+    typecheck_type_rec(ast, _type, .{ .do_shallow_typecheck = true, .reject_void_type = flags.reject_void_type });
+    typecheck_type_rec(ast, _type, .{ .do_shallow_typecheck = false, .reject_void_type = flags.reject_void_type });
 }
 
-fn typecheck_type_shallow(ast: *Ast, _type: *Ast.Type) void {
+fn typecheck_type_rec(ast: *Ast, _type: *Ast.Type, flags: TypecheckTypeFlags) void {
     switch (_type.typechecking_stage) {
         .Not_Typechecked => {
             _type.typechecking_stage = .Being_Shallow_Typechecked;
@@ -139,20 +145,27 @@ fn typecheck_type_shallow(ast: *Ast, _type: *Ast.Type) void {
             common.print_error(ast.filepath, _type.line_info, "cyclic reference detected.", .{});
             std.os.exit(1);
         },
-        .Shallow_Typechecked, .Fully_Typechecked => {
-            return;
+        .Shallow_Typechecked => {
+            if (flags.do_shallow_typecheck) {
+                return;
+            }
+
+            _type.typechecking_stage = .Being_Fully_Typechecked;
         },
-        .Being_Fully_Typechecked => unreachable,
+        .Being_Fully_Typechecked, .Fully_Typechecked => return,
     }
 
     switch (_type.payload) {
         .Struct => |_struct| {
             var size: Ast.TypeSize = 0;
 
+            var new_flags = flags;
+            new_flags.reject_void_type = true;
+
             var it = _struct.fields.iterator();
             while (it.next()) |field_ptr| {
                 var field = &field_ptr.*.payload.Struct_Field;
-                typecheck_type_shallow(ast, field._type);
+                typecheck_type_rec(ast, field._type, new_flags);
                 size += field._type.size;
             }
 
@@ -161,10 +174,13 @@ fn typecheck_type_shallow(ast: *Ast, _type: *Ast.Type) void {
         .Union => |_union| {
             var size: Ast.TypeSize = 0;
 
+            var new_flags = flags;
+            new_flags.reject_void_type = true;
+
             var it = _union.fields.iterator();
             while (it.next()) |field_ptr| {
                 var field = &field_ptr.*.payload.Struct_Field;
-                typecheck_type_shallow(ast, field._type);
+                typecheck_type_rec(ast, field._type, new_flags);
                 size = @max(size, field._type.size);
             }
 
@@ -182,7 +198,21 @@ fn typecheck_type_shallow(ast: *Ast, _type: *Ast.Type) void {
 
             _type.size = 8;
         },
-        .Function => _type.size = 8,
+        .Function => |function| {
+            _type.size = 8;
+            if (!flags.do_shallow_typecheck) {
+                var new_flags = flags;
+                new_flags.reject_void_type = true;
+
+                var it = function.params.iterator();
+                while (it.next()) |param| {
+                    typecheck_type_rec(ast, param.*.payload.Parameter._type, new_flags);
+                }
+
+                new_flags.reject_void_type = false;
+                typecheck_type_rec(ast, function.return_type, new_flags);
+            }
+        },
         .Array => |*array| {
             var size_type = typecheck_expr(ast, &INT64_TYPE_HINT, array.expr);
             var size_flags = size_type.compare();
@@ -193,7 +223,10 @@ fn typecheck_type_shallow(ast: *Ast, _type: *Ast.Type) void {
                 std.os.exit(1);
             }
 
-            typecheck_type_shallow(ast, array.subtype);
+            var new_flags = flags;
+            new_flags.reject_void_type = true;
+
+            typecheck_type_rec(ast, array.subtype, new_flags);
 
             var size = array.expr.payload.Int64;
             if (size <= 0) {
@@ -204,70 +237,30 @@ fn typecheck_type_shallow(ast: *Ast, _type: *Ast.Type) void {
             array.count = @intCast(size);
             _type.size = array.count * array.subtype.size;
         },
-        .Pointer => _type.size = 8,
-        .Void => _type.size = 0,
+        .Pointer => |subtype| {
+            _type.size = 8;
+            if (!flags.do_shallow_typecheck) {
+                var new_flags = flags;
+                new_flags.reject_void_type = false;
+                typecheck_type_rec(ast, subtype, new_flags);
+            }
+        },
+        .Void => {
+            _type.size = 0;
+            if (flags.reject_void_type) {
+                common.print_error(ast.filepath, _type.line_info, "unexpected 'void' type.", .{});
+                std.os.exit(1);
+            }
+        },
         .Bool => _type.size = 1,
         .Int64 => _type.size = 8,
         .Identifier => unreachable,
     }
 
-    _type.typechecking_stage = .Shallow_Typechecked;
-}
-
-fn typecheck_type_fully(ast: *Ast, _type: *Ast.Type, reject_void_type: bool) void {
-    switch (_type.typechecking_stage) {
-        .Not_Typechecked => {
-            typecheck_type_shallow(ast, _type);
-        },
-        .Being_Shallow_Typechecked => unreachable,
-        .Shallow_Typechecked => {
-            _type.typechecking_stage = .Being_Fully_Typechecked;
-        },
-        .Being_Fully_Typechecked, .Fully_Typechecked => {
-            return;
-        },
-    }
-
-    switch (_type.payload) {
-        .Struct => |_struct| {
-            var it = _struct.fields.iterator();
-            while (it.next()) |field_ptr| {
-                var field = &field_ptr.*.payload.Struct_Field;
-                typecheck_type_fully(ast, field._type, true);
-            }
-        },
-        .Union => |_union| {
-            var it = _union.fields.iterator();
-            while (it.next()) |field_ptr| {
-                var field = &field_ptr.*.payload.Struct_Field;
-                typecheck_type_fully(ast, field._type, true);
-            }
-        },
-        .Enum => {},
-        .Function => |function| {
-            var it = function.params.iterator();
-            while (it.next()) |param| {
-                typecheck_type_fully(ast, param.*.payload.Parameter._type, reject_void_type);
-            }
-            typecheck_type_fully(ast, function.return_type, false);
-        },
-        .Array => |*array| {
-            typecheck_type_fully(ast, array.subtype, true);
-        },
-        .Pointer => |subtype| {
-            typecheck_type_fully(ast, subtype, false);
-        },
-        .Void => {
-            if (reject_void_type) {
-                common.print_error(ast.filepath, _type.line_info, "unexpected 'void' type.", .{});
-                std.os.exit(1);
-            }
-        },
-        .Bool, .Int64 => {},
-        .Identifier => unreachable,
-    }
-
-    _type.typechecking_stage = .Fully_Typechecked;
+    _type.typechecking_stage = if (flags.do_shallow_typecheck)
+        .Shallow_Typechecked
+    else
+        .Fully_Typechecked;
 }
 
 fn typecheck_block(ast: *Ast, ctx: *const TypecheckerStmtContext, block: Ast.StmtBlock) void {
