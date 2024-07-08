@@ -15,6 +15,8 @@ const utils = @import("utils.zig");
 
 const is_space = std.ascii.isWhitespace;
 const is_digit = std.ascii.isDigit;
+const is_alpha = std.ascii.isAlphabetic;
+const is_alnum = std.ascii.isAlphanumeric;
 const Allocator = std.mem.Allocator;
 const Lexer = @This();
 
@@ -31,14 +33,53 @@ pub const Token = struct {
     as: Data,
 
     pub const Tag = enum {
+        Or,
+        And,
+        Eq,
+        Neq,
+        Lt,
+        Leq,
+        Gt,
+        Geq,
+        Add,
+        Sub,
+        Mul,
+        Div,
+        Mod,
+
+        Not,
+        Open_Paren,
+        Close_Paren,
         Semicolon,
+
+        Bool,
         Integer,
+        Identifier,
+
         End_Of_File,
     };
 
     pub const Data = union(Token.Tag) {
+        Or: void,
+        And: void,
+        Eq: void,
+        Neq: void,
+        Lt: void,
+        Leq: void,
+        Gt: void,
+        Geq: void,
+        Add: void,
+        Sub: void,
+        Mul: void,
+        Div: void,
+        Mod: void,
+        Not: void,
+        Open_Paren: void,
+        Close_Paren: void,
         Semicolon: void,
+        Bool: bool,
         Integer: u64,
+        Identifier: void,
         End_Of_File: void,
     };
 };
@@ -107,6 +148,40 @@ fn buffer_token(lexer: *Lexer) void {
         };
 
         token.as = .{ .Integer = value };
+    } else if (is_alpha(text[i]) or text[i] == '_') {
+        while (true) {
+            advance_line_info(lexer);
+            i += 1;
+
+            if (!is_alnum(text[i]) and text[i] != '_') {
+                break;
+            }
+        }
+
+        const Keyword = struct {
+            text: []const u8,
+            as: Token.Data,
+        };
+
+        const keywords = [_]Keyword{
+            .{ .text = "false", .as = .{ .Bool = false } },
+            .{ .text = "true", .as = .{ .Bool = true } },
+        };
+
+        const string = text[old_i..i];
+        var found = false;
+
+        for (keywords) |keyword| {
+            if (std.mem.eql(u8, keyword.text, string)) {
+                token.as = keyword.as;
+                found = true;
+                break;
+            }
+        }
+
+        if (!found) {
+            token.as = .Identifier;
+        }
     } else {
         const Symbol = struct {
             text: []const u8,
@@ -114,6 +189,22 @@ fn buffer_token(lexer: *Lexer) void {
         };
 
         const symbols = [_]Symbol{
+            .{ .text = "||", .as = .Or },
+            .{ .text = "&&", .as = .And },
+            .{ .text = "==", .as = .Eq },
+            .{ .text = "!=", .as = .Neq },
+            .{ .text = "<=", .as = .Leq },
+            .{ .text = ">=", .as = .Geq },
+            .{ .text = "<", .as = .Lt },
+            .{ .text = ">", .as = .Gt },
+            .{ .text = "+", .as = .Add },
+            .{ .text = "-", .as = .Sub },
+            .{ .text = "*", .as = .Mul },
+            .{ .text = "/", .as = .Div },
+            .{ .text = "%", .as = .Mod },
+            .{ .text = "!", .as = .Not },
+            .{ .text = "(", .as = .Open_Paren },
+            .{ .text = ")", .as = .Close_Paren },
             .{ .text = ";", .as = .Semicolon },
         };
 
@@ -195,8 +286,26 @@ pub fn expect(lexer: *Lexer, tag: Token.Tag) void {
 
 fn to_token_tag_name(tag: Token.Tag) []const u8 {
     return switch (tag) {
+        .Or => "'||'",
+        .And => "'&&'",
+        .Eq => "'=='",
+        .Neq => "'!='",
+        .Lt => "'<'",
+        .Leq => "'<='",
+        .Gt => "'>'",
+        .Geq => "'>='",
+        .Add => "'+'",
+        .Sub => "'-'",
+        .Mul => "'*'",
+        .Div => "'/'",
+        .Mod => "'%'",
+        .Not => "'!'",
+        .Open_Paren => "'('",
+        .Close_Paren => "')'",
         .Semicolon => "';'",
+        .Bool => "boolean literal",
         .Integer => "integer literal",
+        .Identifier => "identifier",
         .End_Of_File => "EOF",
     };
 }
