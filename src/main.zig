@@ -1,19 +1,19 @@
 const std = @import("std");
+const utils = @import("utils.zig");
 const Lexer = @import("lexer.zig");
+const Parser = @import("parser.zig");
 
 pub fn main() void {
-    var lexer = Lexer{ .source_code = "6;9;6;\n2;1;4//$" };
+    var arg_it = std.process.args();
 
-    while (true) {
-        const token = lexer.take();
-        std.debug.print("{}:{}:{}: '{}'\n", .{
-            token.line_info.line,
-            token.line_info.column,
-            token.line_info.offset,
-            token.as,
-        });
-        if (token.as == .End_Of_File) {
-            break;
-        }
+    _ = arg_it.next();
+
+    var filepath: [:0]const u8 = "./tests/debug";
+
+    if (arg_it.next()) |arg| {
+        filepath = arg;
     }
+
+    const ast = Parser.parse(filepath);
+    _ = ast;
 }

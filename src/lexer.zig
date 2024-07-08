@@ -8,12 +8,14 @@ line_info: LineInfo = .{
 },
 filepath: [:0]const u8 = "<no file>",
 source_code: [:0]const u8 = "",
+allocator: Allocator,
 
 const std = @import("std");
+const utils = @import("utils.zig");
 
-const stderr = std.io.getStdErr().writer();
 const is_space = std.ascii.isWhitespace;
 const is_digit = std.ascii.isDigit;
+const Allocator = std.mem.Allocator;
 const Lexer = @This();
 
 pub const LOOKAHEAD = 2;
@@ -40,6 +42,18 @@ pub const Token = struct {
         End_Of_File: void,
     };
 };
+
+pub fn init(allocator: Allocator, filepath: [:0]const u8) Lexer {
+    const source_code = utils.read_entire_file(allocator, filepath) catch {
+        utils.eprint("error: couldn't open file '{s}'\n", .{filepath});
+        std.posix.exit(1);
+    };
+    return .{
+        .filepath = filepath,
+        .source_code = source_code,
+        .allocator = allocator,
+    };
+}
 
 fn advance_line_info(lexer: *Lexer) void {
     lexer.line_info.offset += 1;
@@ -86,7 +100,9 @@ fn buffer_token(lexer: *Lexer) void {
             }
         }
 
-        const value = std.fmt.parseInt(u64, text[old_i..i], 10) catch {
+        const string = text[old_i..i];
+        const value = std.fmt.parseInt(u64, string, 10) catch {
+            report_error(lexer, token.line_info, "value '{s}' can't fit in 64 bits", .{string});
             std.posix.exit(1);
         };
 
@@ -151,7 +167,7 @@ pub fn take(lexer: *Lexer) Token {
 
 pub fn peek_ahead(lexer: *Lexer, index: u8) Token.Tag {
     const ptr = take_by_ptr(lexer, index);
-    return ptr.*;
+    return ptr.as;
 }
 
 pub fn peek(lexer: *Lexer) Token.Tag {
@@ -169,10 +185,24 @@ pub fn advance(lexer: *Lexer) void {
     advance_many(lexer, 1);
 }
 
-fn report_error(lexer: *Lexer, line_info: LineInfo, comptime format: []const u8, args: anytype) void {
-    stderr.print("{s}:{}:{}: error: " ++ format ++ "\n", .{ lexer.filepath, line_info.line, line_info.column } ++ args) catch {
+pub fn expect(lexer: *Lexer, tag: Token.Tag) void {
+    const token = take(lexer);
+    if (token.as != tag) {
+        report_error(lexer, token.line_info, "expected {s}", .{to_token_tag_name(tag)});
         std.posix.exit(1);
+    }
+}
+
+fn to_token_tag_name(tag: Token.Tag) []const u8 {
+    return switch (tag) {
+        .Semicolon => "';'",
+        .Integer => "integer literal",
+        .End_Of_File => "EOF",
     };
+}
+
+fn report_error(lexer: *Lexer, line_info: LineInfo, comptime format: []const u8, args: anytype) void {
+    utils.eprint("{s}:{}:{}: error: " ++ format ++ "\n", .{ lexer.filepath, line_info.line, line_info.column } ++ args);
 }
 
 fn is_prefix(prefix: []const u8, string: []const u8) bool {
