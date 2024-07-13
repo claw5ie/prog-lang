@@ -12,6 +12,30 @@ pub fn eprint(comptime format: []const u8, args: anytype) void {
     };
 }
 
+pub fn is_prefix(prefix: []const u8, string: []const u8) bool {
+    return prefix.len <= string.len and std.mem.eql(u8, prefix, string[0..prefix.len]);
+}
+
+pub fn count_bits(value: u64) u6 {
+    const state = struct {
+        const b = [_]u64{ 0x2, 0xC, 0xF0, 0xFF00, 0xFFFF0000, 0xFFFFFFFF00000000 };
+        const s = [_]u6{ 1, 2, 4, 8, 16, 32 };
+    };
+    var v: u64 = value;
+    var r: u6 = 0;
+
+    var i: u8 = 5;
+    while (i > 0) {
+        i -= 1;
+        if ((v & state.b[i]) != 0) {
+            v >>= state.s[i];
+            r |= state.s[i];
+        }
+    }
+
+    return if (r != 0) r + 1 else 0;
+}
+
 pub fn read_entire_file(allocator: Allocator, filepath: [:0]const u8) ![:0]u8 {
     const fd = try std.posix.open(filepath, .{}, 0);
     defer std.posix.close(fd);

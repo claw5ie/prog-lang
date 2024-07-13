@@ -23,8 +23,12 @@ pub fn parse(filepath: [:0]const u8) Ast {
 
     parse_top_level(&parser);
 
+    parser.lexer.allocator.free(parser.lexer.source_code);
+
     return .{
         .stmt_list = parser.stmt_list,
+        .arena = parser.arena,
+        .filepath = parser.lexer.filepath,
     };
 }
 
@@ -132,7 +136,7 @@ fn parse_expr_base(p: *Parser) *Ast.Expr {
             return expr;
         },
         else => {
-            report_error(p, token.line_info, "", .{});
+            report_error(p, token.line_info, "token doesn't start an expression", .{});
             std.posix.exit(1);
         },
     }

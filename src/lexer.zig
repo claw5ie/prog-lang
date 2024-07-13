@@ -212,7 +212,7 @@ fn buffer_token(lexer: *Lexer) void {
         var found = false;
 
         for (symbols) |symbol| {
-            if (is_prefix(symbol.text, string)) {
+            if (utils.is_prefix(symbol.text, string)) {
                 const count: u8 = @intCast(symbol.text.len);
                 i += count;
                 lexer.line_info.offset += count;
@@ -312,8 +312,4 @@ fn to_token_tag_name(tag: Token.Tag) []const u8 {
 
 fn report_error(lexer: *Lexer, line_info: LineInfo, comptime format: []const u8, args: anytype) void {
     utils.eprint("{s}:{}:{}: error: " ++ format ++ "\n", .{ lexer.filepath, line_info.line, line_info.column } ++ args);
-}
-
-fn is_prefix(prefix: []const u8, string: []const u8) bool {
-    return prefix.len <= string.len and std.mem.eql(u8, prefix, string[0..prefix.len]);
 }

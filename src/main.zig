@@ -2,6 +2,7 @@ const std = @import("std");
 const utils = @import("utils.zig");
 const Lexer = @import("lexer.zig");
 const Parser = @import("parser.zig");
+const Typechecker = @import("typechecker.zig");
 
 pub fn main() void {
     var arg_it = std.process.args();
@@ -14,6 +15,10 @@ pub fn main() void {
         filepath = arg;
     }
 
-    const ast = Parser.parse(filepath);
-    _ = ast;
+    var ast = Parser.parse(filepath);
+    Typechecker.typecheck(&ast);
+
+    {
+        std.debug.assert(utils.general_purpose_allocator.deinit() == .ok);
+    }
 }
