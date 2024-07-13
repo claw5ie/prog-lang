@@ -1,0 +1,1 @@
+tests/typechecker/binary-operators-03.test:1:7: error: can't perform arithmetic operation on values of type 'bool'/'u6'

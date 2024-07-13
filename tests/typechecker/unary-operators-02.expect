@@ -1,0 +1,1 @@
+tests/typechecker/unary-operators-02.test:1:1: error: expected signed integer, but got 'bool'

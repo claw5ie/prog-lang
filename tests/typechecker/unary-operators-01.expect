@@ -1,0 +1,1 @@
+tests/typechecker/unary-operators-01.test:1:1: error: expected integer type, but got 'bool'
