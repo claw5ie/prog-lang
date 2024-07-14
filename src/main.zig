@@ -11,7 +11,7 @@ pub fn main() void {
 
     _ = arg_it.next();
 
-    var filepath: [:0]const u8 = "./tests/debug";
+    var filepath: [:0]const u8 = "./tests/debug.test";
 
     if (arg_it.next()) |arg| {
         filepath = arg;

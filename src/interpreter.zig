@@ -12,6 +12,7 @@ pub fn interpret(irc: *IRC) void {
     };
 
     interpret_top_level(&interp);
+    utils.oprint("\n", .{});
 }
 
 fn interpret_top_level(interp: *Interp) void {

@@ -4,7 +4,8 @@ set -eu
 
 parser_tests="tests/parser/*.test"
 typechecker_tests="tests/typechecker/*.test"
-tests="${parser_tests} ${typechecker_tests}"
+ircode_tests="tests/*.test"
+tests="${parser_tests} ${typechecker_tests} ${ircode_tests}"
 total_count=0
 failed_count=0
 
@@ -17,7 +18,7 @@ do
     base_file_path=${file%.*}
     if [ -e "${base_file_path}.expect" ]; then
         set +e
-        output=$(./zig-out/bin/prog-lang "${base_file_path}.test" 2>&1 > /dev/null)
+        output=$(./zig-out/bin/prog-lang "${base_file_path}.test" 2>&1)
         set -e
         expected=$(cat "${base_file_path}.expect")
 
