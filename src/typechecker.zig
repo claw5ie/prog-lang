@@ -72,11 +72,12 @@ fn implicit_cast_to_integer(t: *Typechecker, expr: *Ast.Expr, expr_type: *Ast.Ty
         const inner = t.ast.create(Ast.Expr);
         inner.* = expr.*;
         expr.* = .{
-            .Cast = .{
-                .line_info = undefined, // TODO: set line info.
+            .line_info = inner.line_info,
+            .as = .{ .Cast = .{
                 .typ = typ,
                 .expr = inner,
-            },
+            } },
+            .typ = typ,
         };
     }
 
@@ -117,11 +118,12 @@ fn implicit_cast(t: *Typechecker, expr: *Ast.Expr, expr_type: *Ast.Type, cast_to
         const inner = t.ast.create(Ast.Expr);
         inner.* = expr.*;
         expr.* = .{
-            .Cast = .{
-                .line_info = undefined, // TODO: set line info.
+            .line_info = inner.line_info,
+            .as = .{ .Cast = .{
                 .typ = typ,
                 .expr = inner,
-            },
+            } },
+            .typ = typ,
         };
     }
 
@@ -192,11 +194,12 @@ fn implicit_cast_two_integers(t: *Typechecker, lhs: *Ast.Expr, lhs_type: *Ast.Ty
             const inner = t.ast.create(Ast.Expr);
             inner.* = lhs.*;
             lhs.* = .{
-                .Cast = .{
-                    .line_info = undefined, // TODO: set line info??
+                .line_info = inner.line_info,
+                .as = .{ .Cast = .{
                     .typ = typ,
                     .expr = inner,
-                },
+                } },
+                .typ = typ,
             };
         }
 
@@ -204,11 +207,12 @@ fn implicit_cast_two_integers(t: *Typechecker, lhs: *Ast.Expr, lhs_type: *Ast.Ty
             const inner = t.ast.create(Ast.Expr);
             inner.* = rhs.*;
             rhs.* = .{
-                .Cast = .{
-                    .line_info = undefined, // TODO: set line info??
+                .line_info = inner.line_info,
+                .as = .{ .Cast = .{
                     .typ = typ,
                     .expr = inner,
-                },
+                } },
+                .typ = typ,
             };
         }
     }
@@ -218,6 +222,9 @@ fn implicit_cast_two_integers(t: *Typechecker, lhs: *Ast.Expr, lhs_type: *Ast.Ty
 
 fn typecheck_stmt(t: *Typechecker, stmt: *Ast.Stmt) void {
     switch (stmt.*) {
+        .Print => |expr| {
+            _ = typecheck_expr(t, expr);
+        },
         .Expr => |expr| {
             _ = typecheck_expr(t, expr);
         },
@@ -225,103 +232,109 @@ fn typecheck_stmt(t: *Typechecker, stmt: *Ast.Stmt) void {
 }
 
 fn typecheck_expr(t: *Typechecker, expr: *Ast.Expr) *Ast.Type {
-    switch (expr.*) {
-        .Binary_Op => |Binary_Op| {
-            const lhs_type = typecheck_expr(t, Binary_Op.lhs);
-            const rhs_type = typecheck_expr(t, Binary_Op.rhs);
+    const typ: *Ast.Type = typ: {
+        switch (expr.as) {
+            .Binary_Op => |Binary_Op| {
+                const lhs_type = typecheck_expr(t, Binary_Op.lhs);
+                const rhs_type = typecheck_expr(t, Binary_Op.rhs);
 
-            switch (Binary_Op.tag) {
-                .Or, .And => {
-                    if (implicit_cast(t, Binary_Op.lhs, lhs_type, &Ast.bool_type) == null or
-                        implicit_cast(t, Binary_Op.rhs, rhs_type, &Ast.bool_type) == null)
-                    {
-                        report_error(t, Binary_Op.line_info, "expected 'bool'/'bool', but got '{}'/'{}'", .{ lhs_type, rhs_type });
-                    }
+                switch (Binary_Op.tag) {
+                    .Or, .And => {
+                        if (implicit_cast(t, Binary_Op.lhs, lhs_type, &Ast.bool_type) == null or
+                            implicit_cast(t, Binary_Op.rhs, rhs_type, &Ast.bool_type) == null)
+                        {
+                            report_error(t, Binary_Op.line_info, "expected 'bool'/'bool', but got '{}'/'{}'", .{ lhs_type, rhs_type });
+                        }
 
-                    return &Ast.bool_type;
-                },
-                .Eq, .Neq => {
-                    switch (lhs_type.*) {
-                        .Bool => {
-                            if (implicit_cast(t, Binary_Op.rhs, rhs_type, lhs_type) == null) {
-                                report_error(t, Binary_Op.line_info, "can't compare values of type '{}'/'{}'", .{ lhs_type, rhs_type });
-                            }
-                        },
-                        .Integer => {
-                            if (implicit_cast_two_integers(t, Binary_Op.lhs, lhs_type, Binary_Op.rhs, rhs_type) == null) {
-                                report_error(t, Binary_Op.line_info, "can't compare values of type '{}'/'{}'", .{ lhs_type, rhs_type });
-                            }
-                        },
-                    }
+                        break :typ &Ast.bool_type;
+                    },
+                    .Eq, .Neq => {
+                        switch (lhs_type.*) {
+                            .Bool => {
+                                if (implicit_cast(t, Binary_Op.rhs, rhs_type, lhs_type) == null) {
+                                    report_error(t, Binary_Op.line_info, "can't compare values of type '{}'/'{}'", .{ lhs_type, rhs_type });
+                                }
+                            },
+                            .Integer => {
+                                if (implicit_cast_two_integers(t, Binary_Op.lhs, lhs_type, Binary_Op.rhs, rhs_type) == null) {
+                                    report_error(t, Binary_Op.line_info, "can't compare values of type '{}'/'{}'", .{ lhs_type, rhs_type });
+                                }
+                            },
+                        }
 
-                    return &Ast.bool_type;
-                },
-                .Lt, .Leq, .Gt, .Geq => {
-                    if (implicit_cast_two_integers(t, Binary_Op.lhs, lhs_type, Binary_Op.rhs, rhs_type) == null) {
-                        report_error(t, Binary_Op.line_info, "can't compare values of type '{}'/'{}'", .{ lhs_type, rhs_type });
-                    }
+                        break :typ &Ast.bool_type;
+                    },
+                    .Lt, .Leq, .Gt, .Geq => {
+                        if (implicit_cast_two_integers(t, Binary_Op.lhs, lhs_type, Binary_Op.rhs, rhs_type) == null) {
+                            report_error(t, Binary_Op.line_info, "can't compare values of type '{}'/'{}'", .{ lhs_type, rhs_type });
+                        }
 
-                    return &Ast.bool_type;
-                },
-                .Add, .Sub, .Mul, .Div, .Mod => {
-                    const casted = implicit_cast_two_integers(t, Binary_Op.lhs, lhs_type, Binary_Op.rhs, rhs_type);
+                        break :typ &Ast.bool_type;
+                    },
+                    .Add, .Sub, .Mul, .Div, .Mod => {
+                        const casted = implicit_cast_two_integers(t, Binary_Op.lhs, lhs_type, Binary_Op.rhs, rhs_type);
 
-                    if (casted == null) {
-                        report_error(t, Binary_Op.line_info, "can't perform arithmetic operation on values of type '{}'/'{}'", .{ lhs_type, rhs_type });
-                        std.posix.exit(1);
-                    }
+                        if (casted == null) {
+                            report_error(t, Binary_Op.line_info, "can't perform arithmetic operation on values of type '{}'/'{}'", .{ lhs_type, rhs_type });
+                            std.posix.exit(1);
+                        }
 
-                    return casted.?;
-                },
-            }
-        },
-        .Unary_Op => |Unary_Op| {
-            const subexpr_type = typecheck_expr(t, Unary_Op.subexpr);
+                        break :typ casted.?;
+                    },
+                }
+            },
+            .Unary_Op => |Unary_Op| {
+                const subexpr_type = typecheck_expr(t, Unary_Op.subexpr);
 
-            switch (Unary_Op.tag) {
-                .Plus => {
-                    const casted = implicit_cast_to_integer(t, Unary_Op.subexpr, subexpr_type, .Signed);
+                switch (Unary_Op.tag) {
+                    .Plus => {
+                        const casted = implicit_cast_to_integer(t, Unary_Op.subexpr, subexpr_type, .Signed);
 
-                    if (casted == null) {
-                        report_error(t, Unary_Op.line_info, "expected integer type, but got '{}'", .{subexpr_type});
-                        std.posix.exit(1);
-                    }
+                        if (casted == null) {
+                            report_error(t, expr.line_info, "expected integer type, but got '{}'", .{subexpr_type});
+                            std.posix.exit(1);
+                        }
 
-                    return casted.?;
-                },
-                .Minus => {
-                    const casted = implicit_cast_to_integer(t, Unary_Op.subexpr, subexpr_type, .Signed);
+                        break :typ casted.?;
+                    },
+                    .Minus => {
+                        const casted = implicit_cast_to_integer(t, Unary_Op.subexpr, subexpr_type, .Signed);
 
-                    if (casted == null) {
-                        report_error(t, Unary_Op.line_info, "expected signed integer, but got '{}'", .{subexpr_type});
-                        std.posix.exit(1);
-                    }
+                        if (casted == null) {
+                            report_error(t, expr.line_info, "expected signed integer, but got '{}'", .{subexpr_type});
+                            std.posix.exit(1);
+                        }
 
-                    return casted.?;
-                },
-                .Not => {
-                    if (implicit_cast(t, Unary_Op.subexpr, subexpr_type, &Ast.bool_type) == null) {
-                        report_error(t, Unary_Op.line_info, "expected 'bool', but got '{}'", .{subexpr_type});
-                    }
+                        break :typ casted.?;
+                    },
+                    .Not => {
+                        if (implicit_cast(t, Unary_Op.subexpr, subexpr_type, &Ast.bool_type) == null) {
+                            report_error(t, expr.line_info, "expected 'bool', but got '{}'", .{subexpr_type});
+                        }
 
-                    return &Ast.bool_type;
-                },
-            }
-        },
-        .Cast => unreachable,
-        .Bool => {
-            return &Ast.bool_type;
-        },
-        .Integer => |Integer| {
-            const typ = t.ast.create(Ast.Type);
-            typ.* = .{ .Integer = .{
-                .line_info = Integer.line_info,
-                .bits = utils.count_bits(Integer.value),
-                .is_signed = false,
-            } };
-            return typ;
-        },
-    }
+                        break :typ &Ast.bool_type;
+                    },
+                }
+            },
+            .Cast => unreachable,
+            .Bool => {
+                break :typ &Ast.bool_type;
+            },
+            .Integer => |value| {
+                const typ = t.ast.create(Ast.Type);
+                typ.* = .{ .Integer = .{
+                    .line_info = expr.line_info,
+                    .bits = utils.count_bits(value),
+                    .is_signed = false,
+                } };
+                break :typ typ;
+            },
+        }
+    };
+
+    expr.typ = typ;
+
+    return typ;
 }
 
 fn report_error(t: *Typechecker, line_info: LineInfo, comptime format: []const u8, args: anytype) void {

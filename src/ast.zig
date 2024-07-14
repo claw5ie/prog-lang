@@ -48,12 +48,10 @@ pub const Type = union(Type.Tag) {
     }
 };
 
-pub const Expr = union(Expr.Tag) {
-    Binary_Op: Expr.BinaryOp,
-    Unary_Op: Expr.UnaryOp,
-    Cast: Expr.Cast,
-    Bool: Expr.Bool,
-    Integer: Expr.Integer,
+pub const Expr = struct {
+    line_info: LineInfo,
+    as: Data,
+    typ: ?*Ast.Type,
 
     pub const Tag = enum {
         Binary_Op,
@@ -63,10 +61,18 @@ pub const Expr = union(Expr.Tag) {
         Integer,
     };
 
+    pub const Data = union(Tag) {
+        Binary_Op: Expr.BinaryOp,
+        Unary_Op: Expr.UnaryOp,
+        Cast: Expr.Cast,
+        Bool: bool,
+        Integer: u64,
+    };
+
     pub const BinaryOp = struct {
         line_info: LineInfo,
-        lhs: *Expr,
-        rhs: *Expr,
+        lhs: *Ast.Expr,
+        rhs: *Ast.Expr,
         tag: BinaryOp.Tag,
 
         pub const Tag = enum {
@@ -87,8 +93,7 @@ pub const Expr = union(Expr.Tag) {
     };
 
     pub const UnaryOp = struct {
-        line_info: LineInfo,
-        subexpr: *Expr,
+        subexpr: *Ast.Expr,
         tag: UnaryOp.Tag,
 
         pub const Tag = enum {
@@ -99,26 +104,17 @@ pub const Expr = union(Expr.Tag) {
     };
 
     pub const Cast = struct {
-        line_info: LineInfo,
         typ: *Ast.Type,
         expr: *Ast.Expr,
-    };
-
-    pub const Bool = struct {
-        line_info: LineInfo,
-        value: bool,
-    };
-
-    pub const Integer = struct {
-        line_info: LineInfo,
-        value: u64,
     };
 };
 
 pub const Stmt = union(Stmt.Tag) {
+    Print: *Expr,
     Expr: *Expr,
 
     pub const Tag = enum {
+        Print,
         Expr,
     };
 };

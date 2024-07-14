@@ -3,6 +3,8 @@ const utils = @import("utils.zig");
 const Lexer = @import("lexer.zig");
 const Parser = @import("parser.zig");
 const Typechecker = @import("typechecker.zig");
+const IRC = @import("ircode.zig");
+const Interp = @import("interpreter.zig");
 
 pub fn main() void {
     var arg_it = std.process.args();
@@ -17,8 +19,11 @@ pub fn main() void {
 
     var ast = Parser.parse(filepath);
     Typechecker.typecheck(&ast);
+    var irc = IRC.generate_ir(&ast);
+    Interp.interpret(&irc);
 
     {
+        irc.instrs.deinit();
         std.debug.assert(utils.general_purpose_allocator.deinit() == .ok);
     }
 }

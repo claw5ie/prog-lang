@@ -56,15 +56,31 @@ fn create(p: *Parser, T: type) *T {
 }
 
 fn parse_stmt(p: *Parser) *Ast.Stmt {
-    const expr = parse_expr(p);
-    p.lexer.expect(.Semicolon);
+    switch (p.lexer.peek()) {
+        .Print => {
+            p.lexer.advance();
+            const expr = parse_expr(p);
+            p.lexer.expect(.Semicolon);
 
-    const stmt = create(p, Ast.Stmt);
-    stmt.* = .{
-        .Expr = expr,
-    };
+            const stmt = create(p, Ast.Stmt);
+            stmt.* = .{
+                .Print = expr,
+            };
 
-    return stmt;
+            return stmt;
+        },
+        else => {
+            const expr = parse_expr(p);
+            p.lexer.expect(.Semicolon);
+
+            const stmt = create(p, Ast.Stmt);
+            stmt.* = .{
+                .Expr = expr,
+            };
+
+            return stmt;
+        },
+    }
 }
 
 fn parse_expr(p: *Parser) *Ast.Expr {
@@ -78,11 +94,12 @@ fn parse_expr_base(p: *Parser) *Ast.Expr {
             const subexpr = parse_expr_base(p);
             const expr = create(p, Ast.Expr);
             expr.* = .{
-                .Unary_Op = .{
-                    .line_info = token.line_info,
+                .line_info = subexpr.line_info,
+                .as = .{ .Unary_Op = .{
                     .subexpr = subexpr,
                     .tag = .Plus,
-                },
+                } },
+                .typ = null,
             };
             return expr;
         },
@@ -90,11 +107,12 @@ fn parse_expr_base(p: *Parser) *Ast.Expr {
             const subexpr = parse_expr_base(p);
             const expr = create(p, Ast.Expr);
             expr.* = .{
-                .Unary_Op = .{
-                    .line_info = token.line_info,
+                .line_info = token.line_info,
+                .as = .{ .Unary_Op = .{
                     .subexpr = subexpr,
                     .tag = .Minus,
-                },
+                } },
+                .typ = null,
             };
             return expr;
         },
@@ -102,36 +120,36 @@ fn parse_expr_base(p: *Parser) *Ast.Expr {
             const subexpr = parse_expr_base(p);
             const expr = create(p, Ast.Expr);
             expr.* = .{
-                .Unary_Op = .{
-                    .line_info = token.line_info,
+                .line_info = token.line_info,
+                .as = .{ .Unary_Op = .{
                     .subexpr = subexpr,
                     .tag = .Not,
-                },
+                } },
+                .typ = null,
             };
             return expr;
         },
         .Open_Paren => {
             const expr = parse_expr(p);
+            expr.line_info = token.line_info;
             p.lexer.expect(.Close_Paren);
             return expr;
         },
         .Bool => |value| {
             const expr = create(p, Ast.Expr);
             expr.* = .{
-                .Bool = .{
-                    .line_info = token.line_info,
-                    .value = value,
-                },
+                .line_info = token.line_info,
+                .as = .{ .Bool = value },
+                .typ = null,
             };
             return expr;
         },
         .Integer => |value| {
             const expr = create(p, Ast.Expr);
             expr.* = .{
-                .Integer = .{
-                    .line_info = token.line_info,
-                    .value = value,
-                },
+                .line_info = token.line_info,
+                .as = .{ .Integer = value },
+                .typ = null,
             };
             return expr;
         },
@@ -159,12 +177,14 @@ fn parse_prec(p: *Parser, lowest_prec: i32) *Ast.Expr {
             const rhs = parse_prec(p, curr_prec + 1);
             const new_lhs = create(p, Ast.Expr);
             new_lhs.* = .{
-                .Binary_Op = .{
+                .line_info = lhs.line_info,
+                .as = .{ .Binary_Op = .{
                     .line_info = line_info,
                     .lhs = lhs,
                     .rhs = rhs,
                     .tag = token_tag_to_binary_op_tag(op),
-                },
+                } },
+                .typ = null,
             };
             lhs = new_lhs;
 

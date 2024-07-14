@@ -52,6 +52,8 @@ pub const Token = struct {
         Close_Paren,
         Semicolon,
 
+        Print,
+
         Bool,
         Integer,
         Identifier,
@@ -77,6 +79,7 @@ pub const Token = struct {
         Open_Paren: void,
         Close_Paren: void,
         Semicolon: void,
+        Print: void,
         Bool: bool,
         Integer: u64,
         Identifier: void,
@@ -164,6 +167,7 @@ fn buffer_token(lexer: *Lexer) void {
         };
 
         const keywords = [_]Keyword{
+            .{ .text = "print", .as = .Print },
             .{ .text = "false", .as = .{ .Bool = false } },
             .{ .text = "true", .as = .{ .Bool = true } },
         };
@@ -303,6 +307,7 @@ fn to_token_tag_name(tag: Token.Tag) []const u8 {
         .Open_Paren => "'('",
         .Close_Paren => "')'",
         .Semicolon => "';'",
+        .Print => "'print'",
         .Bool => "boolean literal",
         .Integer => "integer literal",
         .Identifier => "identifier",

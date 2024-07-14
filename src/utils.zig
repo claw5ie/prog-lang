@@ -4,7 +4,14 @@ const Allocator = std.mem.Allocator;
 pub var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
 pub var gpa = general_purpose_allocator.allocator();
 
+const stdout = std.io.getStdOut().writer();
 const stderr = std.io.getStdErr().writer();
+
+pub fn oprint(comptime format: []const u8, args: anytype) void {
+    stdout.print(format, args) catch {
+        std.posix.exit(1);
+    };
+}
 
 pub fn eprint(comptime format: []const u8, args: anytype) void {
     stderr.print(format, args) catch {
