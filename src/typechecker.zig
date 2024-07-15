@@ -43,7 +43,7 @@ fn implicit_cast_to_integer(t: *Typechecker, expr: *Ast.Expr, expr_type: *Ast.Ty
     var casted: ?*Ast.Type = null;
     var should_cast = false;
 
-    switch (expr_type.*) {
+    switch (expr_type.as) {
         .Bool => {},
         .Integer => |Integer| {
             switch (what_sign) {
@@ -57,12 +57,14 @@ fn implicit_cast_to_integer(t: *Typechecker, expr: *Ast.Expr, expr_type: *Ast.Ty
                         casted = expr_type;
                     } else if (Integer.bits < Ast.MAX_BITS_IN_INTEGER) {
                         const typ = t.ast.create(Ast.Type);
+                        const bits = Integer.bits + 1;
                         typ.* = .{
-                            .Integer = .{
-                                .line_info = expr.line_info,
-                                .bits = Integer.bits + 1,
+                            .line_info = expr.line_info,
+                            .as = .{ .Integer = .{
+                                .bits = bits,
                                 .is_signed = true,
-                            },
+                            } },
+                            .size = bits,
                         };
                         casted = typ;
                         should_cast = true;
@@ -99,9 +101,9 @@ fn implicit_cast(t: *Typechecker, expr: *Ast.Expr, expr_type: *Ast.Type, cast_to
 
     var casted: ?*Ast.Type = null;
 
-    switch (cast_to_type.*) {
+    switch (cast_to_type.as) {
         .Bool => {
-            switch (expr_type.*) {
+            switch (expr_type.as) {
                 .Bool => {
                     casted = cast_to_type;
                 },
@@ -109,7 +111,7 @@ fn implicit_cast(t: *Typechecker, expr: *Ast.Expr, expr_type: *Ast.Type, cast_to
             }
         },
         .Integer => |dInteger| {
-            switch (expr_type.*) {
+            switch (expr_type.as) {
                 .Bool => {},
                 .Integer => |sInteger| {
                     if (dInteger.is_signed == sInteger.is_signed) {
@@ -153,10 +155,10 @@ fn implicit_cast_two_integers(t: *Typechecker, lhs: *Ast.Expr, lhs_type: *Ast.Ty
     var casted: ?*Ast.Type = null;
     var which_side_to_cast: WhichSideToCast = .None;
 
-    switch (lhs_type.*) {
+    switch (lhs_type.as) {
         .Bool => {},
         .Integer => |lInteger| {
-            switch (rhs_type.*) {
+            switch (rhs_type.as) {
                 .Bool => {},
                 .Integer => |rInteger| {
                     if (lInteger.is_signed == rInteger.is_signed) {
@@ -175,15 +177,16 @@ fn implicit_cast_two_integers(t: *Typechecker, lhs: *Ast.Expr, lhs_type: *Ast.Ty
                             (lInteger.is_signed and lInteger.bits < rInteger.bits) or
                             (rInteger.is_signed and rInteger.bits < lInteger.bits))
                         {
-                            const bits = @max(lInteger.bits, rInteger.bits);
+                            const bits = @max(lInteger.bits, rInteger.bits) + 1;
                             if (bits < Ast.MAX_BITS_IN_INTEGER) {
                                 const typ = t.ast.create(Ast.Type);
                                 typ.* = .{
-                                    .Integer = .{
-                                        .line_info = undefined, // TODO: set line info.
-                                        .bits = bits + 1,
+                                    .line_info = undefined, // TODO: set line info.
+                                    .as = .{ .Integer = .{
+                                        .bits = bits,
                                         .is_signed = true,
-                                    },
+                                    } },
+                                    .size = bits,
                                 };
                                 casted = typ;
                                 which_side_to_cast = .Both;
@@ -239,9 +242,9 @@ fn cast(t: *Typechecker, expr: *Ast.Expr, expr_type: *Ast.Type, cast_to_type: *A
 
     var casted: ?*Ast.Type = null;
 
-    switch (cast_to_type.*) {
+    switch (cast_to_type.as) {
         .Bool, .Integer => {
-            switch (expr_type.*) {
+            switch (expr_type.as) {
                 .Bool, .Integer => {
                     casted = cast_to_type;
                 },
@@ -304,7 +307,7 @@ fn typecheck_expr_rec(t: *Typechecker, expr: *Ast.Expr) TypecheckExprResult {
                         break :typ &Ast.bool_type;
                     },
                     .Eq, .Neq => {
-                        switch (lhs_type.*) {
+                        switch (lhs_type.as) {
                             .Bool => {
                                 if (!implicit_cast(t, Binary_Op.rhs, rhs_type, lhs_type)) {
                                     report_error(t, Binary_Op.line_info, "can't compare values of type '{}'/'{}'", .{ lhs_type, rhs_type });
@@ -377,7 +380,7 @@ fn typecheck_expr_rec(t: *Typechecker, expr: *Ast.Expr) TypecheckExprResult {
                 if (subexpr_result.is_type) {
                     typecheck_type(t, subexpr_result.typ);
 
-                    switch (subexpr_result.typ.*) {
+                    switch (subexpr_result.typ.as) {
                         .Bool, .Integer => {
                             if (Call.args.len != 1) {
                                 report_error(t, Call.subexpr.line_info, "expected 1 argument, but got {}", .{Call.args.len});
@@ -425,11 +428,15 @@ fn typecheck_expr_rec(t: *Typechecker, expr: *Ast.Expr) TypecheckExprResult {
             },
             .Integer => |value| {
                 const typ = t.ast.create(Ast.Type);
-                typ.* = .{ .Integer = .{
+                const bits = utils.count_bits(value);
+                typ.* = .{
                     .line_info = expr.line_info,
-                    .bits = utils.count_bits(value),
-                    .is_signed = false,
-                } };
+                    .as = .{ .Integer = .{
+                        .bits = bits,
+                        .is_signed = false,
+                    } },
+                    .size = bits,
+                };
                 break :typ typ;
             },
         }
@@ -441,8 +448,13 @@ fn typecheck_expr_rec(t: *Typechecker, expr: *Ast.Expr) TypecheckExprResult {
 }
 
 fn typecheck_type(_: *Typechecker, typ: *Ast.Type) void {
-    switch (typ.*) {
-        .Bool, .Integer => {},
+    switch (typ.as) {
+        .Bool => {
+            std.debug.assert(typ.size == 1);
+        },
+        .Integer => |Integer| {
+            std.debug.assert(typ.size == Integer.bits);
+        },
     }
 }
 

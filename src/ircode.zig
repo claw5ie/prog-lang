@@ -55,7 +55,7 @@ fn generate_ir_stmt(irc: *IRC, stmt: *Ast.Stmt) void {
     switch (stmt.*) {
         .Print => |expr| {
             const rvalue = generate_ir_expr(irc, expr);
-            switch (expr.typ.?.*) {
+            switch (expr.typ.?.as) {
                 .Bool => {
                     generate_ir_instr(irc, .{ .Printb = rvalue });
                 },
@@ -85,7 +85,7 @@ fn generate_ir_expr(irc: *IRC, expr: *Ast.Expr) Rvalue {
             const lhs_rvalue = generate_ir_expr(irc, Binary_Op.lhs);
             const rhs_rvalue = generate_ir_expr(irc, Binary_Op.rhs);
 
-            const op_type: BinaryOpType = switch (Binary_Op.lhs.typ.?.*) {
+            const op_type: BinaryOpType = switch (Binary_Op.lhs.typ.?.as) {
                 .Bool => .Unsigned,
                 .Integer => |Integer| if (Integer.is_signed) .Signed else .Unsigned,
             };
@@ -150,7 +150,7 @@ fn generate_ir_expr(irc: *IRC, expr: *Ast.Expr) Rvalue {
         },
         .Call => unreachable,
         .Constructor => |Constructor| {
-            switch (Constructor.typ.*) {
+            switch (Constructor.typ.as) {
                 .Bool, .Integer => {
                     return generate_ir_expr(irc, Constructor.args.first.?.data);
                 },
@@ -159,12 +159,12 @@ fn generate_ir_expr(irc: *IRC, expr: *Ast.Expr) Rvalue {
         .Cast => |Cast| {
             const rvalue = generate_ir_expr(irc, Cast.expr);
 
-            switch (Cast.typ.*) {
+            switch (Cast.typ.as) {
                 .Bool => {
                     return .{ .Imm = @intFromBool(rvalue.Imm != 0) };
                 },
                 .Integer => |dInteger| {
-                    switch (Cast.expr.typ.?.*) {
+                    switch (Cast.expr.typ.?.as) {
                         .Bool => {
                             return .{ .Imm = @intFromBool(rvalue.Imm != 0) };
                         },

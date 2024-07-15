@@ -12,34 +12,35 @@ const Ast = @This();
 pub const MAX_BITS_IN_INTEGER = 64;
 
 pub var bool_type = Type{
-    .Bool = .{
-        .line_info = .{ .line = 0, .column = 0, .offset = 0 },
-    },
+    .line_info = .{ .line = 0, .column = 0, .offset = 0 },
+    .as = .Bool,
+    .size = 1,
 };
 
 pub const ExprList = std.DoublyLinkedList(*Ast.Expr);
 
-pub const Type = union(Type.Tag) {
-    Bool: Type.Bool,
-    Integer: Type.Integer,
+pub const Type = struct {
+    line_info: LineInfo,
+    as: Data,
+    size: u32,
 
     pub const Tag = enum {
         Bool,
         Integer,
     };
 
-    pub const Bool = struct {
-        line_info: LineInfo,
+    pub const Data = union(Tag) {
+        Bool: void,
+        Integer: Type.Integer,
     };
 
     pub const Integer = struct {
-        line_info: LineInfo,
         bits: u16,
         is_signed: bool,
     };
 
     pub fn format(typ: *Type, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-        switch (typ.*) {
+        switch (typ.as) {
             .Bool => {
                 _ = try writer.write("bool");
             },
@@ -50,15 +51,15 @@ pub const Type = union(Type.Tag) {
     }
 
     pub fn equal(self: *Type, other: *Type) bool {
-        switch (self.*) {
+        switch (self.as) {
             .Bool => {
-                return other.* == .Bool;
+                return other.as == .Bool;
             },
             .Integer => |sInteger_Type| {
-                if (other.* != .Integer) {
+                if (other.as != .Integer) {
                     return false;
                 } else {
-                    const oInteger_Type = &other.Integer;
+                    const oInteger_Type = &other.as.Integer;
                     return sInteger_Type.bits == oInteger_Type.bits and sInteger_Type.is_signed == oInteger_Type.is_signed;
                 }
             },

@@ -315,16 +315,21 @@ fn parse_type(p: *Parser) Ast.Type {
     const token = p.lexer.take();
     switch (token.as) { // look at NOTE[sync-enums].
         .Bool_Type => {
-            return .{ .Bool = .{
+            return .{
                 .line_info = token.line_info,
-            } };
+                .as = .Bool,
+                .size = 1,
+            };
         },
         .Integer_Type => |Integer_Type| {
-            return .{ .Integer = .{
+            return .{
                 .line_info = token.line_info,
-                .bits = Integer_Type.bits,
-                .is_signed = Integer_Type.is_signed,
-            } };
+                .as = .{ .Integer = .{
+                    .bits = Integer_Type.bits,
+                    .is_signed = Integer_Type.is_signed,
+                } },
+                .size = Integer_Type.bits,
+            };
         },
         else => {
             report_error(p, token.line_info, "token doesn't start a type", .{});
