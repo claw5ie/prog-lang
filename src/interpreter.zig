@@ -18,7 +18,21 @@ pub fn interpret(irc: *IRC) void {
 fn interpret_top_level(interp: *Interp) void {
     for (interp.irc.instrs.items) |item| {
         switch (item) {
-            .Print => |rvalue| {
+            .Printb => |rvalue| {
+                switch (rvalue) {
+                    .Imm => |imm| {
+                        utils.oprint("{s}\n", .{if (imm != 0) "true" else "false"});
+                    },
+                }
+            },
+            .Printi => |rvalue| {
+                switch (rvalue) {
+                    .Imm => |imm| {
+                        utils.oprint("{}\n", .{@as(i64, @bitCast(imm))});
+                    },
+                }
+            },
+            .Printu => |rvalue| {
                 switch (rvalue) {
                     .Imm => |imm| {
                         utils.oprint("{}\n", .{imm});

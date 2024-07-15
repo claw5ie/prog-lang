@@ -12,10 +12,14 @@ const IRC = @This();
 pub const InstrList = std.ArrayList(Instr);
 
 pub const Instr = union(Instr.Tag) {
-    Print: Rvalue,
+    Printb: Rvalue,
+    Printi: Rvalue,
+    Printu: Rvalue,
 
     pub const Tag = enum {
-        Print,
+        Printb,
+        Printi,
+        Printu,
     };
 };
 
@@ -51,9 +55,18 @@ fn generate_ir_stmt(irc: *IRC, stmt: *Ast.Stmt) void {
     switch (stmt.*) {
         .Print => |expr| {
             const rvalue = generate_ir_expr(irc, expr);
-            generate_ir_instr(irc, .{
-                .Print = rvalue,
-            });
+            switch (expr.typ.?.*) {
+                .Bool => {
+                    generate_ir_instr(irc, .{ .Printb = rvalue });
+                },
+                .Integer => |Integer| {
+                    if (Integer.is_signed) {
+                        generate_ir_instr(irc, .{ .Printi = rvalue });
+                    } else {
+                        generate_ir_instr(irc, .{ .Printu = rvalue });
+                    }
+                },
+            }
         },
         .Expr => |expr| {
             _ = generate_ir_expr(irc, expr);
