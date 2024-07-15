@@ -51,7 +51,9 @@ pub fn count_bits(value: u64) u6 {
         }
     }
 
-    return if (r != 0) r + 1 else 0;
+    r += @intFromBool(value != 0);
+
+    return r;
 }
 
 pub fn read_entire_file(allocator: Allocator, filepath: [:0]const u8) ![:0]u8 {
