@@ -17,6 +17,8 @@ pub var bool_type = Type{
     },
 };
 
+pub const ExprList = std.DoublyLinkedList(*Ast.Expr);
+
 pub const Type = union(Type.Tag) {
     Bool: Type.Bool,
     Integer: Type.Integer,
@@ -46,6 +48,22 @@ pub const Type = union(Type.Tag) {
             },
         }
     }
+
+    pub fn equal(self: *Type, other: *Type) bool {
+        switch (self.*) {
+            .Bool => {
+                return other.* == .Bool;
+            },
+            .Integer => |sInteger_Type| {
+                if (other.* != .Integer) {
+                    return false;
+                } else {
+                    const oInteger_Type = &other.Integer;
+                    return sInteger_Type.bits == oInteger_Type.bits and sInteger_Type.is_signed == oInteger_Type.is_signed;
+                }
+            },
+        }
+    }
 };
 
 pub const Expr = struct {
@@ -56,7 +74,10 @@ pub const Expr = struct {
     pub const Tag = enum {
         Binary_Op,
         Unary_Op,
+        Call,
+        Constructor,
         Cast,
+        Type,
         Bool,
         Integer,
     };
@@ -64,7 +85,10 @@ pub const Expr = struct {
     pub const Data = union(Tag) {
         Binary_Op: Expr.BinaryOp,
         Unary_Op: Expr.UnaryOp,
+        Call: Expr.Call,
+        Constructor: Expr.Constructor,
         Cast: Expr.Cast,
+        Type: Ast.Type,
         Bool: bool,
         Integer: u64,
     };
@@ -103,6 +127,16 @@ pub const Expr = struct {
         };
     };
 
+    pub const Call = struct {
+        subexpr: *Ast.Expr,
+        args: Ast.ExprList,
+    };
+
+    pub const Constructor = struct {
+        typ: *Ast.Type,
+        args: Ast.ExprList,
+    };
+
     pub const Cast = struct {
         typ: *Ast.Type,
         expr: *Ast.Expr,
@@ -110,8 +144,8 @@ pub const Expr = struct {
 };
 
 pub const Stmt = union(Stmt.Tag) {
-    Print: *Expr,
-    Expr: *Expr,
+    Print: *Ast.Expr,
+    Expr: *Ast.Expr,
 
     pub const Tag = enum {
         Print,

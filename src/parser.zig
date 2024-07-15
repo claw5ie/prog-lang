@@ -135,6 +135,43 @@ fn parse_expr_base(p: *Parser) *Ast.Expr {
             p.lexer.expect(.Close_Paren);
             return expr;
         },
+        .Cast => {
+            var exprs: [2]*Ast.Expr = undefined;
+            p.lexer.expect(.Open_Paren);
+            const count = parse_fixed_size_expr_list(p, &exprs);
+            p.lexer.expect(.Close_Paren);
+
+            switch (count) {
+                2 => {
+                    const typ = expr_to_type(p, exprs[0]);
+                    const expr = create(p, Ast.Expr);
+                    expr.* = .{
+                        .line_info = token.line_info,
+                        .as = .{ .Cast = .{
+                            .typ = typ,
+                            .expr = exprs[1],
+                        } },
+                        .typ = null,
+                    };
+                    return expr;
+                },
+                else => {
+                    report_error(p, token.line_info, "expected 2 arguments, but got {}", .{count});
+                    std.posix.exit(1);
+                },
+            }
+        },
+        .Bool_Type, .Integer_Type => { // NOTE[sync-enums]: every case here must also appear in 'parse_type'.
+            p.lexer.putback(token);
+            const typ = parse_type(p);
+            const expr = create(p, Ast.Expr);
+            expr.* = .{
+                .line_info = token.line_info,
+                .as = .{ .Type = typ },
+                .typ = null,
+            };
+            return expr;
+        },
         .Bool => |value| {
             const expr = create(p, Ast.Expr);
             expr.* = .{
@@ -161,7 +198,31 @@ fn parse_expr_base(p: *Parser) *Ast.Expr {
 }
 
 fn parse_highest_prec(p: *Parser) *Ast.Expr {
-    return parse_expr_base(p);
+    var base = parse_expr_base(p);
+
+    while (true) {
+        switch (p.lexer.peek()) {
+            .Open_Paren => {
+                p.lexer.advance();
+                const args = parse_expr_list(p);
+                p.lexer.expect(.Close_Paren);
+
+                const new_base = create(p, Ast.Expr);
+                new_base.* = .{
+                    .line_info = base.line_info,
+                    .as = .{ .Call = .{
+                        .subexpr = base,
+                        .args = args,
+                    } },
+                    .typ = null,
+                };
+                base = new_base;
+            },
+            else => break,
+        }
+    }
+
+    return base;
 }
 
 fn parse_prec(p: *Parser, lowest_prec: i32) *Ast.Expr {
@@ -200,6 +261,89 @@ fn parse_prec(p: *Parser, lowest_prec: i32) *Ast.Expr {
     }
 
     return lhs;
+}
+
+fn parse_expr_list(p: *Parser) Ast.ExprList {
+    var list = Ast.ExprList{};
+
+    var tt = p.lexer.peek();
+    while (tt != .End_Of_File and tt != .Close_Paren) {
+        const expr = parse_expr(p);
+
+        {
+            const node = create(p, Ast.ExprList.Node);
+            node.* = .{
+                .data = expr,
+            };
+            list.append(node);
+        }
+
+        tt = p.lexer.peek();
+        if (tt != .End_Of_File and tt != .Close_Paren) {
+            p.lexer.expect(.Comma);
+            tt = p.lexer.peek();
+        }
+    }
+
+    return list;
+}
+
+fn parse_fixed_size_expr_list(p: *Parser, dst: []*Ast.Expr) usize {
+    var count: usize = 0;
+
+    var tt = p.lexer.peek();
+    while (tt != .End_Of_File and tt != .Close_Paren) {
+        const expr = parse_expr(p);
+
+        if (count < dst.len) {
+            dst[count] = expr;
+        }
+
+        count += 1;
+
+        tt = p.lexer.peek();
+        if (tt != .End_Of_File and tt != .Close_Paren) {
+            p.lexer.expect(.Comma);
+            tt = p.lexer.peek();
+        }
+    }
+
+    return count;
+}
+
+fn parse_type(p: *Parser) Ast.Type {
+    const token = p.lexer.take();
+    switch (token.as) { // look at NOTE[sync-enums].
+        .Bool_Type => {
+            return .{ .Bool = .{
+                .line_info = token.line_info,
+            } };
+        },
+        .Integer_Type => |Integer_Type| {
+            return .{ .Integer = .{
+                .line_info = token.line_info,
+                .bits = Integer_Type.bits,
+                .is_signed = Integer_Type.is_signed,
+            } };
+        },
+        else => {
+            report_error(p, token.line_info, "token doesn't start a type", .{});
+            std.posix.exit(1);
+        },
+    }
+}
+
+// NOTE: Assume expression is heap allocated and can be reused.
+fn expr_to_type(p: *Parser, expr: *Ast.Expr) *Ast.Type {
+    switch (expr.as) {
+        .Type => |*typ| {
+            return typ;
+        },
+        else => {
+            report_error(p, expr.line_info, "expression is not a type", .{});
+            std.posix.exit(1);
+        },
+    }
 }
 
 fn op_prec(tag: Token.Tag) i32 {

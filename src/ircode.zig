@@ -135,18 +135,39 @@ fn generate_ir_expr(irc: *IRC, expr: *Ast.Expr) Rvalue {
                 },
             }
         },
-        .Cast => |Cast| {
-            const expr_rvalue = generate_ir_expr(irc, Cast.expr);
-
-            switch (Cast.typ.*) {
-                .Bool => {
-                    return .{ .Imm = @intFromBool(expr_rvalue.Imm != 0) };
-                },
-                .Integer => {
-                    return expr_rvalue;
+        .Call => unreachable,
+        .Constructor => |Constructor| {
+            switch (Constructor.typ.*) {
+                .Bool, .Integer => {
+                    return generate_ir_expr(irc, Constructor.args.first.?.data);
                 },
             }
         },
+        .Cast => |Cast| {
+            const rvalue = generate_ir_expr(irc, Cast.expr);
+
+            switch (Cast.typ.*) {
+                .Bool => {
+                    return .{ .Imm = @intFromBool(rvalue.Imm != 0) };
+                },
+                .Integer => |dInteger| {
+                    switch (Cast.expr.typ.?.*) {
+                        .Bool => {
+                            return .{ .Imm = @intFromBool(rvalue.Imm != 0) };
+                        },
+                        .Integer => |sInteger| {
+                            if (dInteger.is_signed and sInteger.is_signed and dInteger.bits > sInteger.bits) {
+                                const imm = utils.sign_extend(rvalue.Imm, @intCast(sInteger.bits));
+                                return .{ .Imm = imm };
+                            } else {
+                                return rvalue;
+                            }
+                        },
+                    }
+                },
+            }
+        },
+        .Type => unreachable,
         .Bool => |value| {
             return .{ .Imm = @intFromBool(value) };
         },

@@ -23,6 +23,17 @@ pub fn is_prefix(prefix: []const u8, string: []const u8) bool {
     return prefix.len <= string.len and std.mem.eql(u8, prefix, string[0..prefix.len]);
 }
 
+pub fn sign_extend(value: u64, sbits: u6) u64 {
+    if (value >= (@as(u64, 1) << (sbits - 1))) {
+        var ones: u64 = 0xFFFF_FFFF_FFFF_FFFF;
+        ones >>= sbits;
+        ones <<= sbits;
+        return value | ones;
+    } else {
+        return value;
+    }
+}
+
 pub fn count_bits(value: u64) u6 {
     const state = struct {
         const b = [_]u64{ 0x2, 0xC, 0xF0, 0xFF00, 0xFFFF0000, 0xFFFFFFFF00000000 };

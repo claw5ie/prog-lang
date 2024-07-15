@@ -51,6 +51,11 @@ pub const Token = struct {
         Open_Paren,
         Close_Paren,
         Semicolon,
+        Comma,
+
+        Cast,
+        Bool_Type,
+        Integer_Type,
 
         Print,
 
@@ -79,11 +84,20 @@ pub const Token = struct {
         Open_Paren: void,
         Close_Paren: void,
         Semicolon: void,
+        Comma: void,
+        Cast: void,
+        Bool_Type: void,
+        Integer_Type: Integer,
         Print: void,
         Bool: bool,
         Integer: u64,
         Identifier: void,
         End_Of_File: void,
+    };
+
+    pub const Integer = struct {
+        bits: u16,
+        is_signed: bool,
     };
 };
 
@@ -170,22 +184,43 @@ fn buffer_token(lexer: *Lexer) void {
             .{ .text = "print", .as = .Print },
             .{ .text = "false", .as = .{ .Bool = false } },
             .{ .text = "true", .as = .{ .Bool = true } },
+            .{ .text = "cast", .as = .Cast },
+            .{ .text = "bool", .as = .Bool_Type },
         };
 
-        const string = text[old_i..i];
-        var found = false;
+        token.as = as: {
+            const string = text[old_i..i];
 
-        for (keywords) |keyword| {
-            if (std.mem.eql(u8, keyword.text, string)) {
-                token.as = keyword.as;
-                found = true;
-                break;
+            if (string[0] == 'i' or string[0] == 'u') {
+                switch (string.len) {
+                    2 => {
+                        if (string[1] != '0' and is_digit(string[1])) {
+                            break :as .{ .Integer_Type = .{
+                                .bits = string[1] - '0',
+                                .is_signed = string[0] == 'i',
+                            } };
+                        }
+                    },
+                    3 => {
+                        if (string[1] != '0' and is_digit(string[1]) and is_digit(string[2])) {
+                            break :as .{ .Integer_Type = .{
+                                .bits = 10 * (string[1] - '0') + (string[2] - '0'),
+                                .is_signed = string[0] == 'i',
+                            } };
+                        }
+                    },
+                    else => {},
+                }
             }
-        }
 
-        if (!found) {
-            token.as = .Identifier;
-        }
+            for (keywords) |keyword| {
+                if (std.mem.eql(u8, keyword.text, string)) {
+                    break :as keyword.as;
+                }
+            }
+
+            break :as .Identifier;
+        };
     } else {
         const Symbol = struct {
             text: []const u8,
@@ -210,6 +245,7 @@ fn buffer_token(lexer: *Lexer) void {
             .{ .text = "(", .as = .Open_Paren },
             .{ .text = ")", .as = .Close_Paren },
             .{ .text = ";", .as = .Semicolon },
+            .{ .text = ",", .as = .Comma },
         };
 
         const string = text[old_i..];
@@ -260,6 +296,14 @@ pub fn take(lexer: *Lexer) Token {
     return take_ahead(lexer, 0);
 }
 
+pub fn putback(lexer: *Lexer, token: Token) void {
+    std.debug.assert(lexer.token_count < LOOKAHEAD);
+    lexer.token_start -%= 1;
+    lexer.token_start %= LOOKAHEAD;
+    lexer.token_count += 1;
+    lexer.tokens[lexer.token_start] = token;
+}
+
 pub fn peek_ahead(lexer: *Lexer, index: u8) Token.Tag {
     const ptr = take_by_ptr(lexer, index);
     return ptr.as;
@@ -307,6 +351,10 @@ fn to_token_tag_name(tag: Token.Tag) []const u8 {
         .Open_Paren => "'('",
         .Close_Paren => "')'",
         .Semicolon => "';'",
+        .Comma => "','",
+        .Cast => "'cast'",
+        .Bool_Type => "'bool'",
+        .Integer_Type => "integer type",
         .Print => "'print'",
         .Bool => "boolean literal",
         .Integer => "integer literal",

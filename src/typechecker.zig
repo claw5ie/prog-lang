@@ -14,6 +14,11 @@ const Sign = enum {
     Both,
 };
 
+const TypecheckExprResult = struct {
+    typ: *Ast.Type,
+    is_type: bool,
+};
+
 pub fn typecheck(ast: *Ast) void {
     var typechecker = Typechecker{
         .ast = ast,
@@ -87,9 +92,12 @@ fn implicit_cast_to_integer(t: *Typechecker, expr: *Ast.Expr, expr_type: *Ast.Ty
     return casted;
 }
 
-fn implicit_cast(t: *Typechecker, expr: *Ast.Expr, expr_type: *Ast.Type, cast_to_type: *Ast.Type) ?*Ast.Type {
+fn implicit_cast(t: *Typechecker, expr: *Ast.Expr, expr_type: *Ast.Type, cast_to_type: *Ast.Type) bool {
+    if (expr_type.equal(cast_to_type)) {
+        return true;
+    }
+
     var casted: ?*Ast.Type = null;
-    var should_cast = false;
 
     switch (cast_to_type.*) {
         .Bool => {
@@ -107,12 +115,10 @@ fn implicit_cast(t: *Typechecker, expr: *Ast.Expr, expr_type: *Ast.Type, cast_to
                     if (dInteger.is_signed == sInteger.is_signed) {
                         if (dInteger.bits >= sInteger.bits) {
                             casted = cast_to_type;
-                            should_cast = dInteger.bits != sInteger.bits;
                         }
                     } else if (dInteger.is_signed) {
                         if (dInteger.bits > sInteger.bits) {
                             casted = cast_to_type;
-                            should_cast = true;
                         }
                     }
                 },
@@ -120,8 +126,7 @@ fn implicit_cast(t: *Typechecker, expr: *Ast.Expr, expr_type: *Ast.Type, cast_to
         },
     }
 
-    if (should_cast) {
-        const typ = casted.?;
+    if (casted) |typ| {
         const inner = t.ast.create(Ast.Expr);
         inner.* = expr.*;
         expr.* = .{
@@ -134,7 +139,7 @@ fn implicit_cast(t: *Typechecker, expr: *Ast.Expr, expr_type: *Ast.Type, cast_to
         };
     }
 
-    return casted;
+    return casted != null;
 }
 
 fn implicit_cast_two_integers(t: *Typechecker, lhs: *Ast.Expr, lhs_type: *Ast.Type, rhs: *Ast.Expr, rhs_type: *Ast.Type) ?*Ast.Type {
@@ -227,6 +232,39 @@ fn implicit_cast_two_integers(t: *Typechecker, lhs: *Ast.Expr, lhs_type: *Ast.Ty
     return casted;
 }
 
+fn cast(t: *Typechecker, expr: *Ast.Expr, expr_type: *Ast.Type, cast_to_type: *Ast.Type) bool {
+    if (expr_type.equal(cast_to_type)) {
+        return true;
+    }
+
+    var casted: ?*Ast.Type = null;
+
+    switch (cast_to_type.*) {
+        .Bool, .Integer => {
+            switch (expr_type.*) {
+                .Bool, .Integer => {
+                    casted = cast_to_type;
+                },
+            }
+        },
+    }
+
+    if (casted) |typ| {
+        const inner = t.ast.create(Ast.Expr);
+        inner.* = expr.*;
+        expr.* = .{
+            .line_info = inner.line_info,
+            .as = .{ .Cast = .{
+                .typ = typ,
+                .expr = inner,
+            } },
+            .typ = typ,
+        };
+    }
+
+    return casted != null;
+}
+
 fn typecheck_stmt(t: *Typechecker, stmt: *Ast.Stmt) void {
     switch (stmt.*) {
         .Print => |expr| {
@@ -239,6 +277,16 @@ fn typecheck_stmt(t: *Typechecker, stmt: *Ast.Stmt) void {
 }
 
 fn typecheck_expr(t: *Typechecker, expr: *Ast.Expr) *Ast.Type {
+    const result = typecheck_expr_rec(t, expr);
+    if (result.is_type) {
+        report_error(t, expr.line_info, "unexpected type", .{});
+        std.posix.exit(1);
+    }
+    return result.typ;
+}
+
+fn typecheck_expr_rec(t: *Typechecker, expr: *Ast.Expr) TypecheckExprResult {
+    var is_type = false;
     const typ: *Ast.Type = typ: {
         switch (expr.as) {
             .Binary_Op => |Binary_Op| {
@@ -247,8 +295,8 @@ fn typecheck_expr(t: *Typechecker, expr: *Ast.Expr) *Ast.Type {
 
                 switch (Binary_Op.tag) {
                     .Or, .And => {
-                        if (implicit_cast(t, Binary_Op.lhs, lhs_type, &Ast.bool_type) == null or
-                            implicit_cast(t, Binary_Op.rhs, rhs_type, &Ast.bool_type) == null)
+                        if (!implicit_cast(t, Binary_Op.lhs, lhs_type, &Ast.bool_type) or
+                            !implicit_cast(t, Binary_Op.rhs, rhs_type, &Ast.bool_type))
                         {
                             report_error(t, Binary_Op.line_info, "expected 'bool'/'bool', but got '{}'/'{}'", .{ lhs_type, rhs_type });
                         }
@@ -258,7 +306,7 @@ fn typecheck_expr(t: *Typechecker, expr: *Ast.Expr) *Ast.Type {
                     .Eq, .Neq => {
                         switch (lhs_type.*) {
                             .Bool => {
-                                if (implicit_cast(t, Binary_Op.rhs, rhs_type, lhs_type) == null) {
+                                if (!implicit_cast(t, Binary_Op.rhs, rhs_type, lhs_type)) {
                                     report_error(t, Binary_Op.line_info, "can't compare values of type '{}'/'{}'", .{ lhs_type, rhs_type });
                                 }
                             },
@@ -315,7 +363,7 @@ fn typecheck_expr(t: *Typechecker, expr: *Ast.Expr) *Ast.Type {
                         break :typ casted.?;
                     },
                     .Not => {
-                        if (implicit_cast(t, Unary_Op.subexpr, subexpr_type, &Ast.bool_type) == null) {
+                        if (!implicit_cast(t, Unary_Op.subexpr, subexpr_type, &Ast.bool_type)) {
                             report_error(t, expr.line_info, "expected 'bool', but got '{}'", .{subexpr_type});
                         }
 
@@ -323,7 +371,55 @@ fn typecheck_expr(t: *Typechecker, expr: *Ast.Expr) *Ast.Type {
                     },
                 }
             },
-            .Cast => unreachable,
+            .Call => |Call| {
+                const subexpr_result = typecheck_expr_rec(t, Call.subexpr);
+
+                if (subexpr_result.is_type) {
+                    typecheck_type(t, subexpr_result.typ);
+
+                    switch (subexpr_result.typ.*) {
+                        .Bool, .Integer => {
+                            if (Call.args.len != 1) {
+                                report_error(t, Call.subexpr.line_info, "expected 1 argument, but got {}", .{Call.args.len});
+                                std.posix.exit(1);
+                            }
+
+                            const arg = Call.args.first.?.data;
+                            const arg_type = typecheck_expr(t, arg);
+
+                            if (!implicit_cast(t, arg, arg_type, subexpr_result.typ)) {
+                                report_error(t, arg.line_info, "expected '{}', but got '{}'", .{ subexpr_result.typ, arg_type });
+                                std.posix.exit(1);
+                            }
+                        },
+                    }
+
+                    const args = Call.args;
+                    expr.as = .{ .Constructor = .{
+                        .typ = subexpr_result.typ,
+                        .args = args,
+                    } };
+
+                    break :typ subexpr_result.typ;
+                } else {
+                    report_error(t, Call.subexpr.line_info, "function calls are not supported yet", .{});
+                    std.posix.exit(1);
+                }
+            },
+            .Constructor => unreachable,
+            .Cast => |Cast| {
+                typecheck_type(t, Cast.typ);
+                const expr_type = typecheck_expr(t, Cast.expr);
+                if (!cast(t, Cast.expr, expr_type, Cast.typ)) {
+                    report_error(t, Cast.expr.line_info, "can't cast '{}' to '{}'", .{ expr_type, Cast.typ });
+                    std.posix.exit(1);
+                }
+                break :typ Cast.typ;
+            },
+            .Type => |*typ| {
+                is_type = true;
+                break :typ typ;
+            },
             .Bool => {
                 break :typ &Ast.bool_type;
             },
@@ -341,7 +437,13 @@ fn typecheck_expr(t: *Typechecker, expr: *Ast.Expr) *Ast.Type {
 
     expr.typ = typ;
 
-    return typ;
+    return .{ .typ = typ, .is_type = is_type };
+}
+
+fn typecheck_type(_: *Typechecker, typ: *Ast.Type) void {
+    switch (typ.*) {
+        .Bool, .Integer => {},
+    }
 }
 
 fn report_error(t: *Typechecker, line_info: LineInfo, comptime format: []const u8, args: anytype) void {
