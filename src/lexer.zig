@@ -53,6 +53,10 @@ pub const Token = struct {
         Semicolon,
         Comma,
 
+        Bit_Size_Of,
+        Byte_Size_Of,
+        Type_Of,
+        As,
         Cast,
         Bool_Type,
         Integer_Type,
@@ -85,6 +89,10 @@ pub const Token = struct {
         Close_Paren: void,
         Semicolon: void,
         Comma: void,
+        Bit_Size_Of: void,
+        Byte_Size_Of: void,
+        Type_Of: void,
+        As: void,
         Cast: void,
         Bool_Type: void,
         Integer_Type: Integer,
@@ -184,7 +192,6 @@ fn buffer_token(lexer: *Lexer) void {
             .{ .text = "print", .as = .Print },
             .{ .text = "false", .as = .{ .Bool = false } },
             .{ .text = "true", .as = .{ .Bool = true } },
-            .{ .text = "cast", .as = .Cast },
             .{ .text = "bool", .as = .Bool_Type },
         };
 
@@ -220,6 +227,44 @@ fn buffer_token(lexer: *Lexer) void {
             }
 
             break :as .Identifier;
+        };
+    } else if (text.len >= 2 and text[i] == '#' and (is_alpha(text[i + 1]) or text[i + 1] == '_')) {
+        i += 1;
+        advance_line_info(lexer);
+
+        while (true) {
+            advance_line_info(lexer);
+            i += 1;
+
+            if (!is_alnum(text[i]) and text[i] != '_') {
+                break;
+            }
+        }
+
+        const Keyword = struct {
+            text: []const u8,
+            as: Token.Data,
+        };
+
+        const keywords = [_]Keyword{
+            .{ .text = "byte_size_of", .as = .Byte_Size_Of },
+            .{ .text = "bit_size_of", .as = .Bit_Size_Of },
+            .{ .text = "type_of", .as = .Type_Of },
+            .{ .text = "cast", .as = .Cast },
+            .{ .text = "as", .as = .As },
+        };
+
+        token.as = as: {
+            const string = text[old_i + 1 .. i];
+
+            for (keywords) |keyword| {
+                if (std.mem.eql(u8, keyword.text, string)) {
+                    break :as keyword.as;
+                }
+            }
+
+            report_error(lexer, token.line_info, "unrecognized directive '#{s}'", .{string});
+            std.posix.exit(1);
         };
     } else {
         const Symbol = struct {
@@ -352,7 +397,11 @@ fn to_token_tag_name(tag: Token.Tag) []const u8 {
         .Close_Paren => "')'",
         .Semicolon => "';'",
         .Comma => "','",
-        .Cast => "'cast'",
+        .Bit_Size_Of => "'#bit_size_of'",
+        .Byte_Size_Of => "'#byte_size_of'",
+        .Type_Of => "'#type_of'",
+        .As => "'#as'",
+        .Cast => "'#cast'",
         .Bool_Type => "'bool'",
         .Integer_Type => "integer type",
         .Print => "'print'",

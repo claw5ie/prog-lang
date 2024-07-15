@@ -23,6 +23,18 @@ pub fn is_prefix(prefix: []const u8, string: []const u8) bool {
     return prefix.len <= string.len and std.mem.eql(u8, prefix, string[0..prefix.len]);
 }
 
+pub fn round_to_next_pow2(value: u64) u64 {
+    var v = value;
+    v -= 1;
+    v |= v >> 1;
+    v |= v >> 2;
+    v |= v >> 4;
+    v |= v >> 8;
+    v |= v >> 16;
+    v += 1;
+    return v;
+}
+
 pub fn sign_extend(value: u64, sbits: u6) u64 {
     if (value >= (@as(u64, 1) << (sbits - 1))) {
         var ones: u64 = 0xFFFF_FFFF_FFFF_FFFF;

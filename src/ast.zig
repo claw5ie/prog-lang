@@ -77,6 +77,10 @@ pub const Expr = struct {
         Unary_Op,
         Call,
         Constructor,
+        Bit_Size_Of,
+        Byte_Size_Of,
+        Type_Of,
+        As,
         Cast,
         Type,
         Bool,
@@ -88,6 +92,10 @@ pub const Expr = struct {
         Unary_Op: Expr.UnaryOp,
         Call: Expr.Call,
         Constructor: Expr.Constructor,
+        Bit_Size_Of: *Ast.Expr,
+        Byte_Size_Of: *Ast.Expr,
+        Type_Of: *Ast.Expr,
+        As: Expr.Cast,
         Cast: Expr.Cast,
         Type: Ast.Type,
         Bool: bool,
@@ -146,10 +154,12 @@ pub const Expr = struct {
 
 pub const Stmt = union(Stmt.Tag) {
     Print: *Ast.Expr,
+    Print_Type: *Ast.Type,
     Expr: *Ast.Expr,
 
     pub const Tag = enum {
         Print,
+        Print_Type,
         Expr,
     };
 };

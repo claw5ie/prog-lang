@@ -271,8 +271,13 @@ fn cast(t: *Typechecker, expr: *Ast.Expr, expr_type: *Ast.Type, cast_to_type: *A
 fn typecheck_stmt(t: *Typechecker, stmt: *Ast.Stmt) void {
     switch (stmt.*) {
         .Print => |expr| {
-            _ = typecheck_expr(t, expr);
+            const expr_result = typecheck_expr_rec(t, expr);
+
+            if (expr_result.is_type) {
+                stmt.* = .{ .Print_Type = expr_result.typ };
+            }
         },
+        .Print_Type => unreachable,
         .Expr => |expr| {
             _ = typecheck_expr(t, expr);
         },
@@ -410,6 +415,60 @@ fn typecheck_expr_rec(t: *Typechecker, expr: *Ast.Expr) TypecheckExprResult {
                 }
             },
             .Constructor => unreachable,
+            .Bit_Size_Of => |subexpr| {
+                const subexpr_type = typecheck_expr(t, subexpr);
+                const bits = utils.count_bits(subexpr_type.size);
+
+                const typ = t.ast.create(Ast.Type);
+                typ.* = .{
+                    .line_info = expr.line_info,
+                    .as = .{ .Integer = .{
+                        .bits = bits,
+                        .is_signed = false,
+                    } },
+                    .size = bits,
+                };
+
+                expr.as = .{ .Integer = subexpr_type.size };
+
+                break :typ typ;
+            },
+            .Byte_Size_Of => |subexpr| {
+                const subexpr_type = typecheck_expr(t, subexpr);
+                const byte_size = utils.round_to_next_pow2(subexpr_type.size);
+                const bits = utils.count_bits(byte_size);
+
+                const typ = t.ast.create(Ast.Type);
+                typ.* = .{
+                    .line_info = expr.line_info,
+                    .as = .{ .Integer = .{
+                        .bits = bits,
+                        .is_signed = false,
+                    } },
+                    .size = bits,
+                };
+
+                expr.as = .{ .Integer = byte_size };
+
+                break :typ typ;
+            },
+            .Type_Of => |subexpr| {
+                const subexpr_type = typecheck_expr(t, subexpr);
+
+                is_type = true;
+                expr.as = .{ .Type = subexpr_type.* };
+
+                break :typ subexpr_type;
+            },
+            .As => |As| {
+                typecheck_type(t, As.typ);
+                const expr_type = typecheck_expr(t, As.expr);
+                if (!implicit_cast(t, As.expr, expr_type, As.typ)) {
+                    report_error(t, As.expr.line_info, "can't safe cast '{}' to '{}'", .{ expr_type, As.typ });
+                    std.posix.exit(1);
+                }
+                break :typ As.typ;
+            },
             .Cast => |Cast| {
                 typecheck_type(t, Cast.typ);
                 const expr_type = typecheck_expr(t, Cast.expr);

@@ -39,6 +39,12 @@ fn interpret_top_level(interp: *Interp) void {
                     },
                 }
             },
+            .Printbt => {
+                utils.oprint("bool\n", .{});
+            },
+            .Printit => |value| {
+                utils.oprint("{c}{}\n", .{ @as(u8, @intCast(value & 0xFF)), value >> 8 });
+            },
         }
     }
 }

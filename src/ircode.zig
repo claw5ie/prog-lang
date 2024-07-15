@@ -15,11 +15,15 @@ pub const Instr = union(Instr.Tag) {
     Printb: Rvalue,
     Printi: Rvalue,
     Printu: Rvalue,
+    Printbt: void,
+    Printit: u32,
 
     pub const Tag = enum {
         Printb,
         Printi,
         Printu,
+        Printbt,
+        Printit,
     };
 };
 
@@ -65,6 +69,20 @@ fn generate_ir_stmt(irc: *IRC, stmt: *Ast.Stmt) void {
                     } else {
                         generate_ir_instr(irc, .{ .Printu = rvalue });
                     }
+                },
+            }
+        },
+        .Print_Type => |typ| {
+            switch (typ.as) {
+                .Bool => {
+                    generate_ir_instr(irc, .Printbt);
+                },
+                .Integer => |Integer| {
+                    var text: u32 = if (Integer.is_signed) 'i' else 'u';
+
+                    text |= Integer.bits << 8;
+
+                    generate_ir_instr(irc, .{ .Printit = text });
                 },
             }
         },
@@ -156,7 +174,11 @@ fn generate_ir_expr(irc: *IRC, expr: *Ast.Expr) Rvalue {
                 },
             }
         },
-        .Cast => |Cast| {
+        .Bit_Size_Of,
+        .Byte_Size_Of,
+        .Type_Of,
+        => unreachable,
+        .As, .Cast => |Cast| {
             const rvalue = generate_ir_expr(irc, Cast.expr);
 
             switch (Cast.typ.as) {

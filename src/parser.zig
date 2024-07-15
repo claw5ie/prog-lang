@@ -135,6 +135,98 @@ fn parse_expr_base(p: *Parser) *Ast.Expr {
             p.lexer.expect(.Close_Paren);
             return expr;
         },
+        .Bit_Size_Of => {
+            var exprs: [1]*Ast.Expr = undefined;
+            p.lexer.expect(.Open_Paren);
+            const count = parse_fixed_size_expr_list(p, &exprs);
+            p.lexer.expect(.Close_Paren);
+
+            switch (count) {
+                1 => {
+                    const expr = create(p, Ast.Expr);
+                    expr.* = .{
+                        .line_info = token.line_info,
+                        .as = .{ .Bit_Size_Of = exprs[0] },
+                        .typ = null,
+                    };
+                    return expr;
+                },
+                else => {
+                    report_error(p, token.line_info, "expected 1 argument, but got {}", .{count});
+                    std.posix.exit(1);
+                },
+            }
+        },
+        .Byte_Size_Of => {
+            var exprs: [1]*Ast.Expr = undefined;
+            p.lexer.expect(.Open_Paren);
+            const count = parse_fixed_size_expr_list(p, &exprs);
+            p.lexer.expect(.Close_Paren);
+
+            switch (count) {
+                1 => {
+                    const expr = create(p, Ast.Expr);
+                    expr.* = .{
+                        .line_info = token.line_info,
+                        .as = .{ .Byte_Size_Of = exprs[0] },
+                        .typ = null,
+                    };
+                    return expr;
+                },
+                else => {
+                    report_error(p, token.line_info, "expected 1 argument, but got {}", .{count});
+                    std.posix.exit(1);
+                },
+            }
+        },
+        .Type_Of => {
+            var exprs: [1]*Ast.Expr = undefined;
+            p.lexer.expect(.Open_Paren);
+            const count = parse_fixed_size_expr_list(p, &exprs);
+            p.lexer.expect(.Close_Paren);
+
+            switch (count) {
+                1 => {
+                    const expr = create(p, Ast.Expr);
+                    expr.* = .{
+                        .line_info = token.line_info,
+                        .as = .{ .Type_Of = exprs[0] },
+                        .typ = null,
+                    };
+                    return expr;
+                },
+                else => {
+                    report_error(p, token.line_info, "expected 1 argument, but got {}", .{count});
+                    std.posix.exit(1);
+                },
+            }
+        },
+        .As => {
+            var exprs: [2]*Ast.Expr = undefined;
+            p.lexer.expect(.Open_Paren);
+            const count = parse_fixed_size_expr_list(p, &exprs);
+            p.lexer.expect(.Close_Paren);
+
+            switch (count) {
+                2 => {
+                    const typ = expr_to_type(p, exprs[0]);
+                    const expr = create(p, Ast.Expr);
+                    expr.* = .{
+                        .line_info = token.line_info,
+                        .as = .{ .As = .{
+                            .typ = typ,
+                            .expr = exprs[1],
+                        } },
+                        .typ = null,
+                    };
+                    return expr;
+                },
+                else => {
+                    report_error(p, token.line_info, "expected 2 arguments, but got {}", .{count});
+                    std.posix.exit(1);
+                },
+            }
+        },
         .Cast => {
             var exprs: [2]*Ast.Expr = undefined;
             p.lexer.expect(.Open_Paren);
