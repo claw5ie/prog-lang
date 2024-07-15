@@ -36,6 +36,7 @@ fn typecheck_top_level(t: *Typechecker) void {
 
 fn implicit_cast_to_integer(t: *Typechecker, expr: *Ast.Expr, expr_type: *Ast.Type, what_sign: Sign) ?*Ast.Type {
     var casted: ?*Ast.Type = null;
+    var should_cast = false;
 
     switch (expr_type.*) {
         .Bool => {},
@@ -53,12 +54,13 @@ fn implicit_cast_to_integer(t: *Typechecker, expr: *Ast.Expr, expr_type: *Ast.Ty
                         const typ = t.ast.create(Ast.Type);
                         typ.* = .{
                             .Integer = .{
-                                .line_info = undefined, // TODO: set line info.
+                                .line_info = expr.line_info,
                                 .bits = Integer.bits + 1,
                                 .is_signed = true,
                             },
                         };
                         casted = typ;
+                        should_cast = true;
                     }
                 },
                 .Both => {
@@ -68,7 +70,8 @@ fn implicit_cast_to_integer(t: *Typechecker, expr: *Ast.Expr, expr_type: *Ast.Ty
         },
     }
 
-    if (casted) |typ| {
+    if (should_cast) {
+        const typ = casted.?;
         const inner = t.ast.create(Ast.Expr);
         inner.* = expr.*;
         expr.* = .{
@@ -86,6 +89,7 @@ fn implicit_cast_to_integer(t: *Typechecker, expr: *Ast.Expr, expr_type: *Ast.Ty
 
 fn implicit_cast(t: *Typechecker, expr: *Ast.Expr, expr_type: *Ast.Type, cast_to_type: *Ast.Type) ?*Ast.Type {
     var casted: ?*Ast.Type = null;
+    var should_cast = false;
 
     switch (cast_to_type.*) {
         .Bool => {
@@ -103,10 +107,12 @@ fn implicit_cast(t: *Typechecker, expr: *Ast.Expr, expr_type: *Ast.Type, cast_to
                     if (dInteger.is_signed == sInteger.is_signed) {
                         if (dInteger.bits >= sInteger.bits) {
                             casted = cast_to_type;
+                            should_cast = dInteger.bits != sInteger.bits;
                         }
                     } else if (dInteger.is_signed) {
                         if (dInteger.bits > sInteger.bits) {
                             casted = cast_to_type;
+                            should_cast = true;
                         }
                     }
                 },
@@ -114,7 +120,8 @@ fn implicit_cast(t: *Typechecker, expr: *Ast.Expr, expr_type: *Ast.Type, cast_to
         },
     }
 
-    if (casted) |typ| {
+    if (should_cast) {
+        const typ = casted.?;
         const inner = t.ast.create(Ast.Expr);
         inner.* = expr.*;
         expr.* = .{
@@ -288,7 +295,7 @@ fn typecheck_expr(t: *Typechecker, expr: *Ast.Expr) *Ast.Type {
 
                 switch (Unary_Op.tag) {
                     .Plus => {
-                        const casted = implicit_cast_to_integer(t, Unary_Op.subexpr, subexpr_type, .Signed);
+                        const casted = implicit_cast_to_integer(t, Unary_Op.subexpr, subexpr_type, .Both);
 
                         if (casted == null) {
                             report_error(t, expr.line_info, "expected integer type, but got '{}'", .{subexpr_type});
