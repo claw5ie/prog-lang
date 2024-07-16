@@ -94,56 +94,6 @@ fn implicit_cast_to_integer(t: *Typechecker, expr: *Ast.Expr, expr_type: *Ast.Ty
     return casted;
 }
 
-fn implicit_cast(t: *Typechecker, expr: *Ast.Expr, expr_type: *Ast.Type, cast_to_type: *Ast.Type) bool {
-    if (expr_type.equal(cast_to_type)) {
-        return true;
-    }
-
-    var casted: ?*Ast.Type = null;
-
-    switch (cast_to_type.as) {
-        .Bool => {
-            switch (expr_type.as) {
-                .Bool => {
-                    casted = cast_to_type;
-                },
-                .Integer => {},
-            }
-        },
-        .Integer => |dInteger| {
-            switch (expr_type.as) {
-                .Bool => {},
-                .Integer => |sInteger| {
-                    if (dInteger.is_signed == sInteger.is_signed) {
-                        if (dInteger.bits >= sInteger.bits) {
-                            casted = cast_to_type;
-                        }
-                    } else if (dInteger.is_signed) {
-                        if (dInteger.bits > sInteger.bits) {
-                            casted = cast_to_type;
-                        }
-                    }
-                },
-            }
-        },
-    }
-
-    if (casted) |typ| {
-        const inner = t.ast.create(Ast.Expr);
-        inner.* = expr.*;
-        expr.* = .{
-            .line_info = inner.line_info,
-            .as = .{ .Cast = .{
-                .typ = typ,
-                .expr = inner,
-            } },
-            .typ = typ,
-        };
-    }
-
-    return casted != null;
-}
-
 fn implicit_cast_two_integers(t: *Typechecker, lhs: *Ast.Expr, lhs_type: *Ast.Type, rhs: *Ast.Expr, rhs_type: *Ast.Type) ?*Ast.Type {
     const WhichSideToCast = enum {
         None,
@@ -235,6 +185,56 @@ fn implicit_cast_two_integers(t: *Typechecker, lhs: *Ast.Expr, lhs_type: *Ast.Ty
     return casted;
 }
 
+fn implicit_cast(t: *Typechecker, expr: *Ast.Expr, expr_type: *Ast.Type, cast_to_type: *Ast.Type) bool {
+    if (expr_type.equal(cast_to_type)) {
+        return true;
+    }
+
+    var casted: ?*Ast.Type = null;
+
+    switch (cast_to_type.as) {
+        .Bool => {
+            switch (expr_type.as) {
+                .Bool => {
+                    casted = cast_to_type;
+                },
+                .Integer => {},
+            }
+        },
+        .Integer => |dInteger| {
+            switch (expr_type.as) {
+                .Bool => {},
+                .Integer => |sInteger| {
+                    if (dInteger.is_signed == sInteger.is_signed) {
+                        if (dInteger.bits >= sInteger.bits) {
+                            casted = cast_to_type;
+                        }
+                    } else if (dInteger.is_signed) {
+                        if (dInteger.bits > sInteger.bits) {
+                            casted = cast_to_type;
+                        }
+                    }
+                },
+            }
+        },
+    }
+
+    if (casted) |typ| {
+        const inner = t.ast.create(Ast.Expr);
+        inner.* = expr.*;
+        expr.* = .{
+            .line_info = inner.line_info,
+            .as = .{ .Cast = .{
+                .typ = typ,
+                .expr = inner,
+            } },
+            .typ = typ,
+        };
+    }
+
+    return casted != null;
+}
+
 fn cast(t: *Typechecker, expr: *Ast.Expr, expr_type: *Ast.Type, cast_to_type: *Ast.Type) bool {
     if (expr_type.equal(cast_to_type)) {
         return true;
@@ -271,7 +271,7 @@ fn cast(t: *Typechecker, expr: *Ast.Expr, expr_type: *Ast.Type, cast_to_type: *A
 fn typecheck_stmt(t: *Typechecker, stmt: *Ast.Stmt) void {
     switch (stmt.*) {
         .Print => |expr| {
-            const expr_result = typecheck_expr_rec(t, expr);
+            const expr_result = typecheck_expr(t, expr);
 
             if (expr_result.is_type) {
                 stmt.* = .{ .Print_Type = expr_result.typ };
@@ -279,13 +279,13 @@ fn typecheck_stmt(t: *Typechecker, stmt: *Ast.Stmt) void {
         },
         .Print_Type => unreachable,
         .Expr => |expr| {
-            _ = typecheck_expr(t, expr);
+            _ = typecheck_expr_only(t, expr);
         },
     }
 }
 
-fn typecheck_expr(t: *Typechecker, expr: *Ast.Expr) *Ast.Type {
-    const result = typecheck_expr_rec(t, expr);
+fn typecheck_expr_only(t: *Typechecker, expr: *Ast.Expr) *Ast.Type {
+    const result = typecheck_expr(t, expr);
     if (result.is_type) {
         report_error(t, expr.line_info, "unexpected type", .{});
         std.posix.exit(1);
@@ -293,13 +293,13 @@ fn typecheck_expr(t: *Typechecker, expr: *Ast.Expr) *Ast.Type {
     return result.typ;
 }
 
-fn typecheck_expr_rec(t: *Typechecker, expr: *Ast.Expr) TypecheckExprResult {
+fn typecheck_expr(t: *Typechecker, expr: *Ast.Expr) TypecheckExprResult {
     var is_type = false;
     const typ: *Ast.Type = typ: {
         switch (expr.as) {
             .Binary_Op => |Binary_Op| {
-                const lhs_type = typecheck_expr(t, Binary_Op.lhs);
-                const rhs_type = typecheck_expr(t, Binary_Op.rhs);
+                const lhs_type = typecheck_expr_only(t, Binary_Op.lhs);
+                const rhs_type = typecheck_expr_only(t, Binary_Op.rhs);
 
                 switch (Binary_Op.tag) {
                     .Or, .And => {
@@ -347,7 +347,7 @@ fn typecheck_expr_rec(t: *Typechecker, expr: *Ast.Expr) TypecheckExprResult {
                 }
             },
             .Unary_Op => |Unary_Op| {
-                const subexpr_type = typecheck_expr(t, Unary_Op.subexpr);
+                const subexpr_type = typecheck_expr_only(t, Unary_Op.subexpr);
 
                 switch (Unary_Op.tag) {
                     .Plus => {
@@ -380,7 +380,7 @@ fn typecheck_expr_rec(t: *Typechecker, expr: *Ast.Expr) TypecheckExprResult {
                 }
             },
             .Call => |Call| {
-                const subexpr_result = typecheck_expr_rec(t, Call.subexpr);
+                const subexpr_result = typecheck_expr(t, Call.subexpr);
 
                 if (subexpr_result.is_type) {
                     typecheck_type(t, subexpr_result.typ);
@@ -393,7 +393,7 @@ fn typecheck_expr_rec(t: *Typechecker, expr: *Ast.Expr) TypecheckExprResult {
                             }
 
                             const arg = Call.args.first.?.data;
-                            const arg_type = typecheck_expr(t, arg);
+                            const arg_type = typecheck_expr_only(t, arg);
 
                             if (!implicit_cast(t, arg, arg_type, subexpr_result.typ)) {
                                 report_error(t, arg.line_info, "expected '{}', but got '{}'", .{ subexpr_result.typ, arg_type });
@@ -416,7 +416,7 @@ fn typecheck_expr_rec(t: *Typechecker, expr: *Ast.Expr) TypecheckExprResult {
             },
             .Constructor => unreachable,
             .Bit_Size_Of => |subexpr| {
-                const subexpr_type = typecheck_expr(t, subexpr);
+                const subexpr_type = typecheck_expr_only(t, subexpr);
                 const bits = utils.count_bits(subexpr_type.size);
 
                 const typ = t.ast.create(Ast.Type);
@@ -434,7 +434,7 @@ fn typecheck_expr_rec(t: *Typechecker, expr: *Ast.Expr) TypecheckExprResult {
                 break :typ typ;
             },
             .Byte_Size_Of => |subexpr| {
-                const subexpr_type = typecheck_expr(t, subexpr);
+                const subexpr_type = typecheck_expr_only(t, subexpr);
                 const byte_size = utils.round_to_next_pow2(subexpr_type.size);
                 const bits = utils.count_bits(byte_size);
 
@@ -453,7 +453,7 @@ fn typecheck_expr_rec(t: *Typechecker, expr: *Ast.Expr) TypecheckExprResult {
                 break :typ typ;
             },
             .Type_Of => |subexpr| {
-                const subexpr_type = typecheck_expr(t, subexpr);
+                const subexpr_type = typecheck_expr_only(t, subexpr);
 
                 is_type = true;
                 expr.as = .{ .Type = subexpr_type.* };
@@ -462,7 +462,7 @@ fn typecheck_expr_rec(t: *Typechecker, expr: *Ast.Expr) TypecheckExprResult {
             },
             .As => |As| {
                 typecheck_type(t, As.typ);
-                const expr_type = typecheck_expr(t, As.expr);
+                const expr_type = typecheck_expr_only(t, As.expr);
                 if (!implicit_cast(t, As.expr, expr_type, As.typ)) {
                     report_error(t, As.expr.line_info, "can't safe cast '{}' to '{}'", .{ expr_type, As.typ });
                     std.posix.exit(1);
@@ -471,7 +471,7 @@ fn typecheck_expr_rec(t: *Typechecker, expr: *Ast.Expr) TypecheckExprResult {
             },
             .Cast => |Cast| {
                 typecheck_type(t, Cast.typ);
-                const expr_type = typecheck_expr(t, Cast.expr);
+                const expr_type = typecheck_expr_only(t, Cast.expr);
                 if (!cast(t, Cast.expr, expr_type, Cast.typ)) {
                     report_error(t, Cast.expr.line_info, "can't cast '{}' to '{}'", .{ expr_type, Cast.typ });
                     std.posix.exit(1);
