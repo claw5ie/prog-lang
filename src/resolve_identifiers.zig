@@ -3,12 +3,12 @@ const common = @import("common.zig");
 const Ast = @import("ast.zig");
 
 fn extract_type(ast: *Ast, expr: Ast.Expr) *Ast.Type {
-    var ok = Ast.extract_type(ast.ast_arena.allocator(), expr);
+    const ok = Ast.extract_type(ast.ast_arena.allocator(), expr);
     if (ok) |_type| {
         return _type;
     } else {
         common.print_error(ast.filepath, expr.line_info, "expression doesn't look like a type.", .{});
-        std.os.exit(1);
+        std.posix.exit(1);
     }
 }
 
@@ -21,7 +21,7 @@ fn find_symbol(ast: *Ast, id: Ast.Identifier, is_type: *bool) *Ast.Symbol {
     };
 
     while (true) {
-        var found_symbol = ast.symbols.get(key);
+        const found_symbol = ast.symbols.get(key);
 
         if (found_symbol) |symbol| {
             if (is_symbol_a_type(ast, symbol)) {
@@ -43,7 +43,7 @@ fn find_symbol(ast: *Ast, id: Ast.Identifier, is_type: *bool) *Ast.Symbol {
     }
 
     common.print_error(ast.filepath, id.token.line_info, "'{s}' is not defined.", .{id.token.text});
-    std.os.exit(1);
+    std.posix.exit(1);
 }
 
 fn is_expr_a_type(ast: *Ast, expr: *Ast.Expr) bool {
@@ -53,7 +53,7 @@ fn is_expr_a_type(ast: *Ast, expr: *Ast.Expr) bool {
         },
         .Identifier => |ident| {
             var is_type = false;
-            var symbol = find_symbol(ast, ident, &is_type);
+            const symbol = find_symbol(ast, ident, &is_type);
             if (is_type) {
                 expr.payload = .{ .Type = symbol.payload.Type };
             } else {
@@ -73,19 +73,19 @@ fn is_symbol_a_type(ast: *Ast, symbol: *Ast.Symbol) bool {
         .Definition => |*definition| {
             if (definition.was_visited) {
                 common.print_error(ast.filepath, symbol.line_info, "cyclic reference detected.", .{});
-                std.os.exit(1);
+                std.posix.exit(1);
             }
 
             definition.was_visited = true;
 
             if (is_expr_a_type(ast, definition.expr)) {
-                var subtype = definition.expr.payload.Type;
+                const subtype = definition.expr.payload.Type;
                 if (subtype.symbol == null)
                     subtype.symbol = symbol;
                 symbol.payload = .{ .Type = subtype };
                 return true;
             } else {
-                var expr = definition.expr;
+                const expr = definition.expr;
                 symbol.payload = .{ .Variable = .{
                     ._type = null,
                     .expr = expr,
@@ -111,7 +111,7 @@ pub fn resolve(ast: *Ast) void {
     }
 
     var is_type = false;
-    var symbol = find_symbol(ast, .{
+    const symbol = find_symbol(ast, .{
         .token = .{
             .tag = .Identifier,
             .text = "main",
@@ -154,7 +154,7 @@ fn resolve_symbol(ast: *Ast, symbol: *Ast.Symbol) void {
 }
 
 fn resolve_type(ast: *Ast, type_ptr: **Ast.Type) void {
-    var _type = type_ptr.*;
+    const _type = type_ptr.*;
 
     if (_type.is_resolved) {
         return;
@@ -199,13 +199,13 @@ fn resolve_type(ast: *Ast, type_ptr: **Ast.Type) void {
         .Void, .Bool, .Int64 => {},
         .Identifier => |ident| {
             var is_type = false;
-            var symbol = find_symbol(ast, ident, &is_type);
+            const symbol = find_symbol(ast, ident, &is_type);
 
             if (is_type) {
                 type_ptr.* = symbol.payload.Type;
             } else {
                 common.print_error(ast.filepath, ident.token.line_info, "'{s}' is not a type.", .{ident.token.text});
-                std.os.exit(1);
+                std.posix.exit(1);
             }
         },
     }
@@ -253,7 +253,7 @@ fn resolve_stmt(ast: *Ast, stmt: *Ast.Stmt) void {
             resolve_symbol(ast, symbol);
 
             if (symbol.payload == .Function) {
-                var node = ast.create(Ast.SymbolList.Node);
+                const node = ast.create(Ast.SymbolList.Node);
                 node.* = .{
                     .payload = symbol,
                 };
@@ -300,7 +300,7 @@ fn resolve_expr(ast: *Ast, expr: *Ast.Expr) void {
             resolve_expr(ast, field.lhs);
 
             if (field.lhs.payload == .Type) {
-                var _type = field.lhs.payload.Type;
+                const _type = field.lhs.payload.Type;
                 expr.payload = .{ .Enum_Field_From_Type = .{
                     ._type = _type,
                     .id = field.id,
@@ -329,7 +329,7 @@ fn resolve_expr(ast: *Ast, expr: *Ast.Expr) void {
         .Cast1 => |subexpr| {
             if (is_expr_a_type(ast, subexpr)) {
                 common.print_error(ast.filepath, subexpr.line_info, "expected expression, not a type.", .{});
-                std.os.exit(1);
+                std.posix.exit(1);
             }
 
             resolve_expr(ast, subexpr);
@@ -347,7 +347,7 @@ fn resolve_expr(ast: *Ast, expr: *Ast.Expr) void {
         .Symbol => {},
         .Identifier => |ident| {
             var is_type = false;
-            var symbol = find_symbol(ast, ident, &is_type);
+            const symbol = find_symbol(ast, ident, &is_type);
 
             if (is_type) {
                 std.debug.assert(symbol.payload.Type.symbol != null);

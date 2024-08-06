@@ -115,7 +115,7 @@ pub const Type = struct {
 
                 var it = function.params.iterator();
                 while (it.next()) |param_ptr| {
-                    var param = &param_ptr.*.payload.Parameter;
+                    const param = &param_ptr.*.payload.Parameter;
                     if (param.has_id) {
                         try writer.print("{s}: ", .{param_ptr.*.key.text});
                     }
@@ -180,23 +180,23 @@ pub const Type = struct {
 
         switch (self.payload) {
             .Struct => {
-                var sstruct = &self.payload.Struct;
-                var ostruct = &other.payload.Struct;
+                const sstruct = &self.payload.Struct;
+                const ostruct = &other.payload.Struct;
                 return sstruct.scope == ostruct.scope;
             },
             .Union => {
-                var sstruct = &self.payload.Union;
-                var ostruct = &other.payload.Union;
+                const sstruct = &self.payload.Union;
+                const ostruct = &other.payload.Union;
                 return sstruct.scope == ostruct.scope;
             },
             .Enum => {
-                var sstruct = &self.payload.Enum;
-                var ostruct = &other.payload.Enum;
+                const sstruct = &self.payload.Enum;
+                const ostruct = &other.payload.Enum;
                 return sstruct.scope == ostruct.scope;
             },
             .Function => {
-                var sfunc = &self.payload.Function;
-                var ofunc = &other.payload.Function;
+                const sfunc = &self.payload.Function;
+                const ofunc = &other.payload.Function;
 
                 if (sfunc.params.count != ofunc.params.count) {
                     return false;
@@ -205,35 +205,35 @@ pub const Type = struct {
                 var sit = sfunc.params.iterator();
                 var oit = ofunc.params.iterator();
                 while (sit.next()) |sparam| {
-                    var oparam = oit.next().?;
-                    var otype = oparam.*.payload.Parameter._type;
-                    var stype = sparam.*.payload.Parameter._type;
+                    const oparam = oit.next().?;
+                    const otype = oparam.*.payload.Parameter._type;
+                    const stype = sparam.*.payload.Parameter._type;
                     if (!stype.eql(otype)) {
                         return false;
                     }
                 }
 
-                var sreturn_type = sfunc.return_type;
-                var oreturn_type = ofunc.return_type;
+                const sreturn_type = sfunc.return_type;
+                const oreturn_type = ofunc.return_type;
 
                 return sreturn_type.eql(oreturn_type);
             },
             .Array => {
-                var sarray = &self.payload.Array;
-                var oarray = &other.payload.Array;
+                const sarray = &self.payload.Array;
+                const oarray = &other.payload.Array;
 
                 if (sarray.count != oarray.count) {
                     return false;
                 }
 
-                var ssubtype = sarray.subtype;
-                var osubtype = oarray.subtype;
+                const ssubtype = sarray.subtype;
+                const osubtype = oarray.subtype;
 
                 return ssubtype.eql(osubtype);
             },
             .Pointer => {
-                var stype = self.payload.Pointer;
-                var otype = other.payload.Pointer;
+                const stype = self.payload.Pointer;
+                const otype = other.payload.Pointer;
 
                 if (stype.payload == .Void or otype.payload == .Void) {
                     return true;
@@ -486,8 +486,8 @@ pub const SymbolTableContext = struct {
     pub fn hash(_: SymbolTableContext, key: SymbolKey) u64 {
         const MurMur = std.hash.Murmur2_64;
 
-        var h0 = MurMur.hash(key.text);
-        var h1 = MurMur.hashUint64(@intFromPtr(key.scope));
+        const h0 = MurMur.hash(key.text);
+        const h1 = MurMur.hashUint64(@intFromPtr(key.scope));
 
         return h0 +% 33 *% h1;
     }
@@ -501,7 +501,7 @@ pub const SymbolTable = std.HashMap(SymbolKey, *Symbol, SymbolTableContext, 80);
 
 pub fn create(ast: *This, comptime T: type) *T {
     return ast.ast_arena.allocator().create(T) catch {
-        std.os.exit(1);
+        std.posix.exit(1);
     };
 }
 
@@ -511,8 +511,8 @@ pub fn extract_type(allocator: Allocator, expr: Expr) ?*Type {
             return _type;
         },
         .Identifier => |id| {
-            var _type = allocator.create(Type) catch {
-                std.os.exit(1);
+            const _type = allocator.create(Type) catch {
+                std.posix.exit(1);
             };
             _type.* = .{
                 .payload = .{ .Identifier = id },

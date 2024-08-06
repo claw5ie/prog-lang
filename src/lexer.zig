@@ -84,9 +84,9 @@ pub const Token = struct {
 };
 
 pub fn init(filepath: []const u8) This {
-    var source_code = utils.read_entire_file(common.gpa, filepath) catch {
+    const source_code = utils.read_entire_file(common.gpa, filepath) catch {
         std.debug.print("error: failed to read file '{s}'.\n", .{filepath});
-        std.os.exit(1);
+        std.posix.exit(1);
     };
 
     return .{
@@ -139,9 +139,9 @@ pub fn peek_ahead(l: *This, index: u8) TokenTag {
 
 pub fn expect(l: *This, expected: TokenTag) void {
     if (l.peek() != expected) {
-        var token = l.grab();
+        const token = l.grab();
         common.print_error(l.filepath, token.line_info, "expected {s}, but got {s}.", .{ token_tag_to_text(expected), token_tag_to_text(token.tag) });
-        std.os.exit(1);
+        std.posix.exit(1);
     }
     l.advance();
 }
@@ -285,12 +285,12 @@ fn buffer_token(l: *This) void {
 
         if (!found_symbol) {
             common.print_error(l.filepath, token.line_info, "unrecognized character '{c}'.\n", .{text[i]});
-            std.os.exit(1);
+            std.posix.exit(1);
         }
     }
 
     std.debug.assert(l.token_count < LOOKAHEAD);
-    var index = (l.token_start + l.token_count) % LOOKAHEAD;
+    const index = (l.token_start + l.token_count) % LOOKAHEAD;
     l.tokens[index] = token;
     l.token_count += 1;
 }

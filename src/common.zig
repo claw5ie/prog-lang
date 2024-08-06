@@ -13,12 +13,12 @@ pub const LineInfo = struct {
 
 pub fn print_error(filepath: []const u8, line_info: LineInfo, comptime format: []const u8, args: anytype) void {
     stderr.print("{s}:{}:{}: error: " ++ format ++ "\n", .{ filepath, line_info.line, line_info.column } ++ args) catch {
-        std.os.exit(1);
+        std.posix.exit(1);
     };
 }
 
 pub fn print_note(filepath: []const u8, line_info: LineInfo, comptime format: []const u8, args: anytype) void {
     stderr.print("{s}:{}:{}: note: " ++ format ++ "\n", .{ filepath, line_info.line, line_info.column } ++ args) catch {
-        std.os.exit(1);
+        std.posix.exit(1);
     };
 }

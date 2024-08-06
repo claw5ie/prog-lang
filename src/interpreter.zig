@@ -14,8 +14,8 @@ inline fn cast_ptr(comptime dst: type, src: anytype) dst {
 }
 
 pub fn interpret(ir: *Ir) void {
-    var stack = common.gpa.alloc(u8, 2 * 1024 * 1024) catch {
-        std.os.exit(1);
+    const stack = common.gpa.alloc(u8, 2 * 1024 * 1024) catch {
+        std.posix.exit(1);
     };
     defer common.gpa.free(stack);
 
@@ -25,8 +25,8 @@ pub fn interpret(ir: *Ir) void {
     };
     var interp = &interpreter;
 
-    var labels = common.gpa.alloc(u64, ir.next_label) catch {
-        std.os.exit(1);
+    const labels = common.gpa.alloc(u64, ir.next_label) catch {
+        std.posix.exit(1);
     };
     defer common.gpa.free(labels);
 
@@ -56,9 +56,9 @@ pub fn interpret(ir: *Ir) void {
     while (ip < ir.instrs.items.len) {
         switch (ir.instrs.items[ip]) {
             .Binary_Op => |op| {
-                var dst = grab_pointer_from_lvalue(interp, op.dst);
+                const dst = grab_pointer_from_lvalue(interp, op.dst);
                 var src0 = grab_value_from_rvalue(interp, op.src0);
-                var src1 = grab_value_from_rvalue(interp, op.src1);
+                const src1 = grab_value_from_rvalue(interp, op.src1);
 
                 switch (op.tag) {
                     .Or => src0 = @intFromBool((src0 != 0) or (src1 != 0)),
@@ -79,7 +79,7 @@ pub fn interpret(ir: *Ir) void {
                 stack_write_u64(interp, dst, src0);
             },
             .Unary_Op => |op| {
-                var dst = grab_pointer_from_lvalue(interp, op.dst);
+                const dst = grab_pointer_from_lvalue(interp, op.dst);
                 var src = grab_value_from_rvalue(interp, op.src);
 
                 switch (op.tag) {
@@ -91,7 +91,7 @@ pub fn interpret(ir: *Ir) void {
             },
             .Jmpc => |jmpc| {
                 var src0 = grab_value_from_rvalue(interp, jmpc.src0);
-                var src1 = grab_value_from_rvalue(interp, jmpc.src1);
+                const src1 = grab_value_from_rvalue(interp, jmpc.src1);
 
                 switch (jmpc.tag) {
                     .Eq => src0 = @intFromBool(src0 == src1),
@@ -110,12 +110,12 @@ pub fn interpret(ir: *Ir) void {
             .Instr => |instr| {
                 switch (instr) {
                     .Print => |tmp| {
-                        var src: i64 = @bitCast(grab_value_from_rvalue(interp, tmp));
+                        const src: i64 = @bitCast(grab_value_from_rvalue(interp, tmp));
                         std.debug.print("{}\n", .{src});
                     },
                     .Mov => |mov| {
-                        var dst = grab_pointer_from_lvalue(interp, mov.dst);
-                        var src = grab_value_from_rvalue(interp, mov.src);
+                        const dst = grab_pointer_from_lvalue(interp, mov.dst);
+                        const src = grab_value_from_rvalue(interp, mov.src);
 
                         stack_write_u64(interp, dst, src);
                     },
@@ -133,7 +133,7 @@ pub fn interpret(ir: *Ir) void {
                         stack_push(interp, rbp);
                     },
                     .Push => |src| {
-                        var value = grab_value_from_rvalue(interp, src);
+                        const value = grab_value_from_rvalue(interp, src);
                         stack_push(interp, value);
                     },
                     .Pop => |count| {
@@ -143,7 +143,7 @@ pub fn interpret(ir: *Ir) void {
                         stack_push(interp, ip);
                         stack_push(interp, interp.rbp);
 
-                        var label = grab_value_from_rvalue(interp, src);
+                        const label = grab_value_from_rvalue(interp, src);
                         ip = labels[label];
                         continue;
                     },
@@ -186,7 +186,7 @@ fn grab_pointer_from_tmp(interp: *This, tmp: Ir.Tmp) u64 {
                 rbp = stack_read_u64(interp, rbp - -Ir.LF_RBP_OFFSET);
             }
 
-            var rbp_i64: i64 = @bitCast(rbp);
+            const rbp_i64: i64 = @bitCast(rbp);
             return @bitCast(rbp_i64 + tmp.offset);
         },
     }
@@ -196,7 +196,7 @@ fn grab_pointer_from_address(interp: *This, address: Ir.Mem) u64 {
     var offset: i64 = 0;
 
     if (address.choose & 0x1 == 0x1) {
-        var base: i64 = @bitCast(grab_value_from_tmp(interp, address.base));
+        const base: i64 = @bitCast(grab_value_from_tmp(interp, address.base));
         offset += base;
     }
 
@@ -215,14 +215,14 @@ fn grab_pointer_from_lvalue(interp: *This, lvalue: Ir.Lvalue) u64 {
 }
 
 fn grab_value_from_tmp(interp: *This, tmp: Ir.Tmp) u64 {
-    var pointer = grab_pointer_from_tmp(interp, tmp);
+    const pointer = grab_pointer_from_tmp(interp, tmp);
     return stack_read_u64(interp, pointer);
 }
 
 fn grab_value_from_rvalue(interp: *This, rvalue: Ir.Rvalue) u64 {
     switch (rvalue) {
         .Lvalue => |lvalue| {
-            var pointer = grab_pointer_from_lvalue(interp, lvalue);
+            const pointer = grab_pointer_from_lvalue(interp, lvalue);
             return stack_read_u64(interp, pointer);
         },
         .Addr => |lvalue| return grab_pointer_from_lvalue(interp, lvalue),
@@ -234,10 +234,10 @@ fn grab_value_from_rvalue(interp: *This, rvalue: Ir.Rvalue) u64 {
 fn stack_read_u64(interp: *This, pointer: u64) u64 {
     if (pointer < 8) {
         std.debug.print("error: null pointer access (0x{x}).\n", .{pointer});
-        std.os.exit(1);
+        std.posix.exit(1);
     } else if (pointer + 8 > interp.rsp) {
         std.debug.print("error: address 0x{x} is outside of current stack pointer (0x{x}).\n", .{ pointer, interp.rsp });
-        std.os.exit(1);
+        std.posix.exit(1);
     }
     return stack_read_u64_no_check(interp, pointer);
 }
@@ -249,10 +249,10 @@ inline fn stack_read_u64_no_check(interp: *This, pointer: u64) u64 {
 fn stack_write_u64(interp: *This, pointer: u64, value: u64) void {
     if (pointer < 8) {
         std.debug.print("error: null pointer access (0x{x}).\n", .{pointer});
-        std.os.exit(1);
+        std.posix.exit(1);
     } else if (pointer + 8 > interp.rsp) {
         std.debug.print("error: address 0x{x} is outside of current stack pointer (0x{x}).\n", .{ pointer, interp.rsp });
-        std.os.exit(1);
+        std.posix.exit(1);
     }
     stack_write_u64_no_check(interp, pointer, value);
 }

@@ -24,7 +24,7 @@ pub const TmpTag = enum {
     Local,
 };
 
-pub const Tmp = packed struct {
+pub const Tmp = struct {
     offset: Offset,
     tag: TmpTag,
     height: Ast.FunctionDepth,
@@ -76,7 +76,7 @@ pub const Rvalue = union(RvalueTag) {
                         } };
                     },
                     .Mem => {
-                        var dst_tmp = ir.grab_local();
+                        const dst_tmp = ir.grab_local();
 
                         generate_instr(ir, .{ .Instr = .{
                             .Mov = .{
@@ -236,7 +236,7 @@ pub const StmtContext = struct {
 };
 
 pub fn grab_global(ir: *This) Tmp {
-    var offset = ir.next_global;
+    const offset = ir.next_global;
     ir.next_global += 8;
     return .{
         .offset = offset,
@@ -246,7 +246,7 @@ pub fn grab_global(ir: *This) Tmp {
 }
 
 pub fn grab_local(ir: *This) Tmp {
-    var offset = ir.next_local;
+    const offset = ir.next_local;
     ir.next_local += 8;
 
     if (ir.biggest_local_so_far < ir.next_local) {
@@ -261,14 +261,14 @@ pub fn grab_local(ir: *This) Tmp {
 }
 
 pub fn grab_label(ir: *This) Label {
-    var result = ir.next_label;
+    const result = ir.next_label;
     ir.next_label += 1;
     return result;
 }
 
 fn generate_instr(ir: *This, instr: Instr) void {
     ir.instrs.append(instr) catch {
-        std.os.exit(1);
+        std.posix.exit(1);
     };
 }
 
@@ -349,18 +349,18 @@ fn generate_function(ir: *This, function: *const Ast.SymbolFunction, first_arg_o
         };
         var it = function._type.payload.Function.params.iterator();
         while (it.next()) |param_ptr| {
-            var param = &param_ptr.*.payload.Parameter;
+            const param = &param_ptr.*.payload.Parameter;
             param.tmp = param_tmp;
             param_tmp.offset -= 8;
         }
     }
 
     {
-        var old_depth = ir.function_depth;
+        const old_depth = ir.function_depth;
         ir.function_depth = function.depth;
 
-        var function_end_label = ir.grab_label();
-        var index = ir.instrs.items.len;
+        const function_end_label = ir.grab_label();
+        const index = ir.instrs.items.len;
         generate_instr(ir, undefined);
 
         {
@@ -377,7 +377,7 @@ fn generate_function(ir: *This, function: *const Ast.SymbolFunction, first_arg_o
         }
 
         {
-            var stack_space_used: u32 = @intCast(ir.biggest_local_so_far);
+            const stack_space_used: u32 = @intCast(ir.biggest_local_so_far);
             ir.instrs.items[index] = .{ .Meta = .{
                 .GFB = .{
                     .stack_space_used = stack_space_used,
@@ -400,12 +400,12 @@ fn generate_function(ir: *This, function: *const Ast.SymbolFunction, first_arg_o
 }
 
 fn generate_stmt(ir: *This, ctx: *const StmtContext, stmt: *Ast.Stmt) void {
-    var old_next_local = ir.next_local;
+    const old_next_local = ir.next_local;
     var should_clean_locals = true;
 
     switch (stmt.payload) {
         .Print => |expr| {
-            var src_tmp = ir.grab_local();
+            const src_tmp = ir.grab_local();
             generate_rvalue(ir, expr, src_tmp.as_lvalue());
             generate_instr(ir, .{ .Instr = .{
                 .Print = src_tmp.as_rvalue(),
@@ -418,8 +418,8 @@ fn generate_stmt(ir: *This, ctx: *const StmtContext, stmt: *Ast.Stmt) void {
             }
         },
         .If => |_if| {
-            var false_label = ir.grab_label();
-            var end_label = ir.grab_label();
+            const false_label = ir.grab_label();
+            const end_label = ir.grab_label();
 
             generate_jump(ir, _if.cond, false, false_label);
             generate_stmt(ir, ctx, _if.if_true);
@@ -435,9 +435,9 @@ fn generate_stmt(ir: *This, ctx: *const StmtContext, stmt: *Ast.Stmt) void {
             } });
         },
         .While => |_while| {
-            var block_label = ir.grab_label();
-            var cond_label = ir.grab_label();
-            var end_label = ir.grab_label();
+            const block_label = ir.grab_label();
+            const cond_label = ir.grab_label();
+            const end_label = ir.grab_label();
 
             if (!_while.is_do_while) {
                 generate_instr(ir, .{ .Instr = .{
@@ -470,19 +470,19 @@ fn generate_stmt(ir: *This, ctx: *const StmtContext, stmt: *Ast.Stmt) void {
             } });
         },
         .Switch => |_switch| {
-            var cond_tmp = ir.grab_local();
+            const cond_tmp = ir.grab_local();
             generate_rvalue(ir, _switch.cond, cond_tmp.as_lvalue());
-            var end_label = ir.grab_label();
+            const end_label = ir.grab_label();
 
             var it = _switch.cases.iterator();
             while (it.next()) |top_level_case| {
-                var case_beg_label = ir.grab_label();
-                var case_end_label = ir.grab_label();
+                const case_beg_label = ir.grab_label();
+                const case_end_label = ir.grab_label();
 
                 var substmt = top_level_case;
                 while (true) {
-                    var case = &substmt.payload.Case;
-                    var case_tmp = ir.grab_local();
+                    const case = &substmt.payload.Case;
+                    const case_tmp = ir.grab_local();
                     generate_rvalue(ir, case.expr, case_tmp.as_lvalue());
 
                     generate_instr(ir, .{ .Jmpc = .{
@@ -521,7 +521,7 @@ fn generate_stmt(ir: *This, ctx: *const StmtContext, stmt: *Ast.Stmt) void {
             } });
         },
         .Return_Expr => |expr| {
-            var dst_tmp: Lvalue = .{ .Mem = .{
+            const dst_tmp: Lvalue = .{ .Mem = .{
                 .choose = CHOOSE_BASE,
                 .base = .{
                     .offset = ctx.return_address_offset,
@@ -539,11 +539,11 @@ fn generate_stmt(ir: *This, ctx: *const StmtContext, stmt: *Ast.Stmt) void {
             generate_local_symbol(ir, symbol);
         },
         .Assign => |assign| {
-            var dst_tmp = generate_lvalue(ir, assign.lhs);
+            const dst_tmp = generate_lvalue(ir, assign.lhs);
             generate_rvalue(ir, assign.rhs, dst_tmp);
         },
         .Expr => |expr| {
-            var tmp = ir.grab_local();
+            const tmp = ir.grab_local();
             generate_rvalue(ir, expr, tmp.as_lvalue());
         },
     }
@@ -555,12 +555,12 @@ fn generate_stmt(ir: *This, ctx: *const StmtContext, stmt: *Ast.Stmt) void {
 
 fn generate_jump(ir: *This, expr: *Ast.Expr, jump_if_true: bool, label: Label) void {
     var tag: InstrJmpcTag = .Neq;
-    var src0_tmp: Tmp = ir.grab_local();
-    var src1_tmp: Tmp = ir.grab_local();
+    const src0_tmp: Tmp = ir.grab_local();
+    const src1_tmp: Tmp = ir.grab_local();
 
     _ = fill_operands: {
         if (expr.payload == .Binary_Op) {
-            var op = &expr.payload.Binary_Op;
+            const op = &expr.payload.Binary_Op;
 
             switch (op.tag) {
                 .Eq => tag = .Eq,
@@ -616,12 +616,12 @@ fn generate_jump(ir: *This, expr: *Ast.Expr, jump_if_true: bool, label: Label) v
 fn generate_rvalue(ir: *This, expr: *Ast.Expr, dst_tmp: Lvalue) void {
     switch (expr.payload) {
         .Binary_Op => |op| {
-            var lhs_tmp = ir.grab_local();
-            var rhs_tmp = ir.grab_local();
+            const lhs_tmp = ir.grab_local();
+            const rhs_tmp = ir.grab_local();
             generate_rvalue(ir, op.lhs, lhs_tmp.as_lvalue());
             generate_rvalue(ir, op.rhs, rhs_tmp.as_lvalue());
 
-            var tag: InstrBinaryOpTag = switch (op.tag) {
+            const tag: InstrBinaryOpTag = switch (op.tag) {
                 .Or => .Or,
                 .And => .And,
                 .Eq => .Eq,
@@ -647,7 +647,7 @@ fn generate_rvalue(ir: *This, expr: *Ast.Expr, dst_tmp: Lvalue) void {
         .Unary_Op => |op| {
             switch (op.tag) {
                 .Not => {
-                    var src_tmp = ir.grab_local();
+                    const src_tmp = ir.grab_local();
                     generate_rvalue(ir, op.subexpr, src_tmp.as_lvalue());
                     generate_instr(ir, .{ .Unary_Op = .{
                         .tag = .Not,
@@ -656,7 +656,7 @@ fn generate_rvalue(ir: *This, expr: *Ast.Expr, dst_tmp: Lvalue) void {
                     } });
                 },
                 .Neg => {
-                    var src_tmp = ir.grab_local();
+                    const src_tmp = ir.grab_local();
                     generate_rvalue(ir, op.subexpr, src_tmp.as_lvalue());
                     generate_instr(ir, .{ .Unary_Op = .{
                         .tag = .Neg,
@@ -665,7 +665,7 @@ fn generate_rvalue(ir: *This, expr: *Ast.Expr, dst_tmp: Lvalue) void {
                     } });
                 },
                 .Ref => {
-                    var src_tmp: Rvalue = .{ .Addr = generate_lvalue(ir, op.subexpr) };
+                    const src_tmp: Rvalue = .{ .Addr = generate_lvalue(ir, op.subexpr) };
                     generate_instr(ir, .{ .Instr = .{
                         .Mov = .{
                             .dst = dst_tmp,
@@ -674,9 +674,9 @@ fn generate_rvalue(ir: *This, expr: *Ast.Expr, dst_tmp: Lvalue) void {
                     } });
                 },
                 .Deref => {
-                    var src_tmp = ir.grab_local();
+                    const src_tmp = ir.grab_local();
                     generate_rvalue(ir, op.subexpr, src_tmp.as_lvalue());
-                    var new_src_tmp = src_tmp.as_rvalue().deref(ir);
+                    const new_src_tmp = src_tmp.as_rvalue().deref(ir);
                     generate_instr(ir, .{ .Instr = .{
                         .Mov = .{
                             .dst = dst_tmp,
@@ -687,8 +687,8 @@ fn generate_rvalue(ir: *This, expr: *Ast.Expr, dst_tmp: Lvalue) void {
             }
         },
         .If => |_if| {
-            var false_label = ir.grab_label();
-            var end_label = ir.grab_label();
+            const false_label = ir.grab_label();
+            const end_label = ir.grab_label();
 
             generate_jump(ir, _if.cond, false, false_label);
 
@@ -707,7 +707,7 @@ fn generate_rvalue(ir: *This, expr: *Ast.Expr, dst_tmp: Lvalue) void {
         .Call => |call| {
             var it = call.args.reverse_iterator();
             while (it.prev()) |arg| {
-                var arg_tmp = ir.grab_local();
+                const arg_tmp = ir.grab_local();
                 generate_rvalue(ir, arg, arg_tmp.as_lvalue());
                 generate_instr(ir, .{ .Instr = .{
                     .Push = arg_tmp.as_rvalue(),
@@ -724,8 +724,8 @@ fn generate_rvalue(ir: *This, expr: *Ast.Expr, dst_tmp: Lvalue) void {
             bytes_to_pop += 8;
 
             if (call.lhs.payload == .Symbol and call.lhs.payload.Symbol.payload == .Function) {
-                var symbol = call.lhs.payload.Symbol;
-                var function = &symbol.payload.Function;
+                const symbol = call.lhs.payload.Symbol;
+                const function = &symbol.payload.Function;
 
                 if (symbol.key.scope != ir.global_scope) {
                     generate_instr(ir, .{ .Instr = .{
@@ -735,7 +735,7 @@ fn generate_rvalue(ir: *This, expr: *Ast.Expr, dst_tmp: Lvalue) void {
                 }
             }
 
-            var src_tmp = ir.grab_local();
+            const src_tmp = ir.grab_local();
             generate_rvalue(ir, call.lhs, src_tmp.as_lvalue());
             generate_instr(ir, .{ .Instr = .{
                 .Call = src_tmp.as_rvalue(),
@@ -748,7 +748,7 @@ fn generate_rvalue(ir: *This, expr: *Ast.Expr, dst_tmp: Lvalue) void {
         },
         .Index, .Field, .Initializer, .Expr_List, .Designator => unreachable,
         .Bool => |value| {
-            var src_tmp: Rvalue = .{ .Imm = @intFromBool(value) };
+            const src_tmp: Rvalue = .{ .Imm = @intFromBool(value) };
             generate_instr(ir, .{ .Instr = .{
                 .Mov = .{
                     .dst = dst_tmp,
@@ -757,7 +757,7 @@ fn generate_rvalue(ir: *This, expr: *Ast.Expr, dst_tmp: Lvalue) void {
             } });
         },
         .Int64 => |value| {
-            var src_tmp: Rvalue = .{ .Imm = value };
+            const src_tmp: Rvalue = .{ .Imm = value };
             generate_instr(ir, .{ .Instr = .{
                 .Mov = .{
                     .dst = dst_tmp,
@@ -766,7 +766,7 @@ fn generate_rvalue(ir: *This, expr: *Ast.Expr, dst_tmp: Lvalue) void {
             } });
         },
         .Null => {
-            var src_tmp: Rvalue = .{ .Imm = 0 };
+            const src_tmp: Rvalue = .{ .Imm = 0 };
             generate_instr(ir, .{ .Instr = .{
                 .Mov = .{
                     .dst = dst_tmp,
@@ -822,7 +822,7 @@ fn generate_lvalue(ir: *This, expr: *Ast.Expr) Lvalue {
     switch (expr.payload) {
         .Unary_Op => |op| {
             std.debug.assert(op.tag == .Deref);
-            var src_tmp = ir.grab_local();
+            const src_tmp = ir.grab_local();
             generate_rvalue(ir, op.subexpr, src_tmp.as_lvalue());
             return src_tmp.as_rvalue().ref(ir);
         },
@@ -909,7 +909,7 @@ fn debug_print_rvalue(rvalue: Rvalue) void {
 fn debug_print_instr(instr: Instr) void {
     switch (instr) {
         .Binary_Op => |op| {
-            var text: []const u8 = switch (op.tag) {
+            const text: []const u8 = switch (op.tag) {
                 .Or => "or",
                 .And => "and",
                 .Eq => "eq ",
@@ -933,7 +933,7 @@ fn debug_print_instr(instr: Instr) void {
             debug_print_rvalue(op.src1);
         },
         .Unary_Op => |op| {
-            var text: []const u8 = switch (op.tag) {
+            const text: []const u8 = switch (op.tag) {
                 .Not => "not",
                 .Neg => "neg",
             };
@@ -944,7 +944,7 @@ fn debug_print_instr(instr: Instr) void {
             debug_print_rvalue(op.src);
         },
         .Jmpc => |jmpc| {
-            var text: []const u8 = switch (jmpc.tag) {
+            const text: []const u8 = switch (jmpc.tag) {
                 .Eq => "je ",
                 .Neq => "jne",
                 .Lt => "jl ",

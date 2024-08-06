@@ -3,15 +3,15 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 pub fn read_entire_file(allocator: Allocator, filepath: []const u8) ![:0]u8 {
-    var fd = try std.os.open(filepath, std.os.O.RDONLY, 0);
-    var size: usize = size: {
-        var stats = try std.os.fstat(fd);
+    const fd = try std.posix.open(filepath, .{}, 0);
+    const size: usize = size: {
+        const stats = try std.posix.fstat(fd);
         break :size @intCast(stats.size);
     };
-    var text = allocator.alloc(u8, size + 1) catch {
-        std.os.exit(1);
+    const text = allocator.alloc(u8, size + 1) catch {
+        std.posix.exit(1);
     };
-    std.debug.assert(try std.os.read(fd, text[0..size]) == size);
+    std.debug.assert(try std.posix.read(fd, text[0..size]) == size);
     text[size] = 0;
 
     return text[0..size :0];

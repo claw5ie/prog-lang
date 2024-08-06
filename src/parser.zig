@@ -21,7 +21,7 @@ const This = @This();
 const LOWEST_PREC = -127;
 
 pub fn grab_label(p: *This) Ir.Label {
-    var result = p.next_label;
+    const result = p.next_label;
     p.next_label += 1;
     return result;
 }
@@ -52,9 +52,9 @@ inline fn advance_many(p: *This, count: u8) void {
 
 pub fn parse(filepath: []const u8) Ast {
     var ast_arena = ArenaAllocator.init(std.heap.page_allocator);
-    var ast_arena_allocator = ast_arena.allocator();
-    var global_scope = ast_arena_allocator.create(Ast.Scope) catch {
-        std.os.exit(1);
+    const ast_arena_allocator = ast_arena.allocator();
+    const global_scope = ast_arena_allocator.create(Ast.Scope) catch {
+        std.posix.exit(1);
     };
     global_scope.* = .{
         .parent = null,
@@ -72,17 +72,17 @@ pub fn parse(filepath: []const u8) Ast {
     var globals: Ast.SymbolList = .{};
 
     while (p.peek() != .End_Of_File) {
-        var has_symbol = parse_symbol(p);
+        const has_symbol = parse_symbol(p);
         if (has_symbol) |symbol| {
-            var node = create(p, Ast.SymbolList.Node);
+            const node = create(p, Ast.SymbolList.Node);
             node.* = .{
                 .payload = symbol,
             };
             globals.insert_last(node);
         } else {
-            var line_info = p.grab().line_info;
+            const line_info = p.grab().line_info;
             common.print_error(p.lexer.filepath, line_info, "expected ':' or ':=' to start definition.", .{});
-            std.os.exit(1);
+            std.posix.exit(1);
         }
     }
 
@@ -102,12 +102,12 @@ pub fn parse(filepath: []const u8) Ast {
 
 fn create(p: *This, comptime T: type) *T {
     return p.ast_arena_allocator.create(T) catch {
-        std.os.exit(1);
+        std.posix.exit(1);
     };
 }
 
 fn create_scope(p: *This) *Ast.Scope {
-    var result = create(p, Ast.Scope);
+    const result = create(p, Ast.Scope);
     result.* = .{
         .parent = p.current_scope,
     };
@@ -115,7 +115,7 @@ fn create_scope(p: *This) *Ast.Scope {
 }
 
 fn push_scope(p: *This) void {
-    var scope = create_scope(p);
+    const scope = create_scope(p);
     p.current_scope = scope;
 }
 
@@ -124,7 +124,7 @@ fn pop_scope(p: *This) void {
 }
 
 fn create_symbol(p: *This, token: Lexer.Token) *Ast.Symbol {
-    var symbol = create(p, Ast.Symbol);
+    const symbol = create(p, Ast.Symbol);
     symbol.* = .{
         .payload = undefined,
         .key = .{
@@ -141,33 +141,33 @@ fn insert_symbol(p: *This, id: Lexer.Token) *Ast.Symbol {
     std.debug.assert(id.tag == .Identifier);
 
     // Should create arena with identifier strings?
-    var symbol = create_symbol(p, id);
+    const symbol = create_symbol(p, id);
     insert_existing_symbol(p, symbol);
 
     return symbol;
 }
 
 fn insert_existing_symbol(p: *This, symbol: *Ast.Symbol) void {
-    var get_or_put_result = p.symbols.getOrPut(symbol.key) catch {
-        std.os.exit(1);
+    const get_or_put_result = p.symbols.getOrPut(symbol.key) catch {
+        std.posix.exit(1);
     };
 
     if (get_or_put_result.found_existing) {
         common.print_error(p.lexer.filepath, symbol.line_info, "symbol '{s}' is already defined.", .{symbol.key.text});
         common.print_note(p.lexer.filepath, get_or_put_result.value_ptr.*.line_info, "first defined here.", .{});
-        std.os.exit(1);
+        std.posix.exit(1);
     }
 
     get_or_put_result.value_ptr.* = symbol;
 }
 
 fn extract_type(p: *This, expr: Ast.Expr) *Ast.Type {
-    var ok = Ast.extract_type(p.ast_arena_allocator, expr);
+    const ok = Ast.extract_type(p.ast_arena_allocator, expr);
     if (ok) |_type| {
         return _type;
     } else {
         common.print_error(p.lexer.filepath, expr.line_info, "expression doesn't look like a type.", .{});
-        std.os.exit(1);
+        std.posix.exit(1);
     }
 }
 
@@ -182,7 +182,7 @@ fn parse_type_function(p: *This) Ast.TypePayload {
 
     var tt = p.peek();
     while (tt != .End_Of_File and tt != .Close_Paren) {
-        var id = p.grab();
+        const id = p.grab();
         var has_id = false;
 
         if (p.peek() == .Identifier) {
@@ -191,15 +191,15 @@ fn parse_type_function(p: *This) Ast.TypePayload {
             has_id = true;
         }
 
-        var _type = parse_type(p);
-        var symbol = create_symbol(p, id);
+        const _type = parse_type(p);
+        const symbol = create_symbol(p, id);
         symbol.payload = .{ .Parameter = .{
             ._type = _type,
             .has_id = has_id,
             .tmp = undefined,
         } };
 
-        var node = create(p, Ast.SymbolList.Node);
+        const node = create(p, Ast.SymbolList.Node);
         node.* = .{
             .payload = symbol,
         };
@@ -247,17 +247,17 @@ fn parse_struct_fields(p: *This) Ast.TypeStruct {
 
     var tt = p.peek();
     while (tt != .End_Of_File and tt != .Close_Curly) {
-        var id = p.grab();
+        const id = p.grab();
         p.expect(.Identifier);
         p.expect(.Colon);
 
-        var _type = parse_type(p);
-        var symbol = insert_symbol(p, id);
+        const _type = parse_type(p);
+        const symbol = insert_symbol(p, id);
         symbol.payload = .{ .Struct_Field = .{
             ._type = _type,
         } };
 
-        var node = create(p, Ast.SymbolList.Node);
+        const node = create(p, Ast.SymbolList.Node);
         node.* = .{
             .payload = symbol,
         };
@@ -282,28 +282,28 @@ fn parse_symbol(p: *This) ?*Ast.Symbol {
 
     switch (p.peek_ahead(1)) {
         .Colon_Equal => {
-            var id = p.grab();
-            var symbol = insert_symbol(p, id);
+            const id = p.grab();
+            const symbol = insert_symbol(p, id);
             p.advance_many(2);
 
             if (p.peek() == .Proc) {
                 p.function_depth += 1;
 
-                var _type = parse_type(p);
+                const _type = parse_type(p);
 
                 if (p.peek() == .Open_Curly) {
                     push_scope(p);
 
                     var it = _type.payload.Function.params.iterator();
                     while (it.next()) |param_ptr| {
-                        var param = &param_ptr.*.payload.Parameter;
+                        const param = &param_ptr.*.payload.Parameter;
                         if (param.has_id) {
                             param_ptr.*.key.scope = p.current_scope;
                             insert_existing_symbol(p, param_ptr.*);
                         }
                     }
 
-                    var block = parse_stmt_block(p);
+                    const block = parse_stmt_block(p);
 
                     symbol.payload = .{ .Function = .{
                         ._type = _type,
@@ -322,7 +322,7 @@ fn parse_symbol(p: *This) ?*Ast.Symbol {
 
                 return symbol;
             } else {
-                var expr = create(p, Ast.Expr);
+                const expr = create(p, Ast.Expr);
                 expr.* = parse_expr(p);
                 p.expect(.Semicolon);
 
@@ -334,12 +334,12 @@ fn parse_symbol(p: *This) ?*Ast.Symbol {
             }
         },
         .Colon => {
-            var id = p.grab();
-            var symbol = insert_symbol(p, id);
+            const id = p.grab();
+            const symbol = insert_symbol(p, id);
             p.advance_many(2);
 
             var expr: ?*Ast.Expr = null;
-            var _type = parse_type(p);
+            const _type = parse_type(p);
 
             if (p.peek() == .Equal) {
                 p.advance();
@@ -370,14 +370,14 @@ fn parse_expr_list(p: *This) Ast.ExprList {
 
     var tt = p.peek();
     while (tt != .End_Of_File and tt != .Close_Curly) {
-        var expr: Ast.Expr = expr: {
+        const expr: Ast.Expr = expr: {
             if (p.peek() == .Identifier and
                 p.peek_ahead(1) == .Equal)
             {
-                var id = p.grab();
+                const id = p.grab();
                 p.advance_many(2);
 
-                var value = create(p, Ast.Expr);
+                const value = create(p, Ast.Expr);
                 value.* = parse_expr(p);
 
                 break :expr .{
@@ -393,7 +393,7 @@ fn parse_expr_list(p: *This) Ast.ExprList {
             }
         };
 
-        var node = create(p, Ast.ExprList.Node);
+        const node = create(p, Ast.ExprList.Node);
         node.* = .{
             .payload = expr,
         };
@@ -425,8 +425,8 @@ fn parse_prec(p: *This, min_prec: i32) Ast.Expr {
         while (curr_prec == prec_of_op(op)) {
             p.advance();
 
-            var lhs_ptr = create(p, Ast.Expr);
-            var rhs_ptr = create(p, Ast.Expr);
+            const lhs_ptr = create(p, Ast.Expr);
+            const rhs_ptr = create(p, Ast.Expr);
             lhs_ptr.* = lhs;
             rhs_ptr.* = parse_prec(p, curr_prec + 1);
             lhs = .{
@@ -450,12 +450,12 @@ fn parse_prec(p: *This, min_prec: i32) Ast.Expr {
 }
 
 fn parse_highest_prec_base(p: *This) Ast.Expr {
-    var token = p.grab();
+    const token = p.grab();
     p.advance();
 
     switch (token.tag) {
         .Sub, .Ref, .Not => {
-            var subexpr = create(p, Ast.Expr);
+            const subexpr = create(p, Ast.Expr);
             subexpr.* = parse_highest_prec_base(p);
 
             return .{
@@ -469,10 +469,10 @@ fn parse_highest_prec_base(p: *This) Ast.Expr {
         },
         .And => {
             common.print_error(p.lexer.filepath, token.line_info, "can't take a reference of rvalue.", .{});
-            std.os.exit(1);
+            std.posix.exit(1);
         },
         .Open_Paren => {
-            var expr = parse_expr(p);
+            const expr = parse_expr(p);
             p.expect(.Close_Paren);
 
             return .{
@@ -489,7 +489,7 @@ fn parse_highest_prec_base(p: *This) Ast.Expr {
                     .line_info = token.line_info,
                 },
                 .Identifier => {
-                    var id = p.grab();
+                    const id = p.grab();
                     p.advance();
 
                     return .{
@@ -499,17 +499,17 @@ fn parse_highest_prec_base(p: *This) Ast.Expr {
                     };
                 },
                 else => {
-                    var _token = p.grab();
+                    const _token = p.grab();
                     common.print_error(p.lexer.filepath, _token.line_info, "unexpected '{s}' after '.' operator.", .{_token.text});
                     common.print_note(p.lexer.filepath, _token.line_info, "expected designator list or identifier.", .{});
-                    std.os.exit(1);
+                    std.posix.exit(1);
                 },
             }
         },
         .If => {
-            var cond = create(p, Ast.Expr);
-            var if_true = create(p, Ast.Expr);
-            var if_false = create(p, Ast.Expr);
+            const cond = create(p, Ast.Expr);
+            const if_true = create(p, Ast.Expr);
+            const if_false = create(p, Ast.Expr);
 
             cond.* = parse_expr(p);
             if (p.peek() == .Then) {
@@ -566,8 +566,8 @@ fn parse_highest_prec_base(p: *This) Ast.Expr {
             };
         },
         .Mul => {
-            var subtype = parse_type(p);
-            var _type = create(p, Ast.Type);
+            const subtype = parse_type(p);
+            const _type = create(p, Ast.Type);
             _type.* = .{
                 .payload = .{ .Pointer = subtype },
                 .size = undefined,
@@ -581,12 +581,12 @@ fn parse_highest_prec_base(p: *This) Ast.Expr {
             };
         },
         .Open_Bracket => {
-            var expr = create(p, Ast.Expr);
+            const expr = create(p, Ast.Expr);
             expr.* = parse_expr(p);
             p.expect(.Close_Bracket);
 
-            var subtype = parse_type(p);
-            var _type = create(p, Ast.Type);
+            const subtype = parse_type(p);
+            const _type = create(p, Ast.Type);
             _type.* = .{
                 .payload = .{ .Array = .{
                     .expr = expr,
@@ -604,8 +604,8 @@ fn parse_highest_prec_base(p: *This) Ast.Expr {
             };
         },
         .Struct => {
-            var _struct = parse_struct_fields(p);
-            var _type = create(p, Ast.Type);
+            const _struct = parse_struct_fields(p);
+            const _type = create(p, Ast.Type);
             _type.* = .{
                 .payload = .{ .Struct = _struct },
                 .size = undefined,
@@ -619,8 +619,8 @@ fn parse_highest_prec_base(p: *This) Ast.Expr {
             };
         },
         .Union => {
-            var _union = parse_struct_fields(p);
-            var _type = create(p, Ast.Type);
+            const _union = parse_struct_fields(p);
+            const _type = create(p, Ast.Type);
             _type.* = .{
                 .payload = .{ .Union = _union },
                 .size = undefined,
@@ -645,16 +645,16 @@ fn parse_highest_prec_base(p: *This) Ast.Expr {
 
             var tt = p.peek();
             while (tt != .End_Of_File and tt != .Close_Curly) {
-                var id = p.grab();
+                const id = p.grab();
                 p.expect(.Identifier);
 
-                var symbol = insert_symbol(p, id);
+                const symbol = insert_symbol(p, id);
                 symbol.payload = .{ .Enum_Field = .{
                     ._type = undefined,
                     .value = undefined,
                 } };
 
-                var node = create(p, Ast.SymbolList.Node);
+                const node = create(p, Ast.SymbolList.Node);
                 node.* = .{
                     .payload = symbol,
                 };
@@ -671,7 +671,7 @@ fn parse_highest_prec_base(p: *This) Ast.Expr {
 
             p.expect(.Close_Curly);
 
-            var _type = create(p, Ast.Type);
+            const _type = create(p, Ast.Type);
             _type.* = .{
                 .payload = .{ .Enum = _enum },
                 .size = undefined,
@@ -685,7 +685,7 @@ fn parse_highest_prec_base(p: *This) Ast.Expr {
             };
         },
         .Proc => {
-            var _type = create(p, Ast.Type);
+            const _type = create(p, Ast.Type);
             _type.* = .{
                 .payload = parse_type_function(p),
                 .size = undefined,
@@ -699,7 +699,7 @@ fn parse_highest_prec_base(p: *This) Ast.Expr {
             };
         },
         .Void => {
-            var _type = create(p, Ast.Type);
+            const _type = create(p, Ast.Type);
             _type.* = .{
                 .payload = .Void,
                 .size = undefined,
@@ -712,7 +712,7 @@ fn parse_highest_prec_base(p: *This) Ast.Expr {
             };
         },
         .Bool => {
-            var _type = create(p, Ast.Type);
+            const _type = create(p, Ast.Type);
             _type.* = .{
                 .payload = .Bool,
                 .size = undefined,
@@ -725,7 +725,7 @@ fn parse_highest_prec_base(p: *This) Ast.Expr {
             };
         },
         .Int => {
-            var _type = create(p, Ast.Type);
+            const _type = create(p, Ast.Type);
             _type.* = .{
                 .payload = .Int64,
                 .size = undefined,
@@ -740,7 +740,7 @@ fn parse_highest_prec_base(p: *This) Ast.Expr {
         .Cast => {
             p.expect(.Open_Paren);
 
-            var lhs = parse_expr(p);
+            const lhs = parse_expr(p);
 
             if (p.peek() == .Comma) {
                 p.advance();
@@ -749,7 +749,7 @@ fn parse_highest_prec_base(p: *This) Ast.Expr {
             if (p.peek() == .Close_Paren) {
                 p.advance();
 
-                var expr = create(p, Ast.Expr);
+                const expr = create(p, Ast.Expr);
                 expr.* = lhs;
                 return .{
                     .payload = .{ .Cast1 = expr },
@@ -757,8 +757,8 @@ fn parse_highest_prec_base(p: *This) Ast.Expr {
                     .line_info = token.line_info,
                 };
             } else {
-                var _type = extract_type(p, lhs);
-                var rhs = create(p, Ast.Expr);
+                const _type = extract_type(p, lhs);
+                const rhs = create(p, Ast.Expr);
                 rhs.* = parse_expr(p);
 
                 if (p.peek() == .Comma) {
@@ -779,7 +779,7 @@ fn parse_highest_prec_base(p: *This) Ast.Expr {
         },
         else => {
             common.print_error(p.lexer.filepath, token.line_info, "'{s}' doesn't start expression.", .{token.text});
-            std.os.exit(1);
+            std.posix.exit(1);
         },
     }
 }
@@ -794,15 +794,15 @@ fn parse_postfix_unary_ops(p: *This, inner: *Ast.Expr) void {
     while (true) {
         switch (p.peek()) {
             .Open_Paren => {
-                var line_info = p.grab().line_info;
+                const line_info = p.grab().line_info;
                 p.advance();
 
                 var args = Ast.ExprList{};
 
                 var tt = p.peek();
                 while (tt != .End_Of_File and tt != .Close_Paren) {
-                    var expr = parse_expr(p);
-                    var node = create(p, Ast.ExprList.Node);
+                    const expr = parse_expr(p);
+                    const node = create(p, Ast.ExprList.Node);
                     node.* = .{
                         .payload = expr,
                     };
@@ -817,7 +817,7 @@ fn parse_postfix_unary_ops(p: *This, inner: *Ast.Expr) void {
 
                 p.expect(.Close_Paren);
 
-                var lhs = create(p, Ast.Expr);
+                const lhs = create(p, Ast.Expr);
                 lhs.* = inner.*;
                 inner.* = .{
                     .payload = .{ .Call = .{
@@ -829,14 +829,14 @@ fn parse_postfix_unary_ops(p: *This, inner: *Ast.Expr) void {
                 };
             },
             .Open_Bracket => {
-                var line_info = p.grab().line_info;
+                const line_info = p.grab().line_info;
                 p.advance();
 
-                var expr = create(p, Ast.Expr);
+                const expr = create(p, Ast.Expr);
                 expr.* = parse_expr(p);
                 p.expect(.Close_Bracket);
 
-                var lhs = create(p, Ast.Expr);
+                const lhs = create(p, Ast.Expr);
                 lhs.* = inner.*;
                 inner.* = .{
                     .payload = .{ .Index = .{
@@ -853,7 +853,7 @@ fn parse_postfix_unary_ops(p: *This, inner: *Ast.Expr) void {
                 if (p.peek() == .Mul) {
                     p.advance();
 
-                    var lhs = create(p, Ast.Expr);
+                    const lhs = create(p, Ast.Expr);
                     lhs.* = inner.*;
                     inner.* = .{
                         .payload = .{ .Unary_Op = .{
@@ -864,8 +864,8 @@ fn parse_postfix_unary_ops(p: *This, inner: *Ast.Expr) void {
                         .line_info = lhs.line_info,
                     };
                 } else if (p.peek() == .Open_Curly) {
-                    var expr_list = parse_expr_list(p);
-                    var _type = extract_type(p, inner.*);
+                    const expr_list = parse_expr_list(p);
+                    const _type = extract_type(p, inner.*);
                     inner.* = .{
                         .payload = .{ .Initializer = .{
                             ._type = _type,
@@ -875,10 +875,10 @@ fn parse_postfix_unary_ops(p: *This, inner: *Ast.Expr) void {
                         .line_info = _type.line_info,
                     };
                 } else {
-                    var id = p.grab();
+                    const id = p.grab();
                     p.expect(.Identifier);
 
-                    var lhs = create(p, Ast.Expr);
+                    const lhs = create(p, Ast.Expr);
                     lhs.* = inner.*;
                     inner.* = .{
                         .payload = .{ .Field = .{
@@ -938,13 +938,13 @@ fn token_tag_to_expr_unary_op_tag(op: Lexer.TokenTag) Ast.ExprUnaryOpTag {
 }
 
 fn parse_stmt(p: *This) Ast.Stmt {
-    var line_info = p.grab().line_info;
+    const line_info = p.grab().line_info;
 
     switch (p.peek()) {
         .Print => {
             p.advance();
 
-            var expr = create(p, Ast.Expr);
+            const expr = create(p, Ast.Expr);
             expr.* = parse_expr(p);
             p.expect(.Semicolon);
 
@@ -955,7 +955,7 @@ fn parse_stmt(p: *This) Ast.Stmt {
         },
         .Open_Curly => {
             push_scope(p);
-            var block = parse_stmt_block(p);
+            const block = parse_stmt_block(p);
             pop_scope(p);
 
             return .{
@@ -966,14 +966,14 @@ fn parse_stmt(p: *This) Ast.Stmt {
         .If => {
             p.advance();
 
-            var cond = create(p, Ast.Expr);
+            const cond = create(p, Ast.Expr);
             cond.* = parse_expr(p);
 
             if (p.peek() == .Then) {
                 p.advance();
             }
 
-            var if_true = create(p, Ast.Stmt);
+            const if_true = create(p, Ast.Stmt);
             var if_false: ?*Ast.Stmt = null;
 
             if_true.* = parse_stmt(p);
@@ -995,14 +995,14 @@ fn parse_stmt(p: *This) Ast.Stmt {
         .While => {
             p.advance();
 
-            var cond = create(p, Ast.Expr);
+            const cond = create(p, Ast.Expr);
             cond.* = parse_expr(p);
 
             if (p.peek() == .Do) {
                 p.advance();
             }
 
-            var block = create(p, Ast.Stmt);
+            const block = create(p, Ast.Stmt);
             block.* = parse_stmt(p);
 
             return .{
@@ -1016,12 +1016,12 @@ fn parse_stmt(p: *This) Ast.Stmt {
         .Do => {
             p.advance();
 
-            var block = create(p, Ast.Stmt);
+            const block = create(p, Ast.Stmt);
             block.* = parse_stmt(p);
 
             p.expect(.While);
 
-            var cond = create(p, Ast.Expr);
+            const cond = create(p, Ast.Expr);
             cond.* = parse_expr(p);
 
             p.expect(.Semicolon);
@@ -1054,11 +1054,11 @@ fn parse_stmt(p: *This) Ast.Stmt {
         .Switch => {
             p.advance();
 
-            var cond = create(p, Ast.Expr);
+            const cond = create(p, Ast.Expr);
             cond.* = parse_expr(p);
 
             push_scope(p);
-            var block = parse_stmt_block(p);
+            const block = parse_stmt_block(p);
             pop_scope(p);
 
             return .{
@@ -1081,7 +1081,7 @@ fn parse_stmt(p: *This) Ast.Stmt {
                 };
             }
 
-            var expr = create(p, Ast.Expr);
+            const expr = create(p, Ast.Expr);
             expr.* = parse_expr(p);
             p.expect(.Semicolon);
 
@@ -1091,7 +1091,7 @@ fn parse_stmt(p: *This) Ast.Stmt {
             };
         },
         else => {
-            var has_symbol = parse_symbol(p);
+            const has_symbol = parse_symbol(p);
 
             if (has_symbol) |symbol| {
                 return .{
@@ -1099,14 +1099,14 @@ fn parse_stmt(p: *This) Ast.Stmt {
                     .line_info = line_info,
                 };
             } else {
-                var lhs = create(p, Ast.Expr);
+                const lhs = create(p, Ast.Expr);
                 lhs.* = parse_expr(p);
 
                 switch (p.peek()) {
                     .Equal => {
                         p.advance();
 
-                        var rhs = create(p, Ast.Expr);
+                        const rhs = create(p, Ast.Expr);
                         rhs.* = parse_expr(p);
                         p.expect(.Semicolon);
 
@@ -1121,7 +1121,7 @@ fn parse_stmt(p: *This) Ast.Stmt {
                     .Colon => {
                         p.advance();
 
-                        var stmt = create(p, Ast.Stmt);
+                        const stmt = create(p, Ast.Stmt);
                         stmt.* = parse_stmt(p);
 
                         return .{
@@ -1153,8 +1153,8 @@ fn parse_stmt_block(p: *This) Ast.StmtBlock {
 
     var tt = p.peek();
     while (tt != .End_Of_File and tt != .Close_Curly) {
-        var stmt = parse_stmt(p);
-        var node = create(p, Ast.StmtBlock.Node);
+        const stmt = parse_stmt(p);
+        const node = create(p, Ast.StmtBlock.Node);
         node.* = .{
             .payload = stmt,
         };

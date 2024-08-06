@@ -40,7 +40,7 @@ var INT64_TYPE_HINT = Ast.Type{
 pub fn reduce_expr(ast: *Ast, expr: *Ast.Expr) void {
     if (expr.payload != .Int64) {
         common.print_error(ast.filepath, expr.line_info, "TODO: evaluate expression in compile-time.", .{});
-        std.os.exit(1);
+        std.posix.exit(1);
     }
 }
 
@@ -52,23 +52,23 @@ pub fn typecheck(ast: *Ast) void {
 
     switch (ast.main.payload) {
         .Function => |function| {
-            var _type = &function._type.payload.Function;
+            const _type = &function._type.payload.Function;
 
             if (_type.params.count != 0) {
                 common.print_error(ast.filepath, function._type.line_info, "expected 0 arguments, but got {}.", .{_type.params.count});
-                std.os.exit(1);
+                std.posix.exit(1);
             }
 
-            var return_type = _type.return_type;
+            const return_type = _type.return_type;
 
             if (return_type.payload != .Void) {
                 common.print_error(ast.filepath, _type.return_type.line_info, "expected 'void', but got '{}'.", .{_type.return_type});
-                std.os.exit(1);
+                std.posix.exit(1);
             }
         },
         else => {
             common.print_error(ast.filepath, ast.main.line_info, "'main' should be a function.", .{});
-            std.os.exit(1);
+            std.posix.exit(1);
         },
     }
 }
@@ -80,24 +80,24 @@ fn typecheck_symbol(ast: *Ast, symbol: *Ast.Symbol) void {
                 typecheck_type(ast, _type);
 
                 if (variable.expr) |expr| {
-                    var expected_type = _type;
-                    var actual_type = typecheck_expr(ast, expected_type, expr);
+                    const expected_type = _type;
+                    const actual_type = typecheck_expr(ast, expected_type, expr);
                     if (!actual_type.eql(expected_type)) {
                         common.print_error(ast.filepath, expr.line_info, "expected '{}', but got '{}'.", .{ expected_type, actual_type });
                         common.print_note(ast.filepath, _type.line_info, "expected type is here", .{});
                         common.print_note(ast.filepath, expr.line_info, "expression is here", .{});
-                        std.os.exit(1);
+                        std.posix.exit(1);
                     }
                 }
             } else {
                 if (variable.expr) |expr| {
-                    var _type = typecheck_expr(ast, null, expr);
+                    const _type = typecheck_expr(ast, null, expr);
                     variable._type = _type;
 
                     if (_type.payload == .Function) {
                         if (_type.payload.Function.scope != ast.global_scope) {
                             common.print_error(ast.filepath, symbol.line_info, "can't use function pointers to local functions.", .{});
-                            std.os.exit(1);
+                            std.posix.exit(1);
                         }
                     }
                 } else {
@@ -143,7 +143,7 @@ fn typecheck_type_rec(ast: *Ast, _type: *Ast.Type, flags: TypecheckTypeFlags) vo
         },
         .Being_Shallow_Typechecked => {
             common.print_error(ast.filepath, _type.line_info, "cyclic reference detected.", .{});
-            std.os.exit(1);
+            std.posix.exit(1);
         },
         .Shallow_Typechecked => {
             if (flags.do_shallow_typecheck) {
@@ -164,7 +164,7 @@ fn typecheck_type_rec(ast: *Ast, _type: *Ast.Type, flags: TypecheckTypeFlags) vo
 
             var it = _struct.fields.iterator();
             while (it.next()) |field_ptr| {
-                var field = &field_ptr.*.payload.Struct_Field;
+                const field = &field_ptr.*.payload.Struct_Field;
                 typecheck_type_rec(ast, field._type, new_flags);
                 size += field._type.size;
             }
@@ -179,7 +179,7 @@ fn typecheck_type_rec(ast: *Ast, _type: *Ast.Type, flags: TypecheckTypeFlags) vo
 
             var it = _union.fields.iterator();
             while (it.next()) |field_ptr| {
-                var field = &field_ptr.*.payload.Struct_Field;
+                const field = &field_ptr.*.payload.Struct_Field;
                 typecheck_type_rec(ast, field._type, new_flags);
                 size = @max(size, field._type.size);
             }
@@ -191,7 +191,7 @@ fn typecheck_type_rec(ast: *Ast, _type: *Ast.Type, flags: TypecheckTypeFlags) vo
 
             var it = _enum.fields.iterator();
             while (it.next()) |field_ptr| {
-                var field = &field_ptr.*.payload.Enum_Field;
+                const field = &field_ptr.*.payload.Enum_Field;
                 field.value = enum_value;
                 enum_value += 1;
             }
@@ -214,13 +214,13 @@ fn typecheck_type_rec(ast: *Ast, _type: *Ast.Type, flags: TypecheckTypeFlags) vo
             }
         },
         .Array => |*array| {
-            var size_type = typecheck_expr(ast, &INT64_TYPE_HINT, array.expr);
-            var size_flags = size_type.compare();
+            const size_type = typecheck_expr(ast, &INT64_TYPE_HINT, array.expr);
+            const size_flags = size_type.compare();
             reduce_expr(ast, array.expr);
 
             if (!size_flags.is_integer) {
                 common.print_error(ast.filepath, array.expr.line_info, "expected integer, but got '{}'.", .{size_type});
-                std.os.exit(1);
+                std.posix.exit(1);
             }
 
             var new_flags = flags;
@@ -228,10 +228,10 @@ fn typecheck_type_rec(ast: *Ast, _type: *Ast.Type, flags: TypecheckTypeFlags) vo
 
             typecheck_type_rec(ast, array.subtype, new_flags);
 
-            var size = array.expr.payload.Int64;
+            const size = array.expr.payload.Int64;
             if (size <= 0) {
                 common.print_error(ast.filepath, array.expr.line_info, "array size can't be negative ({}).", .{size});
-                std.os.exit(1);
+                std.posix.exit(1);
             }
 
             array.count = @intCast(size);
@@ -249,7 +249,7 @@ fn typecheck_type_rec(ast: *Ast, _type: *Ast.Type, flags: TypecheckTypeFlags) vo
             _type.size = 0;
             if (flags.reject_void_type) {
                 common.print_error(ast.filepath, _type.line_info, "unexpected 'void' type.", .{});
-                std.os.exit(1);
+                std.posix.exit(1);
             }
         },
         .Bool => _type.size = 1,
@@ -279,10 +279,10 @@ fn typecheck_stmt(ast: *Ast, ctx: *const TypecheckerStmtContext, stmt: *Ast.Stmt
             typecheck_block(ast, ctx, block);
         },
         .If => |_if| {
-            var cond_type = typecheck_expr(ast, &BOOL_TYPE_HINT, _if.cond);
+            const cond_type = typecheck_expr(ast, &BOOL_TYPE_HINT, _if.cond);
             if (cond_type.payload != .Bool) {
                 common.print_error(ast.filepath, _if.cond.line_info, "expected 'bool', but got '{}'.", .{cond_type});
-                std.os.exit(1);
+                std.posix.exit(1);
             }
 
             // TODO: reject symbols definition in single statements.
@@ -291,10 +291,10 @@ fn typecheck_stmt(ast: *Ast, ctx: *const TypecheckerStmtContext, stmt: *Ast.Stmt
             if (_if.if_false) |if_false| typecheck_stmt(ast, ctx, if_false);
         },
         .While => |_while| {
-            var cond_type = typecheck_expr(ast, &BOOL_TYPE_HINT, _while.cond);
+            const cond_type = typecheck_expr(ast, &BOOL_TYPE_HINT, _while.cond);
             if (cond_type.payload != .Bool) {
                 common.print_error(ast.filepath, _while.cond.line_info, "expected 'bool', but got '{}'.", .{cond_type});
-                std.os.exit(1);
+                std.posix.exit(1);
             }
 
             var new_ctx = ctx.*;
@@ -304,40 +304,40 @@ fn typecheck_stmt(ast: *Ast, ctx: *const TypecheckerStmtContext, stmt: *Ast.Stmt
         .Break => {
             if (!ctx.is_in_loop) {
                 common.print_error(ast.filepath, stmt.line_info, "'break' outside of loop.", .{});
-                std.os.exit(1);
+                std.posix.exit(1);
             }
         },
         .Continue => {
             if (!ctx.is_in_loop) {
                 common.print_error(ast.filepath, stmt.line_info, "'continue' outside of loop.", .{});
-                std.os.exit(1);
+                std.posix.exit(1);
             }
         },
         .Switch => |_switch| {
-            var cond_type = typecheck_expr(ast, null, _switch.cond);
-            var cond_flags = cond_type.compare();
+            const cond_type = typecheck_expr(ast, null, _switch.cond);
+            const cond_flags = cond_type.compare();
 
             if (!cond_flags.is_comparable) {
                 common.print_error(ast.filepath, _switch.cond.line_info, "condition isn't comparable: '{}'.", .{cond_type});
-                std.os.exit(1);
+                std.posix.exit(1);
             }
 
             var it = _switch.cases.iterator();
             while (it.next()) |top_level_case| {
                 if (top_level_case.payload != .Case) {
                     common.print_error(ast.filepath, top_level_case.line_info, "statement outside of 'case'.", .{});
-                    std.os.exit(1);
+                    std.posix.exit(1);
                 }
 
                 var substmt = top_level_case;
                 while (true) {
-                    var case = &substmt.payload.Case;
-                    var case_type = typecheck_expr(ast, cond_type, case.expr);
+                    const case = &substmt.payload.Case;
+                    const case_type = typecheck_expr(ast, cond_type, case.expr);
                     if (!cond_type.eql(case_type)) {
                         common.print_error(ast.filepath, case.expr.line_info, "mismatched types: '{}' and '{}'.", .{ cond_type, case_type });
                         common.print_note(ast.filepath, case.expr.line_info, "switch case is here.", .{});
                         common.print_note(ast.filepath, _switch.cond.line_info, "switch condition is here.", .{});
-                        std.os.exit(1);
+                        std.posix.exit(1);
                     }
 
                     substmt = case.stmt;
@@ -348,48 +348,48 @@ fn typecheck_stmt(ast: *Ast, ctx: *const TypecheckerStmtContext, stmt: *Ast.Stmt
         },
         .Case => |case| {
             common.print_error(ast.filepath, case.expr.line_info, "case outside of switch statement.", .{});
-            std.os.exit(1);
+            std.posix.exit(1);
         },
         .Return => {
             if (ctx.return_type.payload != .Void) {
                 common.print_error(ast.filepath, stmt.line_info, "expected expression of type '{}'.", .{ctx.return_type});
-                std.os.exit(1);
+                std.posix.exit(1);
             }
         },
         .Return_Expr => |expr| {
-            var expr_type = typecheck_expr(ast, ctx.return_type, expr);
+            const expr_type = typecheck_expr(ast, ctx.return_type, expr);
             if (ctx.return_type.payload == .Void) {
                 common.print_error(ast.filepath, expr.line_info, "unexpected expression here.", .{});
-                std.os.exit(1);
+                std.posix.exit(1);
             } else if (!ctx.return_type.eql(expr_type)) {
                 common.print_error(ast.filepath, expr.line_info, "mismatched types: '{}' and '{}'.", .{ ctx.return_type, expr_type });
                 common.print_note(ast.filepath, ctx.return_type.line_info, "return type is here.", .{});
                 common.print_note(ast.filepath, expr.line_info, "expression is here.", .{});
-                std.os.exit(1);
+                std.posix.exit(1);
             }
         },
         .Symbol => |symbol| {
             typecheck_symbol(ast, symbol);
         },
         .Assign => |assign| {
-            var lhs_type = typecheck_expr(ast, null, assign.lhs);
-            var rhs_type = typecheck_expr(ast, lhs_type, assign.rhs);
+            const lhs_type = typecheck_expr(ast, null, assign.lhs);
+            const rhs_type = typecheck_expr(ast, lhs_type, assign.rhs);
 
             if (!assign.lhs.is_lvalue) {
                 common.print_error(ast.filepath, assign.lhs.line_info, "expression is not an lvalue.", .{});
-                std.os.exit(1);
+                std.posix.exit(1);
             }
 
             if (rhs_type.payload == .Function) {
                 if (rhs_type.payload.Function.scope != ast.global_scope) {
                     common.print_error(ast.filepath, assign.rhs.line_info, "can't use function pointers to local functions.", .{});
-                    std.os.exit(1);
+                    std.posix.exit(1);
                 }
             }
 
             if (!lhs_type.eql(rhs_type)) {
                 common.print_error(ast.filepath, stmt.line_info, "expected '{}', but got '{}'.", .{ lhs_type, rhs_type });
-                std.os.exit(1);
+                std.posix.exit(1);
             }
         },
         .Expr => |expr| {
@@ -399,16 +399,16 @@ fn typecheck_stmt(ast: *Ast, ctx: *const TypecheckerStmtContext, stmt: *Ast.Stmt
 }
 
 fn typecheck_expr(ast: *Ast, type_hint: ?*Ast.Type, expr: *Ast.Expr) *Ast.Type {
-    var _type = typecheck_expr_rec(ast, type_hint, expr);
+    const _type = typecheck_expr_rec(ast, type_hint, expr);
     if (_type.payload == .Void) {
         common.print_error(ast.filepath, expr.line_info, "unexpected 'void' type.", .{});
-        std.os.exit(1);
+        std.posix.exit(1);
     }
     return _type;
 }
 
 fn typecheck_expr_rec(ast: *Ast, type_hint: ?*Ast.Type, expr: *Ast.Expr) *Ast.Type {
-    var result = typecheck_expr_rec_aux(ast, type_hint, expr);
+    const result = typecheck_expr_rec_aux(ast, type_hint, expr);
     expr._type = result;
     return result;
 }
@@ -418,55 +418,55 @@ fn typecheck_expr_rec_aux(ast: *Ast, type_hint: ?*Ast.Type, expr: *Ast.Expr) *As
         .Binary_Op => |op| {
             switch (op.tag) {
                 .Or, .And => {
-                    var lhs_type = typecheck_expr_rec(ast, &BOOL_TYPE_HINT, op.lhs);
-                    var rhs_type = typecheck_expr_rec(ast, &BOOL_TYPE_HINT, op.rhs);
+                    const lhs_type = typecheck_expr_rec(ast, &BOOL_TYPE_HINT, op.lhs);
+                    const rhs_type = typecheck_expr_rec(ast, &BOOL_TYPE_HINT, op.rhs);
 
                     if (lhs_type.payload != .Bool or rhs_type.payload != .Bool) {
                         common.print_error(ast.filepath, op.lhs.line_info, "mismatched types: '{}' and '{}'.", .{ lhs_type, rhs_type });
-                        std.os.exit(1);
+                        std.posix.exit(1);
                     }
 
                     return &BOOL_TYPE_HINT;
                 },
                 .Eq, .Neq => {
-                    var lhs_type = typecheck_expr_rec(ast, null, op.lhs);
-                    var rhs_type = typecheck_expr_rec(ast, lhs_type, op.rhs);
-                    var lhs_flags = lhs_type.compare();
+                    const lhs_type = typecheck_expr_rec(ast, null, op.lhs);
+                    const rhs_type = typecheck_expr_rec(ast, lhs_type, op.rhs);
+                    const lhs_flags = lhs_type.compare();
 
                     if (!lhs_flags.is_comparable) {
                         common.print_error(ast.filepath, op.lhs.line_info, "expression is not comparable: '{}'.", .{lhs_type});
-                        std.os.exit(1);
+                        std.posix.exit(1);
                     } else if (!lhs_type.eql(rhs_type)) {
                         common.print_error(ast.filepath, op.lhs.line_info, "mismatched types: '{}' and '{}'.", .{ lhs_type, rhs_type });
-                        std.os.exit(1);
+                        std.posix.exit(1);
                     }
 
                     return &BOOL_TYPE_HINT;
                 },
                 .Lt, .Leq, .Gt, .Geq => {
-                    var lhs_type = typecheck_expr_rec(ast, null, op.lhs);
-                    var rhs_type = typecheck_expr_rec(ast, lhs_type, op.rhs);
-                    var lhs_flags = lhs_type.compare();
+                    const lhs_type = typecheck_expr_rec(ast, null, op.lhs);
+                    const rhs_type = typecheck_expr_rec(ast, lhs_type, op.rhs);
+                    const lhs_flags = lhs_type.compare();
 
                     if (!lhs_flags.is_integer) {
                         common.print_error(ast.filepath, op.lhs.line_info, "expected integral type, but got '{}'.", .{lhs_type});
-                        std.os.exit(1);
+                        std.posix.exit(1);
                     } else if (!lhs_type.eql(rhs_type)) {
                         common.print_error(ast.filepath, op.lhs.line_info, "mismatched types: '{}' and '{}'.", .{ lhs_type, rhs_type });
-                        std.os.exit(1);
+                        std.posix.exit(1);
                     }
 
                     return &BOOL_TYPE_HINT;
                 },
                 .Add => {
-                    var lhs_type = typecheck_expr_rec(ast, null, op.lhs);
-                    var rhs_type = typecheck_expr_rec(ast, lhs_type, op.rhs);
-                    var lhs_flags = lhs_type.compare();
-                    var rhs_flags = rhs_type.compare();
+                    const lhs_type = typecheck_expr_rec(ast, null, op.lhs);
+                    const rhs_type = typecheck_expr_rec(ast, lhs_type, op.rhs);
+                    const lhs_flags = lhs_type.compare();
+                    const rhs_flags = rhs_type.compare();
 
                     if (lhs_flags.is_void_ptr or rhs_flags.is_void_ptr) {
                         common.print_error(ast.filepath, op.lhs.line_info, "can't add 'void' pointers.", .{});
-                        std.os.exit(1);
+                        std.posix.exit(1);
                     } else if (lhs_flags.is_ptr and rhs_flags.is_integer) {
                         return lhs_type;
                     } else if (lhs_flags.is_integer and rhs_flags.is_ptr) {
@@ -475,35 +475,35 @@ fn typecheck_expr_rec_aux(ast: *Ast, type_hint: ?*Ast.Type, expr: *Ast.Expr) *As
                         return lhs_type;
                     } else {
                         common.print_error(ast.filepath, op.lhs.line_info, "expected integer/pointer: '{}' and '{}'", .{ lhs_type, rhs_type });
-                        std.os.exit(1);
+                        std.posix.exit(1);
                     }
                 },
                 .Sub => {
-                    var lhs_type = typecheck_expr_rec(ast, null, op.lhs);
-                    var rhs_type = typecheck_expr_rec(ast, lhs_type, op.rhs);
-                    var lhs_flags = lhs_type.compare();
-                    var rhs_flags = rhs_type.compare();
+                    const lhs_type = typecheck_expr_rec(ast, null, op.lhs);
+                    const rhs_type = typecheck_expr_rec(ast, lhs_type, op.rhs);
+                    const lhs_flags = lhs_type.compare();
+                    const rhs_flags = rhs_type.compare();
 
                     if (lhs_flags.is_void_ptr) {
                         common.print_error(ast.filepath, op.lhs.line_info, "can't subtract 'void' pointer.", .{});
-                        std.os.exit(1);
+                        std.posix.exit(1);
                     } else if (lhs_flags.is_ptr and rhs_flags.is_integer) {
                         return lhs_type;
                     } else if (lhs_flags.is_integer and lhs_type.eql(rhs_type)) {
                         return lhs_type;
                     } else {
                         common.print_error(ast.filepath, op.lhs.line_info, "expected integer/pointer: '{}' and '{}'", .{ lhs_type, rhs_type });
-                        std.os.exit(1);
+                        std.posix.exit(1);
                     }
                 },
                 .Mul, .Div, .Mod => {
-                    var lhs_type = typecheck_expr_rec(ast, null, op.lhs);
-                    var rhs_type = typecheck_expr_rec(ast, lhs_type, op.rhs);
-                    var lhs_flags = lhs_type.compare();
+                    const lhs_type = typecheck_expr_rec(ast, null, op.lhs);
+                    const rhs_type = typecheck_expr_rec(ast, lhs_type, op.rhs);
+                    const lhs_flags = lhs_type.compare();
 
                     if (!lhs_flags.is_integer or !lhs_type.eql(rhs_type)) {
                         common.print_error(ast.filepath, op.lhs.line_info, "expected integer: '{}' and '{}'.", .{ lhs_type, rhs_type });
-                        std.os.exit(1);
+                        std.posix.exit(1);
                     }
 
                     return lhs_type;
@@ -513,35 +513,35 @@ fn typecheck_expr_rec_aux(ast: *Ast, type_hint: ?*Ast.Type, expr: *Ast.Expr) *As
         .Unary_Op => |op| {
             switch (op.tag) {
                 .Not => {
-                    var subexpr_type = typecheck_expr_rec(ast, &BOOL_TYPE_HINT, op.subexpr);
+                    const subexpr_type = typecheck_expr_rec(ast, &BOOL_TYPE_HINT, op.subexpr);
 
                     if (subexpr_type.payload != .Bool) {
                         common.print_error(ast.filepath, op.subexpr.line_info, "expected 'bool', but got '{}'.", .{subexpr_type});
-                        std.os.exit(1);
+                        std.posix.exit(1);
                     }
 
                     return &BOOL_TYPE_HINT;
                 },
                 .Neg => {
-                    var subexpr_type = typecheck_expr_rec(ast, null, op.subexpr);
-                    var subexpr_flags = subexpr_type.compare();
+                    const subexpr_type = typecheck_expr_rec(ast, null, op.subexpr);
+                    const subexpr_flags = subexpr_type.compare();
 
                     if (!subexpr_flags.is_integer) {
                         common.print_error(ast.filepath, op.subexpr.line_info, "expected integer, but got '{}'.", .{subexpr_type});
-                        std.os.exit(1);
+                        std.posix.exit(1);
                     }
 
                     return subexpr_type;
                 },
                 .Ref => {
-                    var subexpr_type = typecheck_expr_rec(ast, null, op.subexpr);
+                    const subexpr_type = typecheck_expr_rec(ast, null, op.subexpr);
 
                     if (!op.subexpr.is_lvalue) {
                         common.print_error(ast.filepath, op.subexpr.line_info, "expression is not an lvalue.", .{});
-                        std.os.exit(1);
+                        std.posix.exit(1);
                     }
 
-                    var result = ast.create(Ast.Type);
+                    const result = ast.create(Ast.Type);
                     result.* = .{
                         .payload = .{ .Pointer = subexpr_type },
                         .size = 8,
@@ -552,12 +552,12 @@ fn typecheck_expr_rec_aux(ast: *Ast, type_hint: ?*Ast.Type, expr: *Ast.Expr) *As
                     return result;
                 },
                 .Deref => {
-                    var subexpr_type = typecheck_expr_rec(ast, null, op.subexpr);
-                    var subexpr_flags = subexpr_type.compare();
+                    const subexpr_type = typecheck_expr_rec(ast, null, op.subexpr);
+                    const subexpr_flags = subexpr_type.compare();
 
                     if (!subexpr_flags.can_be_dereferenced) {
                         common.print_error(ast.filepath, op.subexpr.line_info, "can't dereference value of type '{}'.", .{subexpr_type});
-                        std.os.exit(1);
+                        std.posix.exit(1);
                     }
 
                     expr.is_lvalue = true;
@@ -567,62 +567,62 @@ fn typecheck_expr_rec_aux(ast: *Ast, type_hint: ?*Ast.Type, expr: *Ast.Expr) *As
             }
         },
         .If => |_if| {
-            var cond_type = typecheck_expr_rec(ast, &BOOL_TYPE_HINT, _if.cond);
+            const cond_type = typecheck_expr_rec(ast, &BOOL_TYPE_HINT, _if.cond);
 
             if (cond_type.payload != .Bool) {
                 common.print_error(ast.filepath, _if.cond.line_info, "expected 'bool', but got '{}'.", .{cond_type});
-                std.os.exit(1);
+                std.posix.exit(1);
             }
 
-            var if_true_type = typecheck_expr_rec(ast, type_hint, _if.if_true);
-            var if_false_type = typecheck_expr_rec(ast, type_hint, _if.if_false);
+            const if_true_type = typecheck_expr_rec(ast, type_hint, _if.if_true);
+            const if_false_type = typecheck_expr_rec(ast, type_hint, _if.if_false);
 
             if (!if_true_type.eql(if_false_type)) {
                 common.print_error(ast.filepath, _if.cond.line_info, "mismatched types: '{}' and '{}'.", .{ if_true_type, if_false_type });
-                std.os.exit(1);
+                std.posix.exit(1);
             }
 
             return if_true_type;
         },
         .Call => |call| {
-            var lhs_type = typecheck_expr_rec(ast, null, call.lhs);
+            const lhs_type = typecheck_expr_rec(ast, null, call.lhs);
 
             if (lhs_type.payload != .Function) {
                 common.print_error(ast.filepath, call.lhs.line_info, "expected a function, but got '{}'.", .{lhs_type});
-                std.os.exit(1);
+                std.posix.exit(1);
             }
 
-            var function = &lhs_type.payload.Function;
-            var params = function.params;
+            const function = &lhs_type.payload.Function;
+            const params = function.params;
 
             if (params.count != call.args.count) {
                 common.print_error(ast.filepath, call.lhs.line_info, "expected {} arguments, but got {}.", .{ params.count, call.args.count });
-                std.os.exit(1);
+                std.posix.exit(1);
             }
 
             var pit = params.iterator();
             var ait = call.args.iterator();
             while (ait.next()) |arg| {
-                var param = pit.next().?;
-                var param_type = param.*.payload.Parameter._type;
-                var arg_type = typecheck_expr(ast, param_type, arg);
+                const param = pit.next().?;
+                const param_type = param.*.payload.Parameter._type;
+                const arg_type = typecheck_expr(ast, param_type, arg);
 
                 if (!param_type.eql(arg_type)) {
                     common.print_error(ast.filepath, arg.line_info, "expected '{}', but got '{}'.", .{ param_type, arg_type });
-                    std.os.exit(1);
+                    std.posix.exit(1);
                 }
             }
 
             return function.return_type;
         },
         .Index => |index| {
-            var lhs_type = typecheck_expr_rec(ast, null, index.lhs);
-            var index_type = typecheck_expr_rec(ast, &INT64_TYPE_HINT, index.index);
-            var index_flags = index_type.compare();
+            const lhs_type = typecheck_expr_rec(ast, null, index.lhs);
+            const index_type = typecheck_expr_rec(ast, &INT64_TYPE_HINT, index.index);
+            const index_flags = index_type.compare();
 
             if (!index_flags.is_integer) {
                 common.print_error(ast.filepath, index.lhs.line_info, "expected integer, but got '{}'.", .{index_type});
-                std.os.exit(1);
+                std.posix.exit(1);
             }
 
             expr.is_lvalue = true;
@@ -637,16 +637,16 @@ fn typecheck_expr_rec_aux(ast: *Ast, type_hint: ?*Ast.Type, expr: *Ast.Expr) *As
                 },
                 else => {
                     common.print_error(ast.filepath, index.lhs.line_info, "expected array or pointer to array, but got '{}'.", .{lhs_type});
-                    std.os.exit(1);
+                    std.posix.exit(1);
                 },
             }
         },
         .Field => |field| {
-            var lhs_type = typecheck_expr_rec(ast, null, field.lhs);
+            const lhs_type = typecheck_expr_rec(ast, null, field.lhs);
 
             expr.is_lvalue = true;
 
-            var _struct: *Ast.TypeStruct = _struct: {
+            const _struct: *Ast.TypeStruct = _struct: {
                 switch (lhs_type.payload) {
                     .Struct, .Union => |*struct_ptr| break :_struct struct_ptr,
                     .Pointer => |subtype| {
@@ -654,22 +654,22 @@ fn typecheck_expr_rec_aux(ast: *Ast, type_hint: ?*Ast.Type, expr: *Ast.Expr) *As
                             .Struct, .Union => |*struct_ptr| break :_struct struct_ptr,
                             else => {
                                 common.print_error(ast.filepath, field.lhs.line_info, "expected pointer to struct/union, but got '{}'.", .{lhs_type});
-                                std.os.exit(1);
+                                std.posix.exit(1);
                             },
                         }
                     },
                     else => {
                         common.print_error(ast.filepath, field.lhs.line_info, "expected struct/union, but got '{}'.", .{lhs_type});
-                        std.os.exit(1);
+                        std.posix.exit(1);
                     },
                 }
             };
 
-            var key = Ast.SymbolKey{
+            const key = Ast.SymbolKey{
                 .text = field.id.text,
                 .scope = _struct.scope,
             };
-            var found_symbol = ast.symbols.get(key);
+            const found_symbol = ast.symbols.get(key);
 
             if (found_symbol) |symbol| {
                 switch (symbol.payload) {
@@ -680,7 +680,7 @@ fn typecheck_expr_rec_aux(ast: *Ast, type_hint: ?*Ast.Type, expr: *Ast.Expr) *As
                 }
             } else {
                 common.print_error(ast.filepath, field.lhs.line_info, "field '{s}' is not a member of a struct/union.", .{key.text});
-                std.os.exit(1);
+                std.posix.exit(1);
             }
         },
         .Initializer => |init| {
@@ -701,21 +701,21 @@ fn typecheck_expr_rec_aux(ast: *Ast, type_hint: ?*Ast.Type, expr: *Ast.Expr) *As
                     .Array => |array| {
                         if (list.count != array.count) {
                             common.print_error(ast.filepath, expr.line_info, "expected {} elements, but got {}.", .{ array.count, list.count });
-                            std.os.exit(1);
+                            std.posix.exit(1);
                         }
 
-                        var subhint = array.subtype;
+                        const subhint = array.subtype;
                         var it = list.iterator();
                         while (it.next()) |subexpr| {
                             if (subexpr.payload == .Designator) {
                                 common.print_error(ast.filepath, subexpr.line_info, "expected expression, but got designator.", .{});
-                                std.os.exit(1);
+                                std.posix.exit(1);
                             }
 
-                            var subexpr_type = typecheck_expr_rec(ast, subhint, subexpr);
+                            const subexpr_type = typecheck_expr_rec(ast, subhint, subexpr);
                             if (!subexpr_type.eql(subhint)) {
                                 common.print_error(ast.filepath, subexpr.line_info, "expected '{}', but got '{}'.", .{ subhint, subexpr_type });
-                                std.os.exit(1);
+                                std.posix.exit(1);
                             }
                         }
                     },
@@ -724,49 +724,49 @@ fn typecheck_expr_rec_aux(ast: *Ast, type_hint: ?*Ast.Type, expr: *Ast.Expr) *As
                         while (it.next()) |subexpr| {
                             if (subexpr.payload != .Designator) {
                                 common.print_error(ast.filepath, subexpr.line_info, "expected designator, but got expression.", .{});
-                                std.os.exit(1);
+                                std.posix.exit(1);
                             }
 
-                            var designator = &subexpr.payload.Designator;
-                            var key = Ast.SymbolKey{
+                            const designator = &subexpr.payload.Designator;
+                            const key = Ast.SymbolKey{
                                 .text = designator.id.text,
                                 .scope = _struct.scope,
                             };
-                            var found_symbol = ast.symbols.get(key);
+                            const found_symbol = ast.symbols.get(key);
 
                             if (found_symbol) |symbol| {
-                                var subhint = switch (symbol.payload) {
+                                const subhint = switch (symbol.payload) {
                                     .Struct_Field => |field| field._type,
                                     else => unreachable,
                                 };
-                                var subexpr_type = typecheck_expr_rec(ast, subhint, designator.expr);
+                                const subexpr_type = typecheck_expr_rec(ast, subhint, designator.expr);
                                 if (!subhint.eql(subexpr_type)) {
                                     common.print_error(ast.filepath, designator.expr.line_info, "expected '{}', but got '{}'.", .{ subhint, subexpr_type });
-                                    std.os.exit(1);
+                                    std.posix.exit(1);
                                 }
                             } else {
                                 common.print_error(ast.filepath, designator.id.line_info, "field '{s}' is not a member of a struct/union.", .{designator.id.text});
-                                std.os.exit(1);
+                                std.posix.exit(1);
                             }
                         }
                     },
                     else => {
                         common.print_error(ast.filepath, expr.line_info, "expected '{}', but got expression list.", .{hint});
-                        std.os.exit(1);
+                        std.posix.exit(1);
                     },
                 }
 
                 return hint;
             } else {
                 common.print_error(ast.filepath, expr.line_info, "can't infere the type of expression list.", .{});
-                std.os.exit(1);
+                std.posix.exit(1);
             }
         },
         .Designator => unreachable,
         .Enum_Field_From_Type => |field| {
             typecheck_type(ast, field._type);
 
-            var _type = field._type;
+            const _type = field._type;
             var subexpr = Ast.Expr{
                 .payload = .{ .Enum_Field = field.id },
                 ._type = undefined,
@@ -780,44 +780,44 @@ fn typecheck_expr_rec_aux(ast: *Ast, type_hint: ?*Ast.Type, expr: *Ast.Expr) *As
             if (type_hint) |hint| {
                 switch (hint.payload) {
                     .Enum => |_enum| {
-                        var key = Ast.SymbolKey{
+                        const key = Ast.SymbolKey{
                             .text = id.text,
                             .scope = _enum.scope,
                         };
-                        var found_symbol = ast.symbols.get(key);
+                        const found_symbol = ast.symbols.get(key);
 
                         if (found_symbol) |symbol| {
                             expr.payload = .{ .Symbol = symbol };
                             return hint;
                         } else {
                             common.print_error(ast.filepath, expr.line_info, "enumerator '{s}' is not defined.", .{id.text});
-                            std.os.exit(1);
+                            std.posix.exit(1);
                         }
                     },
                     else => {
                         common.print_error(ast.filepath, expr.line_info, "expected '{}', but got enum value.", .{hint});
-                        std.os.exit(1);
+                        std.posix.exit(1);
                     },
                 }
             } else {
                 common.print_error(ast.filepath, expr.line_info, "can't infere the type of enumerator.", .{});
-                std.os.exit(1);
+                std.posix.exit(1);
             }
         },
         .Cast1 => |subexpr| {
             if (type_hint) |hint| {
-                var payload = cast_expr(ast, hint, subexpr);
+                const payload = cast_expr(ast, hint, subexpr);
                 expr.payload = payload;
                 expr._type = hint;
                 return hint;
             } else {
                 common.print_error(ast.filepath, expr.line_info, "can't infere the type to cast to.", .{});
-                std.os.exit(1);
+                std.posix.exit(1);
             }
         },
         .Cast2 => |cast| {
             typecheck_type(ast, cast._type);
-            var payload = cast_expr(ast, cast._type, cast.expr);
+            const payload = cast_expr(ast, cast._type, cast.expr);
             expr.payload = payload;
             expr._type = cast._type;
             return cast._type;
@@ -833,14 +833,14 @@ fn typecheck_expr_rec_aux(ast: *Ast, type_hint: ?*Ast.Type, expr: *Ast.Expr) *As
         },
         .Type => {
             common.print_error(ast.filepath, expr.line_info, "unexpected type.", .{});
-            std.os.exit(1);
+            std.posix.exit(1);
         },
         .Symbol => |symbol| {
             switch (symbol.payload) {
                 .Variable => |variable| {
                     if (!variable.was_visited) {
                         common.print_error(ast.filepath, expr.line_info, "can't use variable in its own definition.", .{});
-                        std.os.exit(1);
+                        std.posix.exit(1);
                     }
 
                     expr.is_lvalue = true;
@@ -863,7 +863,7 @@ fn typecheck_expr_rec_aux(ast: *Ast, type_hint: ?*Ast.Type, expr: *Ast.Expr) *As
 }
 
 fn cast_expr(ast: *Ast, _type: *Ast.Type, expr: *Ast.Expr) Ast.ExprPayload {
-    var expr_type = typecheck_expr_rec(ast, null, expr);
+    const expr_type = typecheck_expr_rec(ast, null, expr);
 
     switch (_type.payload) {
         .Array => {
@@ -889,5 +889,5 @@ fn cast_expr(ast: *Ast, _type: *Ast.Type, expr: *Ast.Expr) Ast.ExprPayload {
     }
 
     common.print_error(ast.filepath, expr.line_info, "can't cast '{}' to '{}'.", .{ expr_type, _type });
-    std.os.exit(1);
+    std.posix.exit(1);
 }
