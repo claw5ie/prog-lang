@@ -14,13 +14,11 @@ pub fn read_entire_file(allocator: Allocator, filepath: []const u8) ![:0]u8 {
     std.debug.assert(try std.posix.read(fd, text[0..size]) == size);
     text[size] = 0;
 
+    std.posix.close(fd);
+
     return text[0..size :0];
 }
 
 pub fn is_prefix(prefix: []const u8, rest: []const u8) bool {
-    if (prefix.len > rest.len) {
-        return false;
-    } else {
-        return std.mem.eql(u8, prefix, rest[0..prefix.len]);
-    }
+    return prefix.len <= rest.len and std.mem.eql(u8, prefix, rest[0..prefix.len]);
 }
