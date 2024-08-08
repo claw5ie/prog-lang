@@ -1,47 +1,52 @@
 val00 := 0;
 
+aaa: i32 = 0;
+aab: i65 = 0;
+aac: i6 = 0;
+
 e := a;
 a := b;
-b := struct { x: *e };
 
-aa: struct { x: int } = .{ x = 2 };
+alias b: struct { x: e^ };
+
+aa: struct { x: int } = _(x = 2);
 bb := &aa;
-cc := bb.*;
+cc := bb^;
 
-BazBaz := struct
+alias BazBaz: struct
 {
   x: int,
   // y: enum { X = x };
 };
 
 // TODO: allow to assign constants to enumerators, e.g. "A = 2 + 2".
-Baz := enum
+alias Baz: enum
 {
   A,
   B,
   C,
 };
 
-Faz := union
+alias Faz: union
 {
-  x: [2]int,
-  y: *[2]Faz,
-  z: *enum { A },
+  x: int[2],
+  y: Faz[2]^,
+  z: enum { A }^,
 };
 
-Foo := struct
+alias Foo: struct
 {
   x: int,
   y: Bar,
   z: Baz,
 };
 
-Bar := struct
+alias Bar: struct
 {
   foo: int,
 };
 
-bar := proc(aa: struct { x: int }) -> void
+bar: proc(aa: struct { x: int }) void
 {
   {
     {
@@ -53,30 +58,30 @@ bar := proc(aa: struct { x: int }) -> void
   while true break;
   do continue; while false;
 
-  x: Foo = .{ x = 2, y = .{ foo = 2 } };
-  x = .{ x = 2 };
+  x: Foo = _(x = 2, y = _(foo = 2));
+  x = _(x = 2);
   x.y.foo = 2;
-  x.z = .A;
+  x.z = Foo.A;
   f := &x;
   f.x = 42;
 
-  y: *Foo = &x;
-  z: **Foo = null;
-  z.  *.*;
-  y.* = .{ };
+  y: Foo^ = &x;
+  z: Foo^^ = null;
+  z^^;
+  y^ = _();
 
-  b: [3]int = .{ 3, 4, 5 };
-  a: [2][3]int = .{ .{ 0, 1, 2 }, b };
-  c: [2]int;
-  d: [1][3]int = .{ .{ 1, 2, 3 } };
-  a[0] = .{ 2, 3, 4 };
+  b: int[3] = _(3, 4, 5);
+  a: int[2][3] = _(_( 0, 1, 2), b);
+  c: int[2];
+  d: int[1][3] = _(_(1, 2, 3));
+  a[0] = _(2, 3, 4);
   a[0][1] = 42;
 
   // e: bool = cast(2);
   // f := cast(bool, 2);
 
   g := &a[0];      // &[3]int
-  h: *[3]int = &g;
+  h: int[3]^ = &g;
   i := &a;         // &[2][3]int
 
   if false then {} else {}
@@ -85,17 +90,17 @@ bar := proc(aa: struct { x: int }) -> void
   return;
 }
 
-FazBaz := struct
+alias FazBaz: struct
 {
-  x: *[2]FazBaz,
+  x: FazBaz[2]^,
 };
 
-foo := proc() -> Foo
+foo: proc() Foo
 {
   // x = .{ x = 2 };
 }
 
-main := proc() -> void
+main: proc() void
 {
   val0 := -2 + 2;
   val1: int = 2;
@@ -103,16 +108,19 @@ main := proc() -> void
 
   switch val0
     {
-      0:
-      1:
+      case 0 then
+      case 1
       {
         2 + 2;
       }
-      2: {}
+      case 2 {}
+    }
+  else
+    {
     }
 
   val0 = 4;
-  val3: proc() = main;
+  val3: proc() void = main;
   val3();
 
   if !true || false && true
@@ -121,9 +129,9 @@ main := proc() -> void
     { }
 
   val4: int;
-  val5: Faz = .{ x = .{ 4, 2 } };
-  val6: *void = null;
-  val7: *void = &val6;
+  val5: Faz = _(x = _(4, 2));
+  val6: void^ = null;
+  val7: void^ = &val6;
 
   main();
 
@@ -131,7 +139,7 @@ main := proc() -> void
   return;
 }
 
-foofaz := proc(a: int, b: int,) -> int
+foofaz: proc(a: int, b: int,) int
 {
   return a + b;
 

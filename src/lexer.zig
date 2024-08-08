@@ -6,6 +6,7 @@ line_info: LineInfo = .{
     .column = 1,
     .offset = 0,
 },
+string_pool: common.StringPool,
 filepath: [:0]const u8,
 source_code: [:0]u8,
 allocator: common.Allocator,
@@ -21,18 +22,27 @@ pub fn init(filepath: [:0]const u8) Lexer {
     };
 
     return .{
+        .string_pool = common.StringPool.init(allocator),
         .filepath = filepath,
         .source_code = source_code,
         .allocator = allocator,
     };
 }
 
-pub fn deinit(l: *Lexer) void {
-    l.allocator.free(l.source_code);
+pub fn putback(l: *Lexer, tok: Token) void {
+    std.debug.assert(l.token_count < LOOKAHEAD);
+    l.token_start -%= 1;
+    l.token_start %= LOOKAHEAD;
+    l.token_count += 1;
+    l.buffer[l.token_start] = tok;
 }
 
 pub fn grab(l: *Lexer) Token {
     return grab_by_ptr(l, 0).*;
+}
+
+pub fn grab_line_info(l: *Lexer) LineInfo {
+    return grab_by_ptr(l, 0).line_info;
 }
 
 pub fn peek_ahead(l: *Lexer, index: u8) Token.Tag {
@@ -56,7 +66,7 @@ pub fn advance(l: *Lexer) void {
 pub fn expect(l: *Lexer, expected: Token.Tag) void {
     if (peek(l) != expected) {
         const tok = grab(l);
-        common.print_error(l.filepath, tok.line_info, "expected {s}.", .{token_tag_to_text(expected)});
+        common.print_error(l.filepath, tok.line_info, "expected {s}", .{token_tag_to_text(expected)});
         common.exit(1);
     }
     advance(l);
@@ -151,6 +161,7 @@ fn buffer_token(l: *Lexer) void {
                 .{ .text = "break", .as = .Break },
                 .{ .text = "false", .as = .{ .Boolean = false } },
                 .{ .text = "print", .as = .Print },
+                .{ .text = "alias", .as = .Alias },
                 .{ .text = "enum", .as = .Enum },
                 .{ .text = "proc", .as = .Proc },
                 .{ .text = "void", .as = .Void_Type },
@@ -160,6 +171,7 @@ fn buffer_token(l: *Lexer) void {
                 .{ .text = "null", .as = .Null },
                 .{ .text = "then", .as = .Then },
                 .{ .text = "else", .as = .Else },
+                .{ .text = "case", .as = .Case },
                 .{ .text = "if", .as = .If },
                 .{ .text = "do", .as = .Do },
             };
@@ -199,7 +211,9 @@ fn buffer_token(l: *Lexer) void {
                 }
             }
 
-            break :as .{ .Identifier = text };
+            const new_text = l.string_pool.insert(text);
+
+            break :as .{ .Identifier = new_text };
         };
     } else if (!is_print(ch)) {
         common.print_error(l.filepath, tok.line_info, "non-printable character with code '{}'.\n", .{ch});
@@ -218,7 +232,6 @@ fn buffer_token(l: *Lexer) void {
                 .{ .text = "!=", .as = .Neq },
                 .{ .text = "<=", .as = .Leq },
                 .{ .text = ">=", .as = .Geq },
-                .{ .text = "->", .as = .Arrow },
                 .{ .text = ":=", .as = .Colon_Equal },
                 .{ .text = "<", .as = .Lt },
                 .{ .text = ">", .as = .Gt },
@@ -228,6 +241,7 @@ fn buffer_token(l: *Lexer) void {
                 .{ .text = "/", .as = .Div },
                 .{ .text = "%", .as = .Mod },
                 .{ .text = "&", .as = .Ref },
+                .{ .text = "^", .as = .Deref },
                 .{ .text = "!", .as = .Not },
                 .{ .text = "(", .as = .Open_Paren },
                 .{ .text = ")", .as = .Close_Paren },
@@ -282,6 +296,7 @@ fn token_tag_to_text(tag: Token.Tag) []const u8 {
         .Mod => "'%'",
 
         .Ref => "'&'",
+        .Deref => "'^'",
         .Not => "'!'",
         .Open_Paren => "'('",
         .Close_Paren => "')'",
@@ -295,7 +310,6 @@ fn token_tag_to_text(tag: Token.Tag) []const u8 {
         .Dot => "'.'",
         .Comma => "','",
         .Equal => "'='",
-        .Arrow => "'->'",
 
         .Cast => "'@cast'",
         .Boolean => "boolean literal",
@@ -307,9 +321,9 @@ fn token_tag_to_text(tag: Token.Tag) []const u8 {
         .Union => "'union'",
         .Enum => "'enum'",
         .Proc => "'proc'",
-        .Void_Type => "'void'",
-        .Bool_Type => "'bool'",
         .Integer_Type => "integer type",
+        .Bool_Type => "'bool'",
+        .Void_Type => "'void'",
 
         .Print => "'print'",
         .If => "'if'",
@@ -321,6 +335,8 @@ fn token_tag_to_text(tag: Token.Tag) []const u8 {
         .Continue => "'continue'",
         .Switch => "'switch'",
         .Return => "'return'",
+        .Alias => "'alias'",
+        .Case => "'case'",
 
         .End_Of_File => "EOF",
     };
@@ -358,6 +374,7 @@ pub const Token = struct {
         Mod,
 
         Ref,
+        Deref,
         Not,
         Open_Paren,
         Close_Paren,
@@ -371,7 +388,6 @@ pub const Token = struct {
         Dot,
         Comma,
         Equal,
-        Arrow,
 
         Cast,
         Boolean,
@@ -383,9 +399,9 @@ pub const Token = struct {
         Union,
         Enum,
         Proc,
-        Void_Type,
-        Bool_Type,
         Integer_Type,
+        Bool_Type,
+        Void_Type,
 
         Print,
         If,
@@ -397,6 +413,8 @@ pub const Token = struct {
         Continue,
         Switch,
         Return,
+        Alias,
+        Case,
 
         End_Of_File,
     };
@@ -417,6 +435,7 @@ pub const Token = struct {
         Mod: void,
 
         Ref: void,
+        Deref: void,
         Not: void,
         Open_Paren: void,
         Close_Paren: void,
@@ -430,7 +449,6 @@ pub const Token = struct {
         Dot: void,
         Comma: void,
         Equal: void,
-        Arrow: void,
 
         Cast: void,
         Boolean: bool,
@@ -442,9 +460,9 @@ pub const Token = struct {
         Union: void,
         Enum: void,
         Proc: void,
-        Void_Type: void,
-        Bool_Type: void,
         Integer_Type: Token.IntegerType,
+        Bool_Type: void,
+        Void_Type: void,
 
         Print: void,
         If: void,
@@ -456,6 +474,8 @@ pub const Token = struct {
         Continue: void,
         Switch: void,
         Return: void,
+        Alias: void,
+        Case: void,
 
         End_Of_File: void,
     };

@@ -1,187 +1,548 @@
-const std = @import("std");
-const common = @import("common.zig");
-const Lexer = @import("lexer.zig");
-const Ast = @import("ast.zig");
-const Ir = @import("ircode.zig");
-
-const ArenaAllocator = std.heap.ArenaAllocator;
-const Allocator = std.mem.Allocator;
-const Token = Lexer.Token;
-
 lexer: Lexer,
-ast_arena: ArenaAllocator,
-ast_arena_allocator: Allocator,
-symbols: Ast.SymbolTable,
+global_symbols: Ast.SymbolList,
+symbol_table: Ast.SymbolTable,
+arena: common.ArenaAllocator,
 
 current_scope: *Ast.Scope,
-function_depth: Ast.FunctionDepth = 0,
-next_label: Ir.Label = 0,
+had_error: bool,
 
-const This = @This();
+const Parser = @This();
 
-const LOWEST_PREC = -127;
-
-fn grab_label(p: *This) Ir.Label {
-    const result = p.next_label;
-    p.next_label += 1;
-    return result;
-}
+const LOWEST_PREC: i32 = std.math.minInt(i32) + 1;
 
 pub fn parse(filepath: [:0]const u8) Ast {
-    var ast_arena = ArenaAllocator.init(std.heap.page_allocator);
-    const ast_arena_allocator = ast_arena.allocator();
-    const global_scope = ast_arena_allocator.create(Ast.Scope) catch {
-        common.exit(1);
-    };
-    global_scope.* = .{
-        .parent = null,
-    };
-
-    var parser: This = .{
+    var parser = Parser{
         .lexer = Lexer.init(filepath),
-        .ast_arena = ast_arena,
-        .ast_arena_allocator = ast_arena_allocator,
-        .symbols = Ast.SymbolTable.init(common.gpa),
-        .current_scope = global_scope,
+        .global_symbols = .{},
+        .symbol_table = Ast.SymbolTable.init(common.gpa),
+        .arena = common.ArenaAllocator.init(std.heap.page_allocator),
+        .current_scope = &Ast.global_scope,
+        .had_error = false,
     };
-    var p = &parser;
-    defer parser.lexer.deinit();
+    defer parser.lexer.allocator.free(parser.lexer.source_code);
 
-    var globals: Ast.SymbolList = .{};
-
-    while (p.lexer.peek() != .End_Of_File) {
-        const has_symbol = parse_symbol(p);
-        if (has_symbol) |symbol| {
-            const node = create(p, Ast.SymbolList.Node);
-            node.* = .{
-                .payload = symbol,
-            };
-            globals.insert_last(node);
-        } else {
-            const line_info = p.lexer.grab().line_info;
-            common.print_error(p.lexer.filepath, line_info, "expected ':' or ':=' to start definition.", .{});
-            common.exit(1);
-        }
-    }
-
-    std.debug.assert(p.current_scope == global_scope);
+    parse_top_level(&parser);
 
     return .{
-        .globals = globals,
-        .locals = .{},
-        .main = undefined,
-        .symbols = p.symbols,
-        .ast_arena = ast_arena,
-        .global_scope = global_scope,
-        .next_label = p.next_label,
+        .global_symbols = parser.global_symbols,
+        .main = null,
+        .symbol_table = parser.symbol_table,
+        .string_pool = parser.lexer.string_pool,
+        .arena = parser.arena,
         .filepath = filepath,
     };
 }
 
-fn create(p: *This, comptime T: type) *T {
-    return p.ast_arena_allocator.create(T) catch {
+fn parse_top_level(p: *Parser) void {
+    while (p.lexer.peek() != .End_Of_File) {
+        const stmt = parse_stmt(p);
+        switch (stmt.as) {
+            .Symbol => |symbol| {
+                const node = create(p, Ast.SymbolList.Node);
+                node.* = .{
+                    .data = symbol,
+                };
+                p.global_symbols.append(node);
+            },
+            else => {
+                report_error(p, stmt.line_info, "expected symbol definition", .{});
+            },
+        }
+    }
+
+    std.debug.assert(p.current_scope == &Ast.global_scope);
+
+    if (p.had_error) {
         common.exit(1);
+    }
+}
+
+fn parse_type(p: *Parser) *Ast.Type {
+    const typ = create(p, Ast.Type);
+    typ.* = parse_type_by_value(p);
+    return typ;
+}
+
+fn parse_type_by_value(p: *Parser) Ast.Type {
+    var typ: Ast.Type = undefined;
+    if (!try_parse_type_by_value(p, &typ)) {
+        report_error(p, p.lexer.grab_line_info(), "token doesn't start a type", .{});
+        common.exit(1);
+    }
+    return typ;
+}
+
+fn try_parse_type_by_value(p: *Parser, dst: *Ast.Type) bool {
+    const tok = p.lexer.grab();
+    p.lexer.advance();
+
+    dst.* = dst: {
+        switch (tok.as) {
+            .Open_Paren => {
+                const typ = parse_type_by_value(p);
+                p.lexer.expect(.Close_Paren);
+                break :dst typ;
+            },
+            .Struct => {
+                p.lexer.expect(.Open_Curly);
+                push_scope(p);
+                const scope = p.current_scope;
+                const fields = parse_symbol_list(p, .{
+                    .reinterpret_variable_as = .Struct_Field,
+                });
+                pop_scope(p);
+                p.lexer.expect(.Close_Curly);
+                const data = create(p, Ast.Type.SharedData);
+                data.* = .{
+                    .as = .{ .Struct = .{
+                        .fields = fields,
+                        .scope = scope,
+                    } },
+                    .byte_size = 0,
+                    .alignment = .BYTE,
+                    .stages = Ast.default_stages_none,
+                };
+                break :dst .{
+                    .line_info = tok.line_info,
+                    .data = data,
+                    .symbol = null,
+                };
+            },
+            .Union => {
+                p.lexer.expect(.Open_Curly);
+                push_scope(p);
+                const scope = p.current_scope;
+                const fields = parse_symbol_list(p, .{
+                    .reinterpret_variable_as = .Union_Field,
+                });
+                pop_scope(p);
+                p.lexer.expect(.Close_Curly);
+                const data = create(p, Ast.Type.SharedData);
+                data.* = .{
+                    .as = .{ .Union = .{
+                        .fields = fields,
+                        .scope = scope,
+                    } },
+                    .byte_size = 0,
+                    .alignment = .BYTE,
+                    .stages = Ast.default_stages_none,
+                };
+                break :dst .{
+                    .line_info = tok.line_info,
+                    .data = data,
+                    .symbol = null,
+                };
+            },
+            .Enum => {
+                p.lexer.expect(.Open_Curly);
+                push_scope(p);
+                const scope = p.current_scope;
+                const fields = parse_symbol_list(p, .{
+                    .reinterpret_variable_as = .Enum_Field,
+                });
+                pop_scope(p);
+                p.lexer.expect(.Close_Curly);
+                const data = create(p, Ast.Type.SharedData);
+                data.* = .{
+                    .as = .{ .Enum = .{
+                        .fields = fields,
+                        .scope = scope,
+                    } },
+                    .byte_size = 0,
+                    .alignment = .BYTE,
+                    .stages = Ast.default_stages_none,
+                };
+                break :dst .{
+                    .line_info = tok.line_info,
+                    .data = data,
+                    .symbol = null,
+                };
+            },
+            .Proc => {
+                p.lexer.expect(.Open_Paren);
+                push_scope(p);
+                const scope = p.current_scope;
+                const params = parse_symbol_list(p, .{
+                    .reinterpret_variable_as = .Parameter,
+                });
+                pop_scope(p);
+                p.lexer.expect(.Close_Paren);
+                const return_type = parse_type(p);
+                const data = create(p, Ast.Type.SharedData);
+                data.* = .{
+                    .as = .{ .Proc = .{
+                        .params = params,
+                        .return_type = return_type,
+                        .scope = scope,
+                    } },
+                    .byte_size = Ast.pointer_byte_size,
+                    .alignment = Ast.pointer_alignment,
+                    .stages = Ast.default_stages_none,
+                };
+                break :dst .{
+                    .line_info = tok.line_info,
+                    .data = data,
+                    .symbol = null,
+                };
+            },
+            .Integer_Type => |Integer_Type| {
+                const typ = Ast.lookup_integer_type(Integer_Type.bits, Integer_Type.is_signed);
+                break :dst .{
+                    .line_info = tok.line_info,
+                    .data = typ.data,
+                    .symbol = null,
+                };
+            },
+            .Bool_Type => {
+                break :dst .{
+                    .line_info = tok.line_info,
+                    .data = Ast.bool_type.data,
+                    .symbol = null,
+                };
+            },
+            .Void_Type => {
+                break :dst .{
+                    .line_info = tok.line_info,
+                    .data = Ast.void_type.data,
+                    .symbol = null,
+                };
+            },
+            .Identifier => |name| {
+                const data = create(p, Ast.Type.SharedData);
+                data.* = .{
+                    .as = .{ .Identifier = .{
+                        .name = name,
+                        .scope = p.current_scope,
+                    } },
+                    .byte_size = 0,
+                    .alignment = .BYTE,
+                    .stages = Ast.default_stages_none,
+                };
+                break :dst .{
+                    .line_info = tok.line_info,
+                    .data = data,
+                    .symbol = null,
+                };
+            },
+            else => {
+                p.lexer.putback(tok);
+                return false;
+            },
+        }
     };
+
+    while (true) {
+        switch (p.lexer.peek()) {
+            .Deref => {
+                const line_info = p.lexer.grab_line_info();
+                p.lexer.advance();
+
+                const subtype = create(p, Ast.Type);
+                subtype.* = dst.*;
+                const data = create(p, Ast.Type.SharedData);
+                data.* = .{
+                    .as = .{ .Pointer = subtype },
+                    .byte_size = Ast.pointer_byte_size,
+                    .alignment = Ast.pointer_alignment,
+                    .stages = Ast.default_stages_none,
+                };
+                dst.* = .{
+                    .line_info = line_info,
+                    .data = data,
+                    .symbol = null,
+                };
+            },
+            .Open_Bracket => {
+                const line_info = p.lexer.grab_line_info();
+
+                p.lexer.advance();
+                const size = parse_expr(p);
+                p.lexer.expect(.Close_Bracket);
+
+                const subtype = create(p, Ast.Type);
+                subtype.* = dst.*;
+                const data = create(p, Ast.Type.SharedData);
+                data.* = .{
+                    .as = .{ .Array = .{
+                        .subtype = subtype,
+                        .size = size,
+                    } },
+                    .byte_size = 0,
+                    .alignment = .BYTE,
+                    .stages = Ast.default_stages_none,
+                };
+                dst.* = .{
+                    .line_info = line_info,
+                    .data = data,
+                    .symbol = null,
+                };
+            },
+            else => break,
+        }
+    }
+
+    return true;
 }
 
-fn create_scope(p: *This) *Ast.Scope {
-    const result = create(p, Ast.Scope);
-    result.* = .{
-        .parent = p.current_scope,
-    };
-    return result;
+fn parse_symbol_list(p: *Parser, how_to_parse: HowToParseSymbol) Ast.SymbolList {
+    var list = Ast.SymbolList{};
+
+    var tt = p.lexer.peek();
+    while (tt != .End_Of_File and tt != .Close_Paren and tt != .Close_Curly) {
+        const symbol = parse_symbol(p, how_to_parse);
+
+        {
+            const node = create(p, Ast.SymbolList.Node);
+            node.* = .{
+                .data = symbol,
+            };
+            list.append(node);
+        }
+
+        tt = p.lexer.peek();
+        if (tt != .End_Of_File and tt != .Close_Paren and tt != .Close_Curly) {
+            p.lexer.expect(.Comma);
+            tt = p.lexer.peek();
+        }
+    }
+
+    return list;
 }
 
-fn push_scope(p: *This) void {
-    const scope = create_scope(p);
-    p.current_scope = scope;
+fn parse_symbol(p: *Parser, how_to_parse: HowToParseSymbol) *Ast.Symbol {
+    var htp = how_to_parse;
+    if (p.lexer.peek() == .Alias) {
+        if (!htp.accept_type) {
+            report_error(p, p.lexer.grab_line_info(), "unexpected alias", .{});
+            common.exit(1);
+        }
+
+        p.lexer.advance();
+        htp.reinterpret_variable_as = .Type;
+    }
+
+    const pattern = parse_expr(p);
+    const symbol = parse_partial_symbol(p, pattern, htp);
+    return symbol;
 }
 
-fn pop_scope(p: *This) void {
-    p.current_scope = p.current_scope.parent.?;
-}
+fn parse_partial_symbol(p: *Parser, pattern: *Ast.Expr, how_to_parse: HowToParseSymbol) *Ast.Symbol {
+    var branch: enum {
+        Symbol_Without_Type,
+        Symbol_With_Type,
+        Symbol_With_Type_And_Value,
+        Proc,
+        Expr,
+    } = .Expr;
+    var typ: ?*Ast.Type = null;
+    var value: ?*Ast.Expr = null;
+    var block: Ast.StmtList = .{};
 
-fn create_symbol(p: *This, token: Token) *Ast.Symbol {
-    const symbol = create(p, Ast.Symbol);
-    symbol.* = .{
-        .payload = undefined,
-        .key = .{
-            .text = token.as.Identifier,
-            .scope = p.current_scope,
+    switch (p.lexer.peek()) {
+        .Colon_Equal => {
+            branch = .Symbol_Without_Type;
+            p.lexer.advance();
+            value = parse_expr(p);
         },
-        .depth = p.function_depth,
-        .line_info = token.line_info,
+        .Colon => {
+            branch = .Symbol_With_Type;
+            p.lexer.advance();
+            typ = parse_type(p);
+            switch (p.lexer.peek()) {
+                .Open_Curly => {
+                    switch (typ.?.data.as) {
+                        .Proc => |Proc| {
+                            branch = .Proc;
+                            const old_current_scope = p.current_scope;
+
+                            p.current_scope = Proc.scope;
+                            block = parse_stmt_list(p);
+                            p.current_scope = old_current_scope;
+                        },
+                        else => {
+                            report_error(p, p.lexer.grab_line_info(), "unexpected procedure body", .{});
+                            common.exit(1);
+                        },
+                    }
+                },
+                .Equal => {
+                    branch = .Symbol_With_Type_And_Value;
+                    p.lexer.advance();
+                    value = parse_expr(p);
+                },
+                else => {},
+            }
+        },
+        else => {},
+    }
+
+    const symbol = insert_symbol(p, pattern);
+
+    symbol.as = as: {
+        switch (branch) {
+            .Symbol_Without_Type => {
+                switch (how_to_parse.reinterpret_variable_as) {
+                    .Variable => break :as .{ .Variable = .{
+                        .typ = typ,
+                        .value = value,
+                    } },
+                    .Enum_Field => break :as .{ .Enum_Field = .{
+                        .typ = Ast.void_type,
+                        .value = value,
+                    } },
+                    .Parameter,
+                    .Struct_Field,
+                    .Union_Field,
+                    .Type,
+                    => {
+                        report_error(p, pattern.line_info, "missing type after expression", .{});
+                        common.exit(1);
+                    },
+                }
+            },
+            .Symbol_With_Type => {
+                switch (how_to_parse.reinterpret_variable_as) {
+                    .Variable => break :as .{ .Variable = .{
+                        .typ = typ,
+                        .value = value,
+                    } },
+                    .Parameter => break :as .{ .Parameter = .{
+                        .typ = typ.?,
+                        .value = value,
+                    } },
+                    .Struct_Field => break :as .{ .Struct_Field = .{
+                        .typ = typ.?,
+                        .value = value,
+                    } },
+                    .Union_Field => break :as .{ .Union_Field = .{
+                        .typ = typ.?,
+                        .value = value,
+                    } },
+                    .Type => break :as .{ .Type = typ.? },
+                    .Enum_Field => {
+                        report_error(p, typ.?.line_info, "unexpected type", .{});
+                        common.exit(1);
+                    },
+                }
+            },
+            .Symbol_With_Type_And_Value => {
+                switch (how_to_parse.reinterpret_variable_as) {
+                    .Variable => break :as .{ .Variable = .{
+                        .typ = typ,
+                        .value = value,
+                    } },
+                    .Parameter => break :as .{ .Parameter = .{
+                        .typ = typ.?,
+                        .value = value,
+                    } },
+                    .Struct_Field => break :as .{ .Struct_Field = .{
+                        .typ = typ.?,
+                        .value = value,
+                    } },
+                    .Union_Field => break :as .{ .Union_Field = .{
+                        .typ = typ.?,
+                        .value = value,
+                    } },
+                    .Enum_Field => {
+                        report_error(p, typ.?.line_info, "unexpected type", .{});
+                        common.exit(1);
+                    },
+                    .Type => {
+                        report_error(p, value.?.line_info, "unexpected value", .{});
+                        common.exit(1);
+                    },
+                }
+            },
+            .Proc => {
+                if (!how_to_parse.accept_proc) {
+                    report_error(p, typ.?.line_info, "unexpected procedure body after non-procedure type", .{});
+                    common.exit(1);
+                }
+
+                break :as .{ .Procedure = .{
+                    .typ = typ.?,
+                    .block = block,
+                } };
+            },
+            .Expr => {
+                switch (how_to_parse.reinterpret_variable_as) {
+                    .Enum_Field => break :as .{ .Enum_Field = .{
+                        .typ = Ast.void_type,
+                        .value = value,
+                    } },
+                    else => {
+                        report_error(p, pattern.line_info, "expected ':' or ':=' after expression", .{});
+                        common.exit(1);
+                    },
+                }
+            },
+        }
     };
+
     return symbol;
 }
 
-fn insert_symbol(p: *This, id: Token) *Ast.Symbol {
-    std.debug.assert(id.as == .Identifier);
+fn insert_symbol(p: *Parser, pattern: *Ast.Expr) *Ast.Symbol {
+    switch (pattern.as) {
+        .Identifier => |Identifier| {
+            const key = Ast.Symbol.Key{
+                .name = Identifier.name,
+                .scope = Identifier.scope,
+            };
+            const insert_result = p.symbol_table.insert(key);
 
-    // Should create arena with identifier strings?
-    const symbol = create_symbol(p, id);
-    insert_existing_symbol(p, symbol);
+            if (insert_result.found_existing) {
+                report_error(p, pattern.line_info, "symbol '{s}' is defined already", .{key.name});
+                report_note(p, insert_result.value_ptr.*.line_info, "first defined here", .{});
+                common.exit(1);
+            }
 
-    return symbol;
-}
+            const symbol = create(p, Ast.Symbol);
+            symbol.* = .{
+                .line_info = pattern.line_info,
+                .as = undefined,
+                .key = key,
+            };
+            insert_result.value_ptr.* = symbol;
 
-fn insert_existing_symbol(p: *This, symbol: *Ast.Symbol) void {
-    const get_or_put_result = p.symbols.getOrPut(symbol.key) catch {
-        common.exit(1);
-    };
-
-    if (get_or_put_result.found_existing) {
-        common.print_error(p.lexer.filepath, symbol.line_info, "symbol '{s}' is already defined.", .{symbol.key.text});
-        common.print_note(p.lexer.filepath, get_or_put_result.value_ptr.*.line_info, "first defined here.", .{});
-        common.exit(1);
-    }
-
-    get_or_put_result.value_ptr.* = symbol;
-}
-
-fn extract_type(p: *This, expr: Ast.Expr) *Ast.Type {
-    const ok = Ast.extract_type(p.ast_arena_allocator, expr);
-    if (ok) |_type| {
-        return _type;
-    } else {
-        common.print_error(p.lexer.filepath, expr.line_info, "expression doesn't look like a type.", .{});
-        common.exit(1);
+            return symbol;
+        },
+        else => {
+            report_error(p, pattern.line_info, "expected identifier", .{});
+            common.exit(1);
+        },
     }
 }
 
-fn parse_type(p: *This) *Ast.Type {
-    return extract_type(p, parse_expr(p));
-}
-
-fn parse_type_function(p: *This) Ast.TypePayload {
+fn parse_expr_list(p: *Parser) Ast.ExprList {
     p.lexer.expect(.Open_Paren);
 
-    var params = Ast.SymbolList{};
+    var list = Ast.ExprList{};
 
     var tt = p.lexer.peek();
     while (tt != .End_Of_File and tt != .Close_Paren) {
-        const id = p.lexer.grab();
-        var has_id = false;
+        const expr_node = create(p, Ast.ExprListNode);
+        expr_node.* = expr_node: {
+            const lhs = parse_expr(p);
+            if (p.lexer.peek() == .Equal) {
+                p.lexer.advance();
+                const rhs = parse_expr(p);
 
-        if (p.lexer.peek() == .Identifier) {
-            p.lexer.advance();
-            p.lexer.expect(.Colon);
-            has_id = true;
-        }
-
-        const _type = parse_type(p);
-        const symbol = create_symbol(p, id);
-        symbol.payload = .{ .Parameter = .{
-            ._type = _type,
-            .has_id = has_id,
-            .tmp = undefined,
-        } };
-
-        const node = create(p, Ast.SymbolList.Node);
-        node.* = .{
-            .payload = symbol,
+                break :expr_node .{ .Designator = .{
+                    .lhs = lhs,
+                    .rhs = rhs,
+                } };
+            }
+            break :expr_node .{ .Expr = lhs };
         };
-        params.insert_last(node);
+
+        {
+            const node = create(p, Ast.ExprList.Node);
+            node.* = .{
+                .data = expr_node,
+            };
+            list.append(node);
+        }
 
         tt = p.lexer.peek();
         if (tt != .End_Of_File and tt != .Close_Paren) {
@@ -192,232 +553,68 @@ fn parse_type_function(p: *This) Ast.TypePayload {
 
     p.lexer.expect(.Close_Paren);
 
-    var return_type: *Ast.Type = undefined;
-
-    if (p.lexer.peek() == .Arrow) {
-        p.lexer.advance();
-        return_type = parse_type(p);
-    } else {
-        return_type = create(p, Ast.Type);
-        return_type.* = .{
-            .payload = .Void,
-            .size = undefined,
-            .line_info = p.lexer.grab().line_info,
-        };
-    }
-
-    return .{ .Function = .{
-        .params = params,
-        .return_type = return_type,
-        .scope = p.current_scope,
-    } };
+    return list;
 }
 
-fn parse_struct_fields(p: *This) Ast.TypeStruct {
-    p.lexer.expect(.Open_Curly);
+fn parse_fixed_size_expr_list(p: *Parser, dst: []*Ast.Expr) usize {
+    p.lexer.expect(.Open_Paren);
 
-    push_scope(p);
-
-    var _struct = Ast.TypeStruct{
-        .fields = .{},
-        .scope = p.current_scope,
-    };
+    var count: usize = 0;
 
     var tt = p.lexer.peek();
-    while (tt != .End_Of_File and tt != .Close_Curly) {
-        const id = p.lexer.grab();
-        p.lexer.expect(.Identifier);
-        p.lexer.expect(.Colon);
+    while (tt != .End_Of_File and tt != .Close_Paren) {
+        const expr = parse_expr(p);
 
-        const _type = parse_type(p);
-        const symbol = insert_symbol(p, id);
-        symbol.payload = .{ .Struct_Field = .{
-            ._type = _type,
-        } };
+        if (count < dst.len) {
+            dst[count] = expr;
+        }
 
-        const node = create(p, Ast.SymbolList.Node);
-        node.* = .{
-            .payload = symbol,
-        };
-        _struct.fields.insert_last(node);
+        count += 1;
 
         tt = p.lexer.peek();
-        if (tt != .End_Of_File and tt != .Close_Curly) {
+        if (tt != .End_Of_File and tt != .Close_Paren) {
             p.lexer.expect(.Comma);
             tt = p.lexer.peek();
         }
     }
 
-    pop_scope(p);
+    p.lexer.expect(.Close_Paren);
 
-    p.lexer.expect(.Close_Curly);
-
-    return _struct;
+    return count;
 }
 
-fn parse_symbol(p: *This) ?*Ast.Symbol {
-    if (p.lexer.peek() != .Identifier) return null;
-
-    switch (p.lexer.peek_ahead(1)) {
-        .Colon_Equal => {
-            const id = p.lexer.grab();
-            const symbol = insert_symbol(p, id);
-            p.lexer.advance_many(2);
-
-            if (p.lexer.peek() == .Proc) {
-                p.function_depth += 1;
-
-                const _type = parse_type(p);
-
-                if (p.lexer.peek() == .Open_Curly) {
-                    push_scope(p);
-
-                    var it = _type.payload.Function.params.iterator();
-                    while (it.next()) |param_ptr| {
-                        const param = &param_ptr.*.payload.Parameter;
-                        if (param.has_id) {
-                            param_ptr.*.key.scope = p.current_scope;
-                            insert_existing_symbol(p, param_ptr.*);
-                        }
-                    }
-
-                    const block = parse_stmt_block(p);
-
-                    symbol.payload = .{ .Function = .{
-                        ._type = _type,
-                        .block = block,
-                        .label = p.grab_label(),
-                        .depth = p.function_depth,
-                    } };
-
-                    pop_scope(p);
-                } else {
-                    p.lexer.expect(.Semicolon);
-                    symbol.payload = .{ .Type = _type };
-                }
-
-                p.function_depth -= 1;
-
-                return symbol;
-            } else {
-                const expr = create(p, Ast.Expr);
-                expr.* = parse_expr(p);
-                p.lexer.expect(.Semicolon);
-
-                symbol.payload = .{ .Definition = .{
-                    .expr = expr,
-                } };
-
-                return symbol;
-            }
-        },
-        .Colon => {
-            const id = p.lexer.grab();
-            const symbol = insert_symbol(p, id);
-            p.lexer.advance_many(2);
-
-            var expr: ?*Ast.Expr = null;
-            const _type = parse_type(p);
-
-            if (p.lexer.peek() == .Equal) {
-                p.lexer.advance();
-                expr = create(p, Ast.Expr);
-                expr.?.* = parse_expr(p);
-            }
-
-            p.lexer.expect(.Semicolon);
-
-            symbol.payload = .{ .Variable = .{
-                ._type = _type,
-                .expr = expr,
-                .tmp = undefined,
-            } };
-
-            return symbol;
-        },
-        else => {
-            return null;
-        },
-    }
+fn parse_expr(p: *Parser) *Ast.Expr {
+    return parse_expr_prec(p, LOWEST_PREC);
 }
 
-fn parse_expr_list(p: *This) Ast.ExprList {
-    p.lexer.expect(.Open_Curly);
-
-    var result = Ast.ExprList{};
-
-    var tt = p.lexer.peek();
-    while (tt != .End_Of_File and tt != .Close_Curly) {
-        const expr: Ast.Expr = expr: {
-            if (p.lexer.peek() == .Identifier and
-                p.lexer.peek_ahead(1) == .Equal)
-            {
-                const id = p.lexer.grab();
-                p.lexer.advance_many(2);
-
-                const value = create(p, Ast.Expr);
-                value.* = parse_expr(p);
-
-                break :expr .{
-                    .payload = .{ .Designator = .{
-                        .id = id,
-                        .expr = value,
-                    } },
-                    ._type = undefined,
-                    .line_info = id.line_info,
-                };
-            } else {
-                break :expr parse_expr(p);
-            }
-        };
-
-        const node = create(p, Ast.ExprList.Node);
-        node.* = .{
-            .payload = expr,
-        };
-        result.insert_last(node);
-
-        tt = p.lexer.peek();
-        if (tt != .End_Of_File and tt != .Close_Curly) {
-            p.lexer.expect(.Comma);
-            tt = p.lexer.peek();
-        }
-    }
-
-    p.lexer.expect(.Close_Curly);
-
-    return result;
-}
-
-fn parse_expr(p: *This) Ast.Expr {
-    return parse_prec(p, LOWEST_PREC);
-}
-
-fn parse_prec(p: *This, min_prec: i32) Ast.Expr {
-    var lhs = parse_highest_prec(p);
+fn parse_expr_prec(p: *Parser, min_prec: i32) *Ast.Expr {
+    var lhs = parse_expr_highest_prec(p);
     var op = p.lexer.peek();
-    var prev_prec: i32 = 0x7FFF_FFFF;
+    var prev_prec: i32 = std.math.maxInt(i32);
     var curr_prec: i32 = prec_of_op(op);
 
     while (curr_prec < prev_prec and curr_prec >= min_prec) {
-        while (curr_prec == prec_of_op(op)) {
+        while (true) {
+            const line_info = p.lexer.grab_line_info();
             p.lexer.advance();
 
-            const lhs_ptr = create(p, Ast.Expr);
-            const rhs_ptr = create(p, Ast.Expr);
-            lhs_ptr.* = lhs;
-            rhs_ptr.* = parse_prec(p, curr_prec + 1);
-            lhs = .{
-                .payload = .{ .Binary_Op = .{
-                    .tag = token_tag_to_expr_binary_op_tag(op),
-                    .lhs = lhs_ptr,
-                    .rhs = rhs_ptr,
+            const rhs = parse_expr_prec(p, curr_prec + 1);
+            const new_lhs = create(p, Ast.Expr);
+            new_lhs.* = .{
+                .line_info = lhs.line_info,
+                .as = .{ .Binary_Op = .{
+                    .line_info = line_info,
+                    .lhs = lhs,
+                    .rhs = rhs,
+                    .tag = token_tag_to_binary_op_tag(op),
                 } },
-                ._type = undefined,
-                .line_info = lhs_ptr.line_info,
+                .typ = Ast.void_type,
+                .flags = .{},
             };
+            lhs = new_lhs;
 
             op = p.lexer.peek();
+            if (curr_prec != prec_of_op(op)) break;
         }
 
         prev_prec = curr_prec;
@@ -427,447 +624,644 @@ fn parse_prec(p: *This, min_prec: i32) Ast.Expr {
     return lhs;
 }
 
-fn parse_highest_prec_base(p: *This) Ast.Expr {
+fn parse_expr_base(p: *Parser) *Ast.Expr {
     const tok = p.lexer.grab();
     p.lexer.advance();
 
     switch (tok.as) {
-        .Sub, .Ref, .Not => {
-            const subexpr = create(p, Ast.Expr);
-            subexpr.* = parse_highest_prec_base(p);
-
-            return .{
-                .payload = .{ .Unary_Op = .{
-                    .tag = token_tag_to_expr_unary_op_tag(tok.as),
-                    .subexpr = subexpr,
-                } },
-                ._type = undefined,
-                .line_info = tok.line_info,
-            };
-        },
         .And => {
-            common.print_error(p.lexer.filepath, tok.line_info, "can't take a reference of rvalue.", .{});
-            common.exit(1);
+            const subsubexpr = parse_expr_base(p);
+            const subexpr = create(p, Ast.Expr);
+            subexpr.* = .{
+                .line_info = tok.line_info,
+                .as = .{ .Ref = subsubexpr },
+                .typ = Ast.void_type,
+                .flags = .{},
+            };
+            subexpr.line_info.column += 1;
+            subexpr.line_info.offset += 1;
+            const expr = create(p, Ast.Expr);
+            expr.* = .{
+                .line_info = tok.line_info,
+                .as = .{ .Ref = subexpr },
+                .typ = Ast.void_type,
+                .flags = .{},
+            };
+            return expr;
+        },
+        .Add, .Sub, .Not => {
+            const subexpr = parse_expr_base(p);
+            const expr = create(p, Ast.Expr);
+            expr.* = .{
+                .line_info = subexpr.line_info,
+                .as = .{ .Unary_Op = .{
+                    .subexpr = subexpr,
+                    .tag = token_tag_to_unary_op_tag(tok.as),
+                } },
+                .typ = Ast.void_type,
+                .flags = .{},
+            };
+            return expr;
+        },
+        .Ref => {
+            const subexpr = parse_expr_base(p);
+            const expr = create(p, Ast.Expr);
+            expr.* = .{
+                .line_info = subexpr.line_info,
+                .as = .{ .Ref = subexpr },
+                .typ = Ast.void_type,
+                .flags = .{},
+            };
+            return expr;
         },
         .Open_Paren => {
             const expr = parse_expr(p);
+            expr.line_info = tok.line_info;
             p.lexer.expect(.Close_Paren);
-
-            return .{
-                .payload = expr.payload,
-                ._type = undefined,
-                .line_info = tok.line_info,
-            };
+            return expr;
         },
-        .Dot => {
-            switch (p.lexer.peek()) {
-                .Open_Curly => return .{
-                    .payload = .{ .Expr_List = parse_expr_list(p) },
-                    ._type = undefined,
-                    .line_info = tok.line_info,
-                },
-                .Identifier => {
-                    const id = p.lexer.grab();
-                    p.lexer.advance();
+        .If => {
+            const condition = parse_expr(p);
+            if (p.lexer.peek() == .Then) {
+                p.lexer.advance();
+            }
+            const true_branch = parse_expr(p);
+            p.lexer.expect(.Else);
+            const false_branch = parse_expr(p);
 
-                    return .{
-                        .payload = .{ .Enum_Field = id },
-                        ._type = undefined,
+            const expr = create(p, Ast.Expr);
+            expr.* = .{
+                .line_info = tok.line_info,
+                .as = .{ .If = .{
+                    .condition = condition,
+                    .true_branch = true_branch,
+                    .false_branch = false_branch,
+                } },
+                .typ = Ast.void_type,
+                .flags = .{},
+            };
+
+            return expr;
+        },
+        .Boolean => |value| {
+            const expr = create(p, Ast.Expr);
+            expr.* = .{
+                .line_info = tok.line_info,
+                .as = .{ .Boolean = value },
+                .typ = Ast.bool_type,
+                .flags = .{},
+            };
+            return expr;
+        },
+        .Null => {
+            const expr = create(p, Ast.Expr);
+            expr.* = .{
+                .line_info = tok.line_info,
+                .as = .Null,
+                .typ = Ast.void_pointer_type,
+                .flags = .{},
+            };
+            return expr;
+        },
+        .Identifier => |name| {
+            const expr = create(p, Ast.Expr);
+            expr.* = .{
+                .line_info = tok.line_info,
+                .as = .{ .Identifier = .{
+                    .name = name,
+                    .scope = p.current_scope,
+                } },
+                .typ = Ast.void_type,
+                .flags = .{},
+            };
+            return expr;
+        },
+        .Integer => |value| {
+            const typ = integer_type_from_value(value);
+            const expr = create(p, Ast.Expr);
+            expr.* = .{
+                .line_info = tok.line_info,
+                .as = .{ .Integer = value },
+                .typ = typ,
+                .flags = .{},
+            };
+            return expr;
+        },
+        .Cast => {
+            var exprs: [2]*Ast.Expr = undefined;
+            const count = parse_fixed_size_expr_list(p, &exprs);
+
+            switch (count) {
+                2 => {
+                    const typ = expr_to_type(p, exprs[0]);
+                    const expr = create(p, Ast.Expr);
+                    expr.* = .{
                         .line_info = tok.line_info,
+                        .as = .{ .Cast = .{
+                            .typ = typ,
+                            .expr = exprs[1],
+                        } },
+                        .typ = typ,
+                        .flags = .{},
                     };
+                    return expr;
                 },
                 else => {
-                    const line_info = p.lexer.grab().line_info;
-                    common.print_error(p.lexer.filepath, line_info, "expected identifier or '{{' after '.' operator.", .{});
-                    common.print_note(p.lexer.filepath, line_info, "expected designator list or identifier.", .{});
+                    report_error(p, tok.line_info, "expected 2 arguments, but got {}", .{count});
                     common.exit(1);
                 },
             }
         },
-        .If => {
-            const cond = create(p, Ast.Expr);
-            const if_true = create(p, Ast.Expr);
-            const if_false = create(p, Ast.Expr);
+        else => {
+            p.lexer.putback(tok);
 
-            cond.* = parse_expr(p);
+            var typ: Ast.Type = undefined;
+            if (!try_parse_type_by_value(p, &typ)) {
+                common.print_error(p.lexer.filepath, tok.line_info, "token doesn't start an expression.", .{});
+                common.exit(1);
+            }
+
+            const expr = create(p, Ast.Expr);
+            expr.* = .{
+                .line_info = tok.line_info,
+                .as = .{ .Type = typ },
+                .typ = Ast.void_type,
+                .flags = .{},
+            };
+            expr.typ = &expr.as.Type;
+
+            return expr;
+        },
+    }
+}
+
+fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
+    var base = parse_expr_base(p);
+
+    while (true) {
+        switch (p.lexer.peek()) {
+            .Open_Paren => {
+                const args = parse_expr_list(p);
+
+                const new_base = create(p, Ast.Expr);
+                new_base.* = .{
+                    .line_info = base.line_info,
+                    .as = .{ .Call = .{
+                        .subexpr = base,
+                        .args = args,
+                    } },
+                    .typ = Ast.void_type,
+                    .flags = .{},
+                };
+                base = new_base;
+            },
+            .Open_Bracket => {
+                p.lexer.advance();
+                const index = parse_expr(p);
+                p.lexer.expect(.Close_Bracket);
+
+                const new_base = create(p, Ast.Expr);
+                new_base.* = .{
+                    .line_info = base.line_info,
+                    .as = .{ .Subscript = .{
+                        .subexpr = base,
+                        .index = index,
+                    } },
+                    .typ = Ast.void_type,
+                    .flags = .{},
+                };
+                base = new_base;
+            },
+            .Deref => {
+                p.lexer.advance();
+
+                const new_base = create(p, Ast.Expr);
+                new_base.* = .{
+                    .line_info = base.line_info,
+                    .as = .{ .Deref = base },
+                    .typ = Ast.void_type,
+                    .flags = .{},
+                };
+                base = new_base;
+            },
+            .Dot => {
+                p.lexer.advance();
+
+                const field = parse_expr_base(p);
+                const new_base = create(p, Ast.Expr);
+                new_base.* = .{
+                    .line_info = base.line_info,
+                    .as = .{ .Field = .{
+                        .subexpr = base,
+                        .field = field,
+                    } },
+                    .typ = Ast.void_type,
+                    .flags = .{},
+                };
+                base = new_base;
+            },
+            else => break,
+        }
+    }
+
+    return base;
+}
+
+fn parse_stmt(p: *Parser) *Ast.Stmt {
+    const tok = p.lexer.grab();
+    p.lexer.advance();
+
+    switch (tok.as) {
+        .Print => {
+            const expr = parse_expr(p);
+            p.lexer.expect(.Semicolon);
+
+            const stmt = create(p, Ast.Stmt);
+            stmt.* = .{
+                .line_info = tok.line_info,
+                .as = .{ .Print = expr },
+            };
+
+            return stmt;
+        },
+        .Open_Curly => {
+            p.lexer.putback(tok);
+
+            push_scope(p);
+            const block = parse_stmt_list(p);
+            pop_scope(p);
+
+            const stmt = create(p, Ast.Stmt);
+            stmt.* = .{
+                .line_info = tok.line_info,
+                .as = .{ .Block = block },
+            };
+
+            return stmt;
+        },
+        .If => {
+            const condition = parse_expr(p);
             if (p.lexer.peek() == .Then) {
                 p.lexer.advance();
             }
-            if_true.* = parse_expr(p);
-            p.lexer.expect(.Else);
-            if_false.* = parse_expr(p);
-
-            return .{
-                .payload = .{ .If = .{
-                    .cond = cond,
-                    .if_true = if_true,
-                    .if_false = if_false,
-                } },
-                ._type = undefined,
-                .line_info = tok.line_info,
-            };
-        },
-        .Boolean => |value| {
-            return .{
-                .payload = .{ .Bool = value },
-                ._type = undefined,
-                .line_info = tok.line_info,
-            };
-        },
-        .Null => {
-            return .{
-                .payload = .Null,
-                ._type = undefined,
-                .line_info = tok.line_info,
-            };
-        },
-        .Identifier => {
-            return .{
-                .payload = .{ .Identifier = .{
-                    .token = tok,
-                    .scope = p.current_scope,
-                } },
-                ._type = undefined,
-                .line_info = tok.line_info,
-            };
-        },
-        .Integer => |value| {
-            return .{
-                .payload = .{ .Int64 = @bitCast(value) },
-                ._type = undefined,
-                .line_info = tok.line_info,
-            };
-        },
-        .Mul => {
-            const subtype = parse_type(p);
-            const _type = create(p, Ast.Type);
-            _type.* = .{
-                .payload = .{ .Pointer = subtype },
-                .size = undefined,
-                .line_info = tok.line_info,
-            };
-
-            return .{
-                .payload = .{ .Type = _type },
-                ._type = undefined,
-                .line_info = tok.line_info,
-            };
-        },
-        .Open_Bracket => {
-            const expr = create(p, Ast.Expr);
-            expr.* = parse_expr(p);
-            p.lexer.expect(.Close_Bracket);
-
-            const subtype = parse_type(p);
-            const _type = create(p, Ast.Type);
-            _type.* = .{
-                .payload = .{ .Array = .{
-                    .expr = expr,
-                    .count = undefined,
-                    .subtype = subtype,
-                } },
-                .size = undefined,
-                .line_info = tok.line_info,
-            };
-
-            return .{
-                .payload = .{ .Type = _type },
-                ._type = undefined,
-                .line_info = tok.line_info,
-            };
-        },
-        .Struct => {
-            const _struct = parse_struct_fields(p);
-            const _type = create(p, Ast.Type);
-            _type.* = .{
-                .payload = .{ .Struct = _struct },
-                .size = undefined,
-                .line_info = tok.line_info,
-            };
-
-            return .{
-                .payload = .{ .Type = _type },
-                ._type = undefined,
-                .line_info = tok.line_info,
-            };
-        },
-        .Union => {
-            const _union = parse_struct_fields(p);
-            const _type = create(p, Ast.Type);
-            _type.* = .{
-                .payload = .{ .Union = _union },
-                .size = undefined,
-                .line_info = tok.line_info,
-            };
-
-            return .{
-                .payload = .{ .Type = _type },
-                ._type = undefined,
-                .line_info = tok.line_info,
-            };
-        },
-        .Enum => {
-            p.lexer.expect(.Open_Curly);
-
-            push_scope(p);
-
-            var _enum = Ast.TypeStruct{
-                .fields = .{},
-                .scope = p.current_scope,
-            };
-
-            var tt = p.lexer.peek();
-            while (tt != .End_Of_File and tt != .Close_Curly) {
-                const id = p.lexer.grab();
-                p.lexer.expect(.Identifier);
-
-                const symbol = insert_symbol(p, id);
-                symbol.payload = .{ .Enum_Field = .{
-                    ._type = undefined,
-                    .value = undefined,
-                } };
-
-                const node = create(p, Ast.SymbolList.Node);
-                node.* = .{
-                    .payload = symbol,
-                };
-                _enum.fields.insert_last(node);
-
-                tt = p.lexer.peek();
-                if (tt != .End_Of_File and tt != .Close_Curly) {
-                    p.lexer.expect(.Comma);
-                    tt = p.lexer.peek();
-                }
+            const true_branch = parse_stmt(p);
+            var false_branch: ?*Ast.Stmt = null;
+            if (p.lexer.peek() == .Else) {
+                p.lexer.advance();
+                false_branch = parse_stmt(p);
             }
 
-            pop_scope(p);
-
-            p.lexer.expect(.Close_Curly);
-
-            const _type = create(p, Ast.Type);
-            _type.* = .{
-                .payload = .{ .Enum = _enum },
-                .size = undefined,
+            const stmt = create(p, Ast.Stmt);
+            stmt.* = .{
                 .line_info = tok.line_info,
+                .as = .{ .If = .{
+                    .condition = condition,
+                    .true_branch = true_branch,
+                    .false_branch = false_branch,
+                } },
             };
 
-            return .{
-                .payload = .{ .Type = _type },
-                ._type = undefined,
-                .line_info = tok.line_info,
-            };
+            return stmt;
         },
-        .Proc => {
-            const _type = create(p, Ast.Type);
-            _type.* = .{
-                .payload = parse_type_function(p),
-                .size = undefined,
-                .line_info = tok.line_info,
-            };
-
-            return .{
-                .payload = .{ .Type = _type },
-                ._type = undefined,
-                .line_info = tok.line_info,
-            };
-        },
-        .Void_Type => {
-            const _type = create(p, Ast.Type);
-            _type.* = .{
-                .payload = .Void,
-                .size = undefined,
-                .line_info = tok.line_info,
-            };
-            return .{
-                .payload = .{ .Type = _type },
-                ._type = undefined,
-                .line_info = tok.line_info,
-            };
-        },
-        .Bool_Type => {
-            const _type = create(p, Ast.Type);
-            _type.* = .{
-                .payload = .Bool,
-                .size = undefined,
-                .line_info = tok.line_info,
-            };
-            return .{
-                .payload = .{ .Type = _type },
-                ._type = undefined,
-                .line_info = tok.line_info,
-            };
-        },
-        .Integer_Type => {
-            const _type = create(p, Ast.Type);
-            _type.* = .{
-                .payload = .Int64,
-                .size = undefined,
-                .line_info = tok.line_info,
-            };
-            return .{
-                .payload = .{ .Type = _type },
-                ._type = undefined,
-                .line_info = tok.line_info,
-            };
-        },
-        .Cast => {
-            p.lexer.expect(.Open_Paren);
-
-            const lhs = parse_expr(p);
-
-            if (p.lexer.peek() == .Comma) {
+        .While => {
+            const condition = parse_expr(p);
+            if (p.lexer.peek() == .Do) {
                 p.lexer.advance();
             }
+            const body = parse_stmt(p);
 
-            if (p.lexer.peek() == .Close_Paren) {
+            const stmt = create(p, Ast.Stmt);
+            stmt.* = .{
+                .line_info = tok.line_info,
+                .as = .{ .While = .{
+                    .condition = condition,
+                    .body = body,
+                } },
+            };
+
+            return stmt;
+        },
+        .Do => {
+            const body = parse_stmt(p);
+            p.lexer.expect(.While);
+            const condition = parse_expr(p);
+            p.lexer.expect(.Semicolon);
+
+            const stmt = create(p, Ast.Stmt);
+            stmt.* = .{
+                .line_info = tok.line_info,
+                .as = .{ .Do_While = .{
+                    .condition = condition,
+                    .body = body,
+                } },
+            };
+
+            return stmt;
+        },
+        .Break => {
+            p.lexer.expect(.Semicolon);
+
+            const stmt = create(p, Ast.Stmt);
+            stmt.* = .{
+                .line_info = tok.line_info,
+                .as = .Break,
+            };
+
+            return stmt;
+        },
+        .Continue => {
+            p.lexer.expect(.Semicolon);
+
+            const stmt = create(p, Ast.Stmt);
+            stmt.* = .{
+                .line_info = tok.line_info,
+                .as = .Continue,
+            };
+
+            return stmt;
+        },
+        .Switch => {
+            const condition = parse_expr(p);
+            const cases = parse_stmt_switch(p);
+            var default_case: ?*Ast.Stmt = null;
+            if (p.lexer.peek() == .Else) {
+                p.lexer.advance();
+                default_case = parse_stmt(p);
+            }
+
+            const stmt = create(p, Ast.Stmt);
+            stmt.* = .{
+                .line_info = tok.line_info,
+                .as = .{ .Switch = .{
+                    .condition = condition,
+                    .cases = cases,
+                    .default_case = default_case,
+                } },
+            };
+
+            return stmt;
+        },
+        .Return => {
+            if (p.lexer.peek() == .Semicolon) {
                 p.lexer.advance();
 
-                const expr = create(p, Ast.Expr);
-                expr.* = lhs;
-                return .{
-                    .payload = .{ .Cast1 = expr },
-                    ._type = undefined,
+                const stmt = create(p, Ast.Stmt);
+                stmt.* = .{
                     .line_info = tok.line_info,
+                    .as = .{ .Return = null },
                 };
-            } else {
-                const _type = extract_type(p, lhs);
-                const rhs = create(p, Ast.Expr);
-                rhs.* = parse_expr(p);
 
-                if (p.lexer.peek() == .Comma) {
-                    p.lexer.advance();
-                }
-
-                p.lexer.expect(.Close_Paren);
-
-                return .{
-                    .payload = .{ .Cast2 = .{
-                        ._type = _type,
-                        .expr = rhs,
-                    } },
-                    ._type = undefined,
-                    .line_info = tok.line_info,
-                };
+                return stmt;
             }
+
+            const expr = parse_expr(p);
+            p.lexer.expect(.Semicolon);
+
+            const stmt = create(p, Ast.Stmt);
+            stmt.* = .{
+                .line_info = tok.line_info,
+                .as = .{ .Return = expr },
+            };
+
+            return stmt;
+        },
+        .Alias => {
+            p.lexer.putback(tok);
+            const symbol = parse_symbol(p, .{
+                .reinterpret_variable_as = .Type,
+                .accept_type = true,
+            });
+            p.lexer.expect(.Semicolon);
+
+            const stmt = create(p, Ast.Stmt);
+            stmt.* = .{
+                .line_info = tok.line_info,
+                .as = .{ .Symbol = symbol },
+            };
+
+            return stmt;
         },
         else => {
-            common.print_error(p.lexer.filepath, tok.line_info, "token doesn't start an expression.", .{});
+            p.lexer.putback(tok);
+
+            const expr = parse_expr(p);
+            switch (p.lexer.peek()) {
+                .Colon_Equal, .Colon => {
+                    const symbol = parse_partial_symbol(p, expr, .{
+                        .reinterpret_variable_as = .Variable,
+                        .accept_proc = true,
+                    });
+
+                    if (symbol.as == .Variable) {
+                        p.lexer.expect(.Semicolon);
+                    }
+
+                    const stmt = create(p, Ast.Stmt);
+                    stmt.* = .{
+                        .line_info = tok.line_info,
+                        .as = .{ .Symbol = symbol },
+                    };
+
+                    return stmt;
+                },
+                .Equal => {
+                    p.lexer.advance();
+                    const rhs = parse_expr(p);
+                    p.lexer.expect(.Semicolon);
+
+                    const stmt = create(p, Ast.Stmt);
+                    stmt.* = .{
+                        .line_info = tok.line_info,
+                        .as = .{ .Assign = .{
+                            .lhs = expr,
+                            .rhs = rhs,
+                        } },
+                    };
+
+                    return stmt;
+                },
+                else => {
+                    p.lexer.expect(.Semicolon);
+                    const stmt = create(p, Ast.Stmt);
+                    stmt.* = .{
+                        .line_info = tok.line_info,
+                        .as = .{ .Expr = expr },
+                    };
+                    return stmt;
+                },
+            }
+        },
+    }
+}
+
+fn parse_stmt_switch(p: *Parser) Ast.Stmt.Switch.CaseList {
+    p.lexer.expect(.Open_Curly);
+    push_scope(p);
+
+    var list = Ast.Stmt.Switch.CaseList{};
+
+    var tt = p.lexer.peek();
+    while (tt != .End_Of_File and tt != .Close_Curly) {
+        const case = parse_switch_case(p);
+
+        {
+            const node = create(p, Ast.Stmt.Switch.CaseList.Node);
+            node.* = .{
+                .data = case,
+            };
+            list.append(node);
+        }
+
+        tt = p.lexer.peek();
+    }
+
+    p.lexer.expect(.Close_Curly);
+    pop_scope(p);
+
+    return list;
+}
+
+fn parse_switch_case(p: *Parser) *Ast.Stmt.Switch.Case {
+    switch (p.lexer.peek()) {
+        .Case => {
+            p.lexer.advance();
+            const value = parse_expr(p);
+            if (p.lexer.peek() == .Then) {
+                p.lexer.advance();
+            }
+            const subcase = parse_switch_case(p);
+
+            const case = create(p, Ast.Stmt.Switch.Case);
+            case.* = .{ .Case = .{
+                .value = value,
+                .subcase = subcase,
+            } };
+
+            return case;
+        },
+        else => {
+            const stmt = parse_stmt(p);
+
+            const case = create(p, Ast.Stmt.Switch.Case);
+            case.* = .{ .Stmt = stmt };
+
+            return case;
+        },
+    }
+}
+
+fn parse_stmt_list(p: *Parser) Ast.StmtList {
+    p.lexer.expect(.Open_Curly);
+
+    var list = Ast.StmtList{};
+
+    var tt = p.lexer.peek();
+    while (tt != .End_Of_File and tt != .Close_Curly) {
+        const stmt = parse_stmt(p);
+
+        {
+            const node = create(p, Ast.StmtList.Node);
+            node.* = .{
+                .data = stmt,
+            };
+            list.append(node);
+        }
+
+        tt = p.lexer.peek();
+    }
+
+    p.lexer.expect(.Close_Curly);
+
+    return list;
+}
+
+// Assume 'expr' is heap allocated and can be reused.
+fn expr_to_type(p: *Parser, expr: *Ast.Expr) *Ast.Type {
+    switch (expr.as) {
+        .Deref => |subexpr| {
+            const subtype = expr_to_type(p, subexpr);
+
+            const data = create(p, Ast.Type.SharedData);
+            data.* = .{
+                .as = .{ .Pointer = subtype },
+                .byte_size = Ast.pointer_byte_size,
+                .alignment = Ast.pointer_alignment,
+                .stages = Ast.default_stages_none,
+            };
+            expr.as = .{ .Type = .{
+                .line_info = expr.line_info,
+                .data = data,
+                .symbol = null,
+            } };
+
+            return &expr.as.Type;
+        },
+        .Subscript => |Subscript| {
+            const subtype = expr_to_type(p, Subscript.subexpr);
+
+            const data = create(p, Ast.Type.SharedData);
+            data.* = .{
+                .as = .{ .Array = .{
+                    .subtype = subtype,
+                    .size = Subscript.index,
+                } },
+                .byte_size = 0,
+                .alignment = .BYTE,
+                .stages = Ast.default_stages_none,
+            };
+            expr.as = .{ .Type = .{
+                .line_info = expr.line_info,
+                .data = data,
+                .symbol = null,
+            } };
+
+            return &expr.as.Type;
+        },
+        .Type => |*typ| {
+            return typ;
+        },
+        .Identifier => |Identifier| {
+            const data = create(p, Ast.Type.SharedData);
+            data.* = .{
+                .as = .{ .Identifier = .{
+                    .name = Identifier.name,
+                    .scope = Identifier.scope,
+                } },
+                .byte_size = 0,
+                .alignment = .BYTE,
+                .stages = Ast.default_stages_none,
+            };
+            expr.as = .{ .Type = .{
+                .line_info = expr.line_info,
+                .data = data,
+                .symbol = null,
+            } };
+
+            return &expr.as.Type;
+        },
+        else => {
+            report_error(p, expr.line_info, "expected expression, not a type", .{});
             common.exit(1);
         },
     }
 }
 
-fn parse_highest_prec(p: *This) Ast.Expr {
-    var lhs = parse_highest_prec_base(p);
-    parse_postfix_unary_ops(p, &lhs);
-    return lhs;
+fn create(p: *Parser, comptime T: type) *T {
+    return p.arena.allocator().create(T) catch {
+        common.exit(1);
+    };
 }
 
-fn parse_postfix_unary_ops(p: *This, inner: *Ast.Expr) void {
-    while (true) {
-        switch (p.lexer.peek()) {
-            .Open_Paren => {
-                const line_info = p.lexer.grab().line_info;
-                p.lexer.advance();
+fn push_scope(p: *Parser) void {
+    const scope = create(p, Ast.Scope);
+    scope.* = .{
+        .parent = p.current_scope,
+    };
+    p.current_scope = scope;
+}
 
-                var args = Ast.ExprList{};
-
-                var tt = p.lexer.peek();
-                while (tt != .End_Of_File and tt != .Close_Paren) {
-                    const expr = parse_expr(p);
-                    const node = create(p, Ast.ExprList.Node);
-                    node.* = .{
-                        .payload = expr,
-                    };
-                    args.insert_last(node);
-
-                    tt = p.lexer.peek();
-                    if (tt != .End_Of_File and tt != .Close_Paren) {
-                        p.lexer.expect(.Comma);
-                        tt = p.lexer.peek();
-                    }
-                }
-
-                p.lexer.expect(.Close_Paren);
-
-                const lhs = create(p, Ast.Expr);
-                lhs.* = inner.*;
-                inner.* = .{
-                    .payload = .{ .Call = .{
-                        .lhs = lhs,
-                        .args = args,
-                    } },
-                    ._type = undefined,
-                    .line_info = line_info,
-                };
-            },
-            .Open_Bracket => {
-                const line_info = p.lexer.grab().line_info;
-                p.lexer.advance();
-
-                const expr = create(p, Ast.Expr);
-                expr.* = parse_expr(p);
-                p.lexer.expect(.Close_Bracket);
-
-                const lhs = create(p, Ast.Expr);
-                lhs.* = inner.*;
-                inner.* = .{
-                    .payload = .{ .Index = .{
-                        .lhs = lhs,
-                        .index = expr,
-                    } },
-                    ._type = undefined,
-                    .line_info = line_info,
-                };
-            },
-            .Dot => {
-                p.lexer.advance();
-
-                if (p.lexer.peek() == .Mul) {
-                    p.lexer.advance();
-
-                    const lhs = create(p, Ast.Expr);
-                    lhs.* = inner.*;
-                    inner.* = .{
-                        .payload = .{ .Unary_Op = .{
-                            .tag = .Deref,
-                            .subexpr = lhs,
-                        } },
-                        ._type = undefined,
-                        .line_info = lhs.line_info,
-                    };
-                } else if (p.lexer.peek() == .Open_Curly) {
-                    const expr_list = parse_expr_list(p);
-                    const _type = extract_type(p, inner.*);
-                    inner.* = .{
-                        .payload = .{ .Initializer = .{
-                            ._type = _type,
-                            .expr_list = expr_list,
-                        } },
-                        ._type = undefined,
-                        .line_info = _type.line_info,
-                    };
-                } else {
-                    const id = p.lexer.grab();
-                    p.lexer.expect(.Identifier);
-
-                    const lhs = create(p, Ast.Expr);
-                    lhs.* = inner.*;
-                    inner.* = .{
-                        .payload = .{ .Field = .{
-                            .lhs = lhs,
-                            .id = id,
-                        } },
-                        ._type = undefined,
-                        .line_info = id.line_info,
-                    };
-                }
-            },
-            else => {
-                break;
-            },
-        }
-    }
+fn pop_scope(p: *Parser) void {
+    p.current_scope = p.current_scope.parent.?;
 }
 
 fn prec_of_op(op: Token.Tag) i32 {
@@ -882,7 +1276,7 @@ fn prec_of_op(op: Token.Tag) i32 {
     };
 }
 
-fn token_tag_to_expr_binary_op_tag(op: Token.Tag) Ast.ExprBinaryOpTag {
+fn token_tag_to_binary_op_tag(op: Token.Tag) Ast.Expr.BinaryOp.Tag {
     return switch (op) {
         .Or => .Or,
         .And => .And,
@@ -901,242 +1295,50 @@ fn token_tag_to_expr_binary_op_tag(op: Token.Tag) Ast.ExprBinaryOpTag {
     };
 }
 
-fn token_tag_to_expr_unary_op_tag(op: Token.Tag) Ast.ExprUnaryOpTag {
+fn token_tag_to_unary_op_tag(op: Token.Tag) Ast.Expr.UnaryOp.Tag {
     return switch (op) {
+        .Add => .Pos,
         .Sub => .Neg,
-        .Ref => .Ref,
         .Not => .Not,
         else => unreachable,
     };
 }
 
-fn parse_stmt(p: *This) Ast.Stmt {
-    const line_info = p.lexer.grab().line_info;
-
-    switch (p.lexer.peek()) {
-        .Print => {
-            p.lexer.advance();
-
-            const expr = create(p, Ast.Expr);
-            expr.* = parse_expr(p);
-            p.lexer.expect(.Semicolon);
-
-            return .{
-                .payload = .{ .Print = expr },
-                .line_info = line_info,
-            };
-        },
-        .Open_Curly => {
-            push_scope(p);
-            const block = parse_stmt_block(p);
-            pop_scope(p);
-
-            return .{
-                .payload = .{ .Block = block },
-                .line_info = line_info,
-            };
-        },
-        .If => {
-            p.lexer.advance();
-
-            const cond = create(p, Ast.Expr);
-            cond.* = parse_expr(p);
-
-            if (p.lexer.peek() == .Then) {
-                p.lexer.advance();
-            }
-
-            const if_true = create(p, Ast.Stmt);
-            var if_false: ?*Ast.Stmt = null;
-
-            if_true.* = parse_stmt(p);
-            if (p.lexer.peek() == .Else) {
-                p.lexer.advance();
-                if_false = create(p, Ast.Stmt);
-                if_false.?.* = parse_stmt(p);
-            }
-
-            return .{
-                .payload = .{ .If = .{
-                    .cond = cond,
-                    .if_true = if_true,
-                    .if_false = if_false,
-                } },
-                .line_info = line_info,
-            };
-        },
-        .While => {
-            p.lexer.advance();
-
-            const cond = create(p, Ast.Expr);
-            cond.* = parse_expr(p);
-
-            if (p.lexer.peek() == .Do) {
-                p.lexer.advance();
-            }
-
-            const block = create(p, Ast.Stmt);
-            block.* = parse_stmt(p);
-
-            return .{
-                .payload = .{ .While = .{
-                    .cond = cond,
-                    .block = block,
-                } },
-                .line_info = line_info,
-            };
-        },
-        .Do => {
-            p.lexer.advance();
-
-            const block = create(p, Ast.Stmt);
-            block.* = parse_stmt(p);
-
-            p.lexer.expect(.While);
-
-            const cond = create(p, Ast.Expr);
-            cond.* = parse_expr(p);
-
-            p.lexer.expect(.Semicolon);
-
-            return .{
-                .payload = .{ .While = .{
-                    .block = block,
-                    .cond = cond,
-                    .is_do_while = true,
-                } },
-                .line_info = line_info,
-            };
-        },
-        .Break => {
-            p.lexer.advance();
-            p.lexer.expect(.Semicolon);
-            return .{
-                .payload = .Break,
-                .line_info = line_info,
-            };
-        },
-        .Continue => {
-            p.lexer.advance();
-            p.lexer.expect(.Semicolon);
-            return .{
-                .payload = .Continue,
-                .line_info = line_info,
-            };
-        },
-        .Switch => {
-            p.lexer.advance();
-
-            const cond = create(p, Ast.Expr);
-            cond.* = parse_expr(p);
-
-            push_scope(p);
-            const block = parse_stmt_block(p);
-            pop_scope(p);
-
-            return .{
-                .payload = .{ .Switch = .{
-                    .cond = cond,
-                    .cases = block,
-                } },
-                .line_info = line_info,
-            };
-        },
-        .Return => {
-            p.lexer.advance();
-
-            if (p.lexer.peek() == .Semicolon) {
-                p.lexer.advance();
-
-                return .{
-                    .payload = .Return,
-                    .line_info = line_info,
-                };
-            }
-
-            const expr = create(p, Ast.Expr);
-            expr.* = parse_expr(p);
-            p.lexer.expect(.Semicolon);
-
-            return .{
-                .payload = .{ .Return_Expr = expr },
-                .line_info = line_info,
-            };
-        },
-        else => {
-            const has_symbol = parse_symbol(p);
-
-            if (has_symbol) |symbol| {
-                return .{
-                    .payload = .{ .Symbol = symbol },
-                    .line_info = line_info,
-                };
-            } else {
-                const lhs = create(p, Ast.Expr);
-                lhs.* = parse_expr(p);
-
-                switch (p.lexer.peek()) {
-                    .Equal => {
-                        p.lexer.advance();
-
-                        const rhs = create(p, Ast.Expr);
-                        rhs.* = parse_expr(p);
-                        p.lexer.expect(.Semicolon);
-
-                        return .{
-                            .payload = .{ .Assign = .{
-                                .lhs = lhs,
-                                .rhs = rhs,
-                            } },
-                            .line_info = line_info,
-                        };
-                    },
-                    .Colon => {
-                        p.lexer.advance();
-
-                        const stmt = create(p, Ast.Stmt);
-                        stmt.* = parse_stmt(p);
-
-                        return .{
-                            .payload = .{ .Case = .{
-                                .expr = lhs,
-                                .stmt = stmt,
-                            } },
-                            .line_info = line_info,
-                        };
-                    },
-                    else => {
-                        p.lexer.expect(.Semicolon);
-
-                        return .{
-                            .payload = .{ .Expr = lhs },
-                            .line_info = line_info,
-                        };
-                    },
-                }
-            }
-        },
-    }
+fn integer_type_from_value(value: u64) *Ast.Type {
+    const bits = utils.count_bits(value);
+    return Ast.lookup_integer_type(bits, false);
 }
 
-fn parse_stmt_block(p: *This) Ast.StmtBlock {
-    p.lexer.expect(.Open_Curly);
-
-    var block = Ast.StmtBlock{};
-
-    var tt = p.lexer.peek();
-    while (tt != .End_Of_File and tt != .Close_Curly) {
-        const stmt = parse_stmt(p);
-        const node = create(p, Ast.StmtBlock.Node);
-        node.* = .{
-            .payload = stmt,
-        };
-        block.insert_last(node);
-
-        tt = p.lexer.peek();
-    }
-
-    p.lexer.expect(.Close_Curly);
-
-    return block;
+fn report_error(p: *Parser, line_info: LineInfo, comptime format: []const u8, args: anytype) void {
+    p.had_error = true;
+    common.print_error(p.lexer.filepath, line_info, format, args);
 }
+
+fn report_note(p: *Parser, line_info: LineInfo, comptime format: []const u8, args: anytype) void {
+    common.print_note(p.lexer.filepath, line_info, format, args);
+}
+
+const std = @import("std");
+const common = @import("common.zig");
+const utils = @import("utils.zig");
+const Lexer = @import("lexer.zig");
+const Ast = @import("ast.zig");
+const Ir = @import("ircode.zig");
+
+const ArenaAllocator = std.heap.ArenaAllocator;
+const Allocator = std.mem.Allocator;
+const Token = Lexer.Token;
+const LineInfo = common.LineInfo;
+
+const HowToParseSymbol = packed struct {
+    reinterpret_variable_as: enum(u3) {
+        Variable,
+        Parameter,
+        Struct_Field,
+        Union_Field,
+        Enum_Field,
+        Type,
+    },
+    accept_type: bool = false,
+    accept_proc: bool = false,
+};

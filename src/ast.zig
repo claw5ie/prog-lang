@@ -1,104 +1,104 @@
+global_symbols: SymbolList,
+main: ?*Symbol,
+symbol_table: SymbolTable,
+string_pool: common.StringPool,
+arena: common.ArenaAllocator,
+filepath: [:0]const u8,
+
+const Ast = @This();
+
+pub var global_scope = Scope{
+    .parent = null,
+};
+
+pub var void_pointer_type: *Type = undefined;
+pub var integer_types = [_]?*Type{null} ** 130;
+pub var bool_type: *Type = undefined;
+pub var void_type: *Type = undefined;
+
+pub const pointer_byte_size = 8;
+pub const pointer_alignment: Alignment = .QWORD;
+
+pub const default_stages_none = Ast.Type.Stages{
+    .unpacking = .None,
+    .shallow_check = .None,
+    .void_array_check = .None,
+    .full_check = .None,
+};
+
+pub const default_stages_done = Ast.Type.Stages{
+    .unpacking = .Done,
+    .shallow_check = .Done,
+    .void_array_check = .Done,
+    .full_check = .Done,
+};
+
+pub fn create(ast: *Ast, comptime T: type) *T {
+    return ast.arena.allocator().create(T) catch {
+        common.exit(1);
+    };
+}
+
+pub fn lookup_integer_type(bits: u8, is_signed: bool) *Type {
+    std.debug.assert(bits <= 64);
+
+    const index = 65 * @as(u8, @intFromBool(is_signed)) + bits;
+    if (integer_types[index] == null) {
+        const byte_size = @max(1, utils.round_to_next_pow2(bits) / 8);
+        const data = common.gpa.create(Ast.Type.SharedData) catch {
+            common.exit(1);
+        };
+        data.* = .{
+            .as = .{ .Integer = .{
+                .bits = bits,
+                .is_signed = is_signed,
+            } },
+            .byte_size = byte_size,
+            .alignment = switch (byte_size) {
+                1 => .BYTE,
+                2 => .WORD,
+                4 => .DWORD,
+                8 => .QWORD,
+                else => unreachable,
+            },
+            .stages = Ast.default_stages_done,
+        };
+        const typ = common.gpa.create(Ast.Type) catch {
+            common.exit(1);
+        };
+        typ.* = .{
+            .line_info = .{ .line = 1, .column = 1, .offset = 0 },
+            .data = data,
+            .symbol = null,
+        };
+
+        integer_types[index] = typ;
+    }
+
+    return integer_types[index].?;
+}
+
 const std = @import("std");
 const common = @import("common.zig");
-const notstd = @import("notstd.zig");
-const Lexer = @import("lexer.zig");
-const Ir = @import("ircode.zig");
+const utils = @import("utils.zig");
 
+pub const Alignment = common.Alignment;
 const LineInfo = common.LineInfo;
-const ArenaAllocator = std.heap.ArenaAllocator;
-const Allocator = std.mem.Allocator;
-
-globals: SymbolList,
-locals: SymbolList,
-main: *Symbol,
-symbols: SymbolTable,
-ast_arena: ArenaAllocator,
-
-global_scope: *Scope,
-next_label: Ir.Label,
-
-filepath: []const u8,
-
-const This = @This();
-
-pub const FunctionDepth = i32;
 
 pub const Scope = struct {
     parent: ?*Scope,
 };
 
-pub const Identifier = struct {
-    token: Lexer.Token,
-    scope: *Scope,
-};
-
-pub const TypeStruct = struct {
-    fields: SymbolList,
-    scope: *Scope,
-};
-
-pub const TypeTag = enum {
-    Struct,
-    Union,
-    Enum,
-    Function,
-    Array,
-    Pointer,
-    Void,
-    Bool,
-    Int64,
-    Identifier,
-};
-
-pub const TypePayload = union(TypeTag) {
-    Struct: TypeStruct,
-    Union: TypeStruct,
-    Enum: TypeStruct,
-    Function: struct {
-        params: SymbolList,
-        return_type: *Type,
-        scope: *Scope,
-    },
-    Array: struct {
-        expr: *Expr,
-        count: TypeSize,
-        subtype: *Type,
-    },
-    Pointer: *Type,
-    Void: void,
-    Bool: void,
-    Int64: void,
-    Identifier: Identifier,
-};
-
-pub const TypeSize = u31;
-
-pub const TypecheckingStage = enum {
-    Not_Typechecked,
-    Being_Shallow_Typechecked,
-    Shallow_Typechecked,
-    Being_Fully_Typechecked,
-    Fully_Typechecked,
+pub const Stage = enum {
+    None,
+    Going,
+    Done,
 };
 
 pub const Type = struct {
-    pub const Flags = packed struct {
-        is_integer: bool = false,
-        is_comparable: bool = false,
-        is_ptr: bool = false,
-        is_void_ptr: bool = false,
-        can_be_dereferenced: bool = false,
-        is_pointer_to_struct: bool = false,
-        is_pointer_to_union: bool = false,
-        is_pointer_to_array: bool = false,
-    };
-
-    payload: TypePayload,
-    symbol: ?*Symbol = null,
-    size: TypeSize,
-    is_resolved: bool = false,
-    typechecking_stage: TypecheckingStage = .Not_Typechecked,
     line_info: LineInfo,
+    data: *SharedData,
+    symbol: ?*Symbol,
 
     pub fn format(self: Type, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
         if (self.symbol) |symbol| {
@@ -174,36 +174,25 @@ pub const Type = struct {
     }
 
     pub fn eql(self: *Type, other: *Type) bool {
-        if (self.payload != @as(TypeTag, other.payload)) {
-            return false;
+        if (self.symbol != null and self.symbol == other.symbol) {
+            return true;
         }
 
-        switch (self.payload) {
-            .Struct => {
-                const sstruct = &self.payload.Struct;
-                const ostruct = &other.payload.Struct;
-                return sstruct.scope == ostruct.scope;
-            },
-            .Union => {
-                const sstruct = &self.payload.Union;
-                const ostruct = &other.payload.Union;
-                return sstruct.scope == ostruct.scope;
-            },
-            .Enum => {
-                const sstruct = &self.payload.Enum;
-                const ostruct = &other.payload.Enum;
-                return sstruct.scope == ostruct.scope;
-            },
-            .Function => {
-                const sfunc = &self.payload.Function;
-                const ofunc = &other.payload.Function;
-
-                if (sfunc.params.count != ofunc.params.count) {
+        switch (self.as) {
+            .Struct, .Union, .Enum => return false,
+            .Procedure => |sProcedure| {
+                if (other.as != .Procedure) {
                     return false;
                 }
 
-                var sit = sfunc.params.iterator();
-                var oit = ofunc.params.iterator();
+                const oProcedure = &other.as.Function;
+
+                if (sProcedure.params.count != oProcedure.params.count) {
+                    return false;
+                }
+
+                var sit = sProcedure.params.iterator();
+                var oit = oProcedure.params.iterator();
                 while (sit.next()) |sparam| {
                     const oparam = oit.next().?;
                     const otype = oparam.*.payload.Parameter._type;
@@ -213,317 +202,357 @@ pub const Type = struct {
                     }
                 }
 
-                const sreturn_type = sfunc.return_type;
-                const oreturn_type = ofunc.return_type;
+                const sreturn_type = sProcedure.return_type;
+                const oreturn_type = oProcedure.return_type;
 
                 return sreturn_type.eql(oreturn_type);
             },
-            .Array => {
-                const sarray = &self.payload.Array;
-                const oarray = &other.payload.Array;
-
-                if (sarray.count != oarray.count) {
+            .Array => |sArray| {
+                if (other.as != .Array) {
                     return false;
+                } else {
+                    // TODO: check if they have the same size.
+                    return sArray.subtype.equal(other.as.Array.subtype);
                 }
-
-                const ssubtype = sarray.subtype;
-                const osubtype = oarray.subtype;
-
-                return ssubtype.eql(osubtype);
             },
-            .Pointer => {
-                const stype = self.payload.Pointer;
-                const otype = other.payload.Pointer;
-
-                if (stype.payload == .Void or otype.payload == .Void) {
-                    return true;
+            .Pointer => |ssubtype| {
+                if (other.as != .Pointer) {
+                    return false;
+                } else {
+                    return ssubtype.equal(other.as.Pointer);
                 }
-
-                return stype.eql(otype);
             },
-            .Void,
-            .Bool,
-            .Int64,
-            => return true,
+            .Integer => |sInteger| {
+                if (other.as != .Integer) {
+                    return false;
+                } else {
+                    const oInteger = &other.as.Integer;
+                    return sInteger.bits == oInteger.bits and sInteger.is_signed == oInteger.is_signed;
+                }
+            },
+            .Bool => {
+                return other.as == .Bool;
+            },
+            .Void => {
+                return other.as == .Void;
+            },
             .Identifier => unreachable,
         }
     }
-};
 
-pub const ExprBinaryOpTag = enum {
-    Or,
-    And,
-    Eq,
-    Neq,
-    Lt,
-    Leq,
-    Gt,
-    Geq,
-    Add,
-    Sub,
-    Mul,
-    Div,
-    Mod,
-};
+    pub const SharedData = struct {
+        as: As,
+        byte_size: u64,
+        alignment: Alignment,
+        stages: Stages,
+    };
 
-pub const ExprUnaryOpTag = enum {
-    Not,
-    Neg,
-    Ref,
-    Deref,
-};
+    pub const As = union(enum) {
+        Struct: Type.Struct,
+        Union: Type.Struct,
+        Enum: Type.Struct,
+        Proc: Type.Proc,
+        Array: Type.Array,
+        Pointer: *Type,
+        Integer: Type.IntegerType,
+        Bool: void,
+        Void: void,
+        Identifier: Type.Identifier,
+    };
 
-pub const ExprTag = enum {
-    Binary_Op,
-    Unary_Op,
-    If,
-    Call,
-    Index,
-    Field,
-    Initializer,
-    Expr_List,
-    Designator,
-    Enum_Field_From_Type,
-    Enum_Field,
-    Cast1,
-    Cast2,
-    Bool,
-    Int64,
-    Null,
-    Type,
-    Symbol,
-    Identifier,
-};
+    pub const Struct = struct {
+        fields: SymbolList,
+        scope: *Scope,
+    };
 
-pub const ExprPayload = union(ExprTag) {
-    Binary_Op: struct {
-        tag: ExprBinaryOpTag,
-        lhs: *Expr,
-        rhs: *Expr,
-    },
-    Unary_Op: struct {
-        tag: ExprUnaryOpTag,
-        subexpr: *Expr,
-    },
-    If: struct {
-        cond: *Expr,
-        if_true: *Expr,
-        if_false: *Expr,
-    },
-    Call: struct {
-        lhs: *Expr,
-        args: ExprList,
-    },
-    Index: struct {
-        lhs: *Expr,
-        index: *Expr,
-    },
-    Field: struct {
-        lhs: *Expr,
-        id: Lexer.Token,
-    },
-    Initializer: struct {
-        _type: *Type,
-        expr_list: ExprList,
-    },
-    Expr_List: ExprList,
-    Designator: struct {
-        id: Lexer.Token,
-        expr: *Expr,
-    },
-    Enum_Field_From_Type: struct {
-        _type: *Type,
-        id: Lexer.Token,
-    },
-    Enum_Field: Lexer.Token,
-    Cast1: *Expr,
-    Cast2: struct {
-        _type: *Type,
-        expr: *Expr,
-    },
-    Bool: bool,
-    Int64: i64,
-    Null: void,
-    Type: *Type,
-    Symbol: *Symbol,
-    Identifier: Identifier,
+    pub const Proc = struct {
+        params: SymbolList,
+        return_type: *Type,
+        scope: *Scope,
+    };
+
+    pub const Array = struct {
+        subtype: *Type,
+        size: *Expr,
+    };
+
+    pub const IntegerType = struct {
+        bits: u8,
+        is_signed: bool,
+    };
+
+    pub const Identifier = struct {
+        name: []const u8,
+        scope: *Scope,
+    };
+
+    pub const Flags = packed struct {
+        is_integer: bool = false,
+        is_comparable: bool = false,
+        is_ptr: bool = false,
+        is_void_ptr: bool = false,
+        can_be_dereferenced: bool = false,
+        is_pointer_to_struct: bool = false,
+        is_pointer_to_union: bool = false,
+        is_pointer_to_array: bool = false,
+    };
+
+    pub const Stages = struct {
+        unpacking: Stage,
+        shallow_check: Stage,
+        void_array_check: Stage,
+        full_check: Stage,
+    };
 };
 
 pub const Expr = struct {
-    payload: ExprPayload,
-    _type: *Type,
-    is_lvalue: bool = false,
     line_info: LineInfo,
-};
+    as: As,
+    typ: *Type,
+    flags: Flags,
 
-pub const ExprList = notstd.DoublyLinkedList(Expr);
+    pub const As = union(enum) {
+        Binary_Op: Expr.BinaryOp,
+        Unary_Op: Expr.UnaryOp,
+        Ref: *Expr,
+        Deref: *Expr,
+        If: Expr.If,
+        Field: Expr.Field,
+        Call: Expr.Call,
+        Constructor: Expr.Constructor,
+        Subscript: Expr.Subscript,
+        Cast: Expr.Cast,
+        Type: Type,
+        Integer: u64,
+        Boolean: bool,
+        Null: void,
+        Symbol: *Symbol,
+        Identifier: Expr.Identifier,
+    };
 
-pub const StmtTag = enum {
-    Print,
-    Block,
-    If,
-    While,
-    Break,
-    Continue,
-    Switch,
-    Case,
-    Return,
-    Return_Expr,
-    Symbol,
-    Assign,
-    Expr,
-};
+    pub const BinaryOp = struct {
+        line_info: LineInfo,
+        lhs: *Expr,
+        rhs: *Expr,
+        tag: Tag,
 
-pub const StmtPayload = union(StmtTag) {
-    Print: *Expr,
-    Block: StmtBlock,
-    If: struct {
-        cond: *Expr,
-        if_true: *Stmt,
-        if_false: ?*Stmt,
-    },
-    While: struct {
-        cond: *Expr,
-        block: *Stmt,
-        is_do_while: bool = false,
-    },
-    Break: void,
-    Continue: void,
-    Switch: struct {
-        cond: *Expr,
-        cases: StmtBlock,
-    },
-    Case: struct {
+        pub const Tag = enum {
+            Or,
+            And,
+            Eq,
+            Neq,
+            Lt,
+            Leq,
+            Gt,
+            Geq,
+            Add,
+            Sub,
+            Mul,
+            Div,
+            Mod,
+        };
+    };
+
+    pub const UnaryOp = struct {
+        subexpr: *Expr,
+        tag: Tag,
+
+        pub const Tag = enum {
+            Pos,
+            Neg,
+            Not,
+        };
+    };
+
+    pub const If = struct {
+        condition: *Expr,
+        true_branch: *Expr,
+        false_branch: *Expr,
+    };
+
+    pub const Call = struct {
+        subexpr: *Expr,
+        args: ExprList,
+    };
+
+    pub const Constructor = struct {
+        typ: *Type,
+        args: ExprList,
+    };
+
+    pub const Subscript = struct {
+        subexpr: *Expr,
+        index: *Expr,
+    };
+
+    pub const Field = struct {
+        subexpr: *Expr,
+        field: *Expr,
+    };
+
+    pub const Cast = struct {
+        typ: *Type,
         expr: *Expr,
-        stmt: *Stmt,
-    },
-    Return: void,
-    Return_Expr: *Expr,
-    Symbol: *Symbol,
-    Assign: struct {
+    };
+
+    pub const Identifier = struct {
+        name: []const u8,
+        scope: *Scope,
+    };
+
+    pub const Flags = packed struct {
+        is_lvalue: bool = false,
+    };
+};
+
+pub const ExprListNode = union(enum) {
+    Designator: struct {
         lhs: *Expr,
         rhs: *Expr,
     },
     Expr: *Expr,
 };
 
+pub const ExprList = std.DoublyLinkedList(*ExprListNode);
+
 pub const Stmt = struct {
-    payload: StmtPayload,
     line_info: LineInfo,
+    as: As,
+
+    pub const As = union(enum) {
+        Print: *Expr,
+        Block: StmtList,
+        If: Stmt.If,
+        While: Stmt.While,
+        Do_While: Stmt.While,
+        Break: void,
+        Continue: void,
+        Switch: Stmt.Switch,
+        Return: ?*Expr,
+        Symbol: *Symbol,
+        Assign: Stmt.Assign,
+        Expr: *Expr,
+    };
+
+    pub const If = struct {
+        condition: *Expr,
+        true_branch: *Stmt,
+        false_branch: ?*Stmt,
+    };
+
+    pub const While = struct {
+        condition: *Expr,
+        body: *Stmt,
+    };
+
+    pub const Switch = struct {
+        condition: *Expr,
+        cases: CaseList,
+        default_case: ?*Stmt,
+
+        pub const Case = union(enum) {
+            Case: struct {
+                value: *Expr,
+                subcase: *Case,
+            },
+            Stmt: *Stmt,
+        };
+
+        pub const CaseList = std.DoublyLinkedList(*Case);
+    };
+
+    pub const Assign = struct {
+        lhs: *Expr,
+        rhs: *Expr,
+    };
 };
 
-pub const StmtBlock = notstd.DoublyLinkedList(Stmt);
-
-pub const SymbolVariable = struct {
-    _type: ?*Type,
-    expr: ?*Expr,
-    was_visited: bool = false,
-    tmp: Ir.Tmp,
-};
-
-pub const SymbolParameter = struct {
-    _type: *Type,
-    has_id: bool,
-    tmp: Ir.Tmp,
-};
-
-pub const SymbolFunction = struct {
-    _type: *Type,
-    block: StmtBlock,
-    label: Ir.Label,
-    depth: FunctionDepth,
-};
-
-pub const SymbolStructField = struct {
-    _type: *Type,
-};
-
-pub const SymbolEnumField = struct {
-    _type: *Type,
-    value: u64,
-};
-
-pub const SymbolDefinition = struct {
-    expr: *Expr,
-    was_visited: bool = false,
-};
-
-pub const SymbolTag = enum {
-    Variable,
-    Parameter,
-    Function,
-    Struct_Field,
-    Enum_Field,
-    Type,
-    Definition,
-};
-
-pub const SymbolPayload = union(SymbolTag) {
-    Variable: SymbolVariable,
-    Parameter: SymbolParameter,
-    Function: SymbolFunction,
-    Struct_Field: SymbolStructField,
-    Enum_Field: SymbolEnumField,
-    Type: *Type,
-    Definition: SymbolDefinition,
-};
+pub const StmtList = std.DoublyLinkedList(*Stmt);
 
 pub const Symbol = struct {
-    payload: SymbolPayload,
-    key: SymbolKey,
-    depth: FunctionDepth,
     line_info: LineInfo,
-};
+    as: As,
+    key: Key,
 
-pub const SymbolList = notstd.DoublyLinkedList(*Symbol);
-
-pub const SymbolKey = struct {
-    text: []const u8,
-    scope: *Scope,
-};
-
-pub const SymbolTableContext = struct {
-    pub fn hash(_: SymbolTableContext, key: SymbolKey) u64 {
-        const MurMur = std.hash.Murmur2_64;
-
-        const h0 = MurMur.hash(key.text);
-        const h1 = MurMur.hashUint64(@intFromPtr(key.scope));
-
-        return h0 +% 33 *% h1;
-    }
-
-    pub fn eql(_: SymbolTableContext, k0: SymbolKey, k1: SymbolKey) bool {
-        return k0.scope == k1.scope and std.mem.eql(u8, k0.text, k1.text);
-    }
-};
-
-pub const SymbolTable = std.HashMap(SymbolKey, *Symbol, SymbolTableContext, 80);
-
-pub fn create(ast: *This, comptime T: type) *T {
-    return ast.ast_arena.allocator().create(T) catch {
-        std.posix.exit(1);
+    pub const As = union(enum) {
+        Variable: Symbol.Variable,
+        Parameter: Symbol.Parameter,
+        Procedure: Symbol.Procedure,
+        Struct_Field: Symbol.StructField,
+        Union_Field: Symbol.StructField,
+        Enum_Field: Symbol.EnumField,
+        Type: *Type,
     };
-}
 
-pub fn extract_type(allocator: Allocator, expr: Expr) ?*Type {
-    switch (expr.payload) {
-        .Type => |_type| {
-            return _type;
-        },
-        .Identifier => |id| {
-            const _type = allocator.create(Type) catch {
-                std.posix.exit(1);
-            };
-            _type.* = .{
-                .payload = .{ .Identifier = id },
-                .size = undefined,
-                .line_info = expr.line_info,
-            };
+    pub const Variable = struct {
+        typ: ?*Type,
+        value: ?*Expr,
+    };
 
-            return _type;
-        },
-        else => {
-            return null;
-        },
+    pub const Parameter = struct {
+        typ: *Type,
+        value: ?*Expr,
+    };
+
+    pub const Procedure = struct {
+        typ: *Type,
+        block: StmtList,
+    };
+
+    pub const StructField = struct {
+        typ: *Type,
+        value: ?*Expr,
+    };
+
+    pub const EnumField = struct {
+        typ: *Type,
+        value: ?*Expr,
+    };
+
+    pub const Key = struct {
+        name: []const u8,
+        scope: *Scope,
+    };
+};
+
+pub const SymbolList = std.DoublyLinkedList(*Symbol);
+
+pub const SymbolTable = struct {
+    map: HashMap,
+
+    pub fn init(allocator: common.Allocator) SymbolTable {
+        return .{ .map = HashMap.init(allocator) };
     }
-}
+
+    pub fn deinit(table: *SymbolTable) void {
+        table.map.deinit();
+    }
+
+    pub fn insert(table: *SymbolTable, key: Key) InsertResult {
+        return table.map.getOrPut(key) catch {
+            common.exit(1);
+        };
+    }
+
+    pub const Key = Symbol.Key;
+    pub const Value = *Symbol;
+
+    pub const InsertResult = HashMap.GetOrPutResult;
+
+    pub const Context = struct {
+        pub fn hash(_: Context, key: Key) u64 {
+            const MurMur = std.hash.Murmur2_64;
+
+            const h0 = MurMur.hash(key.name);
+            const h1 = MurMur.hashUint64(@intFromPtr(key.scope));
+
+            return h0 +% 33 *% h1;
+        }
+
+        pub fn eql(_: Context, k0: Key, k1: Key) bool {
+            return k0.scope == k1.scope and std.mem.eql(u8, k0.name, k1.name);
+        }
+    };
+
+    pub const HashMap = std.HashMap(Key, Value, Context, 80);
+};

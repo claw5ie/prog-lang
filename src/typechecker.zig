@@ -12,31 +12,6 @@ const TypecheckTypeFlags = packed struct {
     reject_void_type: bool = false,
 };
 
-var VOID_TYPE_HINT = Ast.Type{
-    .payload = .Void,
-    .size = 0,
-    .typechecking_stage = .Fully_Typechecked,
-    .line_info = .{},
-};
-var VOID_PTR_TYPE_HINT = Ast.Type{
-    .payload = .{ .Pointer = &VOID_TYPE_HINT },
-    .size = 8,
-    .typechecking_stage = .Fully_Typechecked,
-    .line_info = .{},
-};
-var BOOL_TYPE_HINT = Ast.Type{
-    .payload = .Bool,
-    .size = 1,
-    .typechecking_stage = .Fully_Typechecked,
-    .line_info = .{},
-};
-var INT64_TYPE_HINT = Ast.Type{
-    .payload = .Int64,
-    .size = 8,
-    .typechecking_stage = .Fully_Typechecked,
-    .line_info = .{},
-};
-
 pub fn reduce_expr(ast: *Ast, expr: *Ast.Expr) void {
     if (expr.payload != .Int64) {
         common.print_error(ast.filepath, expr.line_info, "TODO: evaluate expression in compile-time.", .{});
