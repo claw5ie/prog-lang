@@ -31,6 +31,10 @@ pub const Alignment = enum(u2) {
     WORD = 1,
     DWORD = 2,
     QWORD = 3,
+
+    pub inline fn to_byte_size(alignment: Alignment) u4 {
+        return @as(u4, 1) << @intFromEnum(alignment);
+    }
 };
 
 pub const LineInfo = struct {

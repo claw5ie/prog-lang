@@ -441,10 +441,11 @@ fn parse_partial_symbol(p: *Parser, pattern: *Ast.Expr, how_to_parse: HowToParse
                     .Variable => break :as .{ .Variable = .{
                         .typ = typ,
                         .value = value,
+                        .is_typechecked = false,
                     } },
                     .Enum_Field => break :as .{ .Enum_Field = .{
-                        .typ = Ast.void_type,
                         .value = value,
+                        .computed_value = 0,
                     } },
                     .Parameter,
                     .Struct_Field,
@@ -461,6 +462,7 @@ fn parse_partial_symbol(p: *Parser, pattern: *Ast.Expr, how_to_parse: HowToParse
                     .Variable => break :as .{ .Variable = .{
                         .typ = typ,
                         .value = value,
+                        .is_typechecked = false,
                     } },
                     .Parameter => break :as .{ .Parameter = .{
                         .typ = typ.?,
@@ -486,6 +488,7 @@ fn parse_partial_symbol(p: *Parser, pattern: *Ast.Expr, how_to_parse: HowToParse
                     .Variable => break :as .{ .Variable = .{
                         .typ = typ,
                         .value = value,
+                        .is_typechecked = false,
                     } },
                     .Parameter => break :as .{ .Parameter = .{
                         .typ = typ.?,
@@ -523,8 +526,8 @@ fn parse_partial_symbol(p: *Parser, pattern: *Ast.Expr, how_to_parse: HowToParse
             .Expr => {
                 switch (how_to_parse.reinterpret_variable_as) {
                     .Enum_Field => break :as .{ .Enum_Field = .{
-                        .typ = Ast.void_type,
                         .value = value,
+                        .computed_value = 0,
                     } },
                     else => {
                         report_error(p, pattern.line_info, "expected ':' or ':=' after expression", .{});
@@ -684,6 +687,7 @@ fn try_parse_type_by_value(p: *Parser, dst: *Ast.Type) bool {
                 data.* = .{
                     .as = .{ .Enum = .{
                         .fields = fields,
+                        .integer_type = Ast.lookup_integer_type(0, false),
                         .scope = scope,
                     } },
                     .byte_size = 0,
@@ -804,6 +808,7 @@ fn try_parse_type_by_value(p: *Parser, dst: *Ast.Type) bool {
                     .as = .{ .Array = .{
                         .subtype = subtype,
                         .size = size,
+                        .computed_size = 0,
                     } },
                     .byte_size = 0,
                     .alignment = .BYTE,
@@ -1204,6 +1209,7 @@ fn expr_to_type(p: *Parser, expr: *Ast.Expr) *Ast.Type {
                 .as = .{ .Array = .{
                     .subtype = subtype,
                     .size = Subscript.index,
+                    .computed_size = 0,
                 } },
                 .byte_size = 0,
                 .alignment = .BYTE,

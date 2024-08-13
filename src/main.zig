@@ -51,6 +51,7 @@ pub fn main() void {
     }
 
     var ast = Parser.parse(filepath);
+    Typechecker.typecheck(&ast);
 
     ast.arena.deinit();
     ast.symbol_table.deinit();
@@ -68,3 +69,4 @@ const std = @import("std");
 const common = @import("common.zig");
 const Ast = @import("ast.zig");
 const Parser = @import("parser.zig");
+const Typechecker = @import("typechecker.zig");

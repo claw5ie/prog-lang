@@ -78,6 +78,45 @@ pub fn lookup_integer_type(bits: u8, is_signed: bool) *Type {
     return integer_types[index].?;
 }
 
+pub fn find_symbol_in_scope(ast: *Ast, key: Symbol.Key, offset: usize) ?*Symbol {
+    const has_symbol = ast.symbol_table.find(key);
+
+    if (has_symbol) |symbol| {
+        switch (symbol.as) {
+            .Variable,
+            .Parameter,
+            => {
+                if (symbol.line_info.offset < offset) {
+                    return symbol;
+                }
+            },
+            .Procedure,
+            .Struct_Field,
+            .Union_Field,
+            .Enum_Field,
+            .Type,
+            => return symbol,
+        }
+    }
+
+    return null;
+}
+
+pub fn find_symbol(ast: *Ast, key: Symbol.Key, offset: usize) ?*Symbol {
+    var k = key;
+    while (true) {
+        const has_symbol = find_symbol_in_scope(ast, k, offset);
+        if (has_symbol) |symbol| {
+            return symbol;
+        } else if (k.scope.parent) |parent| {
+            k.scope = parent;
+        } else {
+            break;
+        }
+    }
+    return null;
+}
+
 const std = @import("std");
 const common = @import("common.zig");
 const utils = @import("utils.zig");
@@ -102,139 +141,147 @@ pub const Type = struct {
 
     pub fn format(self: Type, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
         if (self.symbol) |symbol| {
-            try writer.writeAll(symbol.key.text);
+            try writer.writeAll(symbol.key.name);
             return;
         }
 
-        switch (self.payload) {
+        switch (self.data.as) {
             .Struct => try writer.writeAll("<struct>"),
             .Union => try writer.writeAll("<union>"),
             .Enum => try writer.writeAll("<enum>"),
-            .Function => |function| {
+            .Proc => |Procedure| {
                 try writer.print("proc(", .{});
 
-                var it = function.params.iterator();
-                while (it.next()) |param_ptr| {
-                    const param = &param_ptr.*.payload.Parameter;
-                    if (param.has_id) {
-                        try writer.print("{s}: ", .{param_ptr.*.key.text});
-                    }
-                    try writer.print("{}", .{param._type});
+                var it = Procedure.params.first;
+                while (it) |node| {
+                    const Parameter = &node.data.as.Parameter;
+                    try writer.print("{s}: {}", .{ node.data.key.name, Parameter.typ });
 
-                    if (it.has_next()) {
+                    it = node.next;
+                    if (it != null) {
                         try writer.print(", ", .{});
                     }
                 }
 
-                try writer.print(") -> {}", .{function.return_type});
+                try writer.print(") {}", .{Procedure.return_type});
             },
-            .Array => |array| try writer.print("[{}]{}", .{ array.count, array.subtype }),
-            .Pointer => |subtype| try writer.print("*{}", .{subtype}),
+            .Array => |Arr| try writer.print("{}[{}]", .{ Arr.subtype, Arr.computed_size }),
+            .Pointer => |subtype| try writer.print("{}^", .{subtype}),
             .Void => try writer.writeAll("void"),
             .Bool => try writer.writeAll("bool"),
-            .Int64 => try writer.writeAll("int64"),
+            .Integer => |Int| try writer.print("{c}{}", .{ @as(u8, if (Int.is_signed) 'i' else 'u'), Int.bits }),
             .Identifier => unreachable,
         }
     }
 
     pub fn compare(self: *Type) Flags {
-        var flags: Flags = .{};
+        var flags = Flags{};
 
-        switch (self.payload) {
+        switch (self.data.as) {
+            .Struct, .Union, .Array, .Void => {},
             .Enum => {
-                flags.is_integer = true;
                 flags.is_comparable = true;
+                flags.is_ordered = true;
             },
-            .Function => flags.is_ptr = true,
+            .Proc => {
+                flags.is_comparable = true;
+                flags.is_pointer = true;
+            },
             .Pointer => |subtype| {
-                flags.is_ptr = true;
+                flags.is_comparable = true;
+                flags.is_ordered = true;
+                flags.is_pointer = true;
                 flags.can_be_dereferenced = true;
 
-                switch (subtype.payload) {
+                switch (subtype.data.as) {
                     .Struct => flags.is_pointer_to_struct = true,
                     .Union => flags.is_pointer_to_union = true,
                     .Array => flags.is_pointer_to_array = true,
                     .Void => {
-                        flags.is_void_ptr = true;
+                        flags.is_void_pointer = true;
                         flags.can_be_dereferenced = false;
                     },
                     else => {},
                 }
             },
-            .Bool => flags.is_comparable = true,
-            .Int64 => {
-                flags.is_integer = true;
+            .Integer => {
                 flags.is_comparable = true;
+                flags.is_ordered = true;
             },
-            .Struct, .Union, .Array, .Void => {},
+            .Bool => flags.is_comparable = true,
             .Identifier => unreachable,
         }
 
         return flags;
     }
 
-    pub fn eql(self: *Type, other: *Type) bool {
+    pub fn equal(self: *Type, other: *Type) bool {
         if (self.symbol != null and self.symbol == other.symbol) {
             return true;
         }
 
-        switch (self.as) {
+        switch (self.data.as) {
             .Struct, .Union, .Enum => return false,
-            .Procedure => |sProcedure| {
-                if (other.as != .Procedure) {
+            .Proc => |sProc| {
+                if (other.data.as != .Proc) {
                     return false;
                 }
 
-                const oProcedure = &other.as.Function;
+                const oProc = &other.data.as.Proc;
 
-                if (sProcedure.params.count != oProcedure.params.count) {
+                if (sProc.params.len != oProc.params.len) {
                     return false;
                 }
 
-                var sit = sProcedure.params.iterator();
-                var oit = oProcedure.params.iterator();
-                while (sit.next()) |sparam| {
-                    const oparam = oit.next().?;
-                    const otype = oparam.*.payload.Parameter._type;
-                    const stype = sparam.*.payload.Parameter._type;
-                    if (!stype.eql(otype)) {
+                var sit = sProc.params.first;
+                var oit = oProc.params.first;
+                while (sit != null) {
+                    const snode = sit.?;
+                    const onode = oit.?;
+
+                    const stype = snode.data.as.Parameter.typ;
+                    const otype = onode.data.as.Parameter.typ;
+                    if (!stype.equal(otype)) {
                         return false;
                     }
+
+                    sit = snode.next;
+                    oit = onode.next;
                 }
 
-                const sreturn_type = sProcedure.return_type;
-                const oreturn_type = oProcedure.return_type;
+                const sreturn_type = sProc.return_type;
+                const oreturn_type = oProc.return_type;
 
-                return sreturn_type.eql(oreturn_type);
+                return sreturn_type.equal(oreturn_type);
             },
             .Array => |sArray| {
-                if (other.as != .Array) {
+                if (other.data.as != .Array) {
                     return false;
                 } else {
-                    // TODO: check if they have the same size.
-                    return sArray.subtype.equal(other.as.Array.subtype);
+                    const oArray = &other.data.as.Array;
+                    return sArray.computed_size == oArray.computed_size and sArray.subtype.equal(oArray.subtype);
                 }
             },
             .Pointer => |ssubtype| {
-                if (other.as != .Pointer) {
+                if (other.data.as != .Pointer) {
                     return false;
                 } else {
-                    return ssubtype.equal(other.as.Pointer);
+                    return ssubtype.equal(other.data.as.Pointer);
                 }
             },
             .Integer => |sInteger| {
-                if (other.as != .Integer) {
+                if (other.data.as != .Integer) {
                     return false;
                 } else {
-                    const oInteger = &other.as.Integer;
+                    const oInteger = &other.data.as.Integer;
                     return sInteger.bits == oInteger.bits and sInteger.is_signed == oInteger.is_signed;
                 }
             },
             .Bool => {
-                return other.as == .Bool;
+                return other.data.as == .Bool;
             },
             .Void => {
-                return other.as == .Void;
+                return other.data.as == .Void;
             },
             .Identifier => unreachable,
         }
@@ -250,7 +297,7 @@ pub const Type = struct {
     pub const As = union(enum) {
         Struct: Type.Struct,
         Union: Type.Struct,
-        Enum: Type.Struct,
+        Enum: Type.Enum,
         Proc: Type.Proc,
         Array: Type.Array,
         Pointer: *Type,
@@ -265,6 +312,12 @@ pub const Type = struct {
         scope: *Scope,
     };
 
+    pub const Enum = struct {
+        fields: SymbolList,
+        integer_type: *Type,
+        scope: *Scope,
+    };
+
     pub const Proc = struct {
         params: SymbolList,
         return_type: *Type,
@@ -274,6 +327,7 @@ pub const Type = struct {
     pub const Array = struct {
         subtype: *Type,
         size: *Expr,
+        computed_size: u64,
     };
 
     pub const IntegerType = struct {
@@ -287,10 +341,10 @@ pub const Type = struct {
     };
 
     pub const Flags = packed struct {
-        is_integer: bool = false,
         is_comparable: bool = false,
-        is_ptr: bool = false,
-        is_void_ptr: bool = false,
+        is_ordered: bool = false,
+        is_pointer: bool = false,
+        is_void_pointer: bool = false,
         can_be_dereferenced: bool = false,
         is_pointer_to_struct: bool = false,
         is_pointer_to_union: bool = false,
@@ -487,6 +541,7 @@ pub const Symbol = struct {
     pub const Variable = struct {
         typ: ?*Type,
         value: ?*Expr,
+        is_typechecked: bool,
     };
 
     pub const Parameter = struct {
@@ -505,8 +560,8 @@ pub const Symbol = struct {
     };
 
     pub const EnumField = struct {
-        typ: *Type,
         value: ?*Expr,
+        computed_value: u64,
     };
 
     pub const Key = struct {
@@ -520,7 +575,7 @@ pub const SymbolList = std.DoublyLinkedList(*Symbol);
 pub const SymbolTable = struct {
     map: HashMap,
 
-    pub fn init(allocator: common.Allocator) SymbolTable {
+    pub inline fn init(allocator: common.Allocator) SymbolTable {
         return .{ .map = HashMap.init(allocator) };
     }
 
@@ -532,6 +587,10 @@ pub const SymbolTable = struct {
         return table.map.getOrPut(key) catch {
             common.exit(1);
         };
+    }
+
+    pub inline fn find(table: *SymbolTable, key: Key) ?Value {
+        return table.map.get(key);
     }
 
     pub const Key = Symbol.Key;
