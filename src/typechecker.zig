@@ -1046,7 +1046,7 @@ fn typecheck_expr(ctx: *Context, expr: *Ast.Expr) TypecheckExprResult {
             .Cast => |Cast| {
                 typecheck_type(ctx, Cast.typ);
                 const expr_type = typecheck_expr_only(ctx, Cast.expr);
-                if (!cast(ctx, Cast.expr, expr_type, Cast.typ)) {
+                if (!can_unsafe_cast(ctx, Cast.expr, expr_type, Cast.typ)) {
                     report_error(ctx, Cast.expr.line_info, "can't cast '{}' to '{}'", .{ Cast.typ, expr_type });
                     common.exit(1);
                 }
@@ -1406,7 +1406,7 @@ fn safe_cast(ctx: *Context, expr: *Ast.Expr, expr_type: *Ast.Type, cast_to: *Ast
     return can_cast;
 }
 
-fn cast(ctx: *Context, expr: *Ast.Expr, expr_type: *Ast.Type, cast_to: *Ast.Type) bool {
+fn can_unsafe_cast(ctx: *Context, expr: *Ast.Expr, expr_type: *Ast.Type, cast_to: *Ast.Type) bool {
     if (safe_cast(ctx, expr, expr_type, cast_to)) {
         return true;
     }
@@ -1434,20 +1434,6 @@ fn cast(ctx: *Context, expr: *Ast.Expr, expr_type: *Ast.Type, cast_to: *Ast.Type
             }
         },
         .Identifier => unreachable,
-    }
-
-    if (can_cast) {
-        const subexpr = ctx.ast.create(Ast.Expr);
-        subexpr.* = expr.*;
-        expr.* = .{
-            .line_info = subexpr.line_info,
-            .as = .{ .Cast = .{
-                .typ = cast_to,
-                .expr = subexpr,
-            } },
-            .typ = cast_to,
-            .flags = .{},
-        };
     }
 
     return can_cast;
