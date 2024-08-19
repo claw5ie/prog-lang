@@ -87,13 +87,6 @@ fn typecheck_symbol(ctx: *Context, symbol: *Ast.Symbol) void {
 
             Variable.is_typechecked = true;
         },
-        .Parameter => |Parameter| {
-            typecheck_type(ctx, Parameter.typ);
-            if (Parameter.value) |value| {
-                report_error(ctx, value.line_info, "default values in parameters are not allowed", .{});
-                common.exit(1);
-            }
-        },
         .Procedure => |Procedure| {
             typecheck_type(ctx, Procedure.typ);
 
@@ -112,10 +105,7 @@ fn typecheck_symbol(ctx: *Context, symbol: *Ast.Symbol) void {
             typ.symbol = symbol;
             typecheck_type(ctx, typ);
         },
-        .Struct_Field,
-        .Union_Field,
-        .Enum_Field,
-        => unreachable,
+        .Parameter, .Struct_Field, .Union_Field, .Enum_Field => unreachable,
     }
 }
 
@@ -279,17 +269,18 @@ fn full_check(ctx: *Context, typ: *Ast.Type) void {
 
             var it = Struct.fields.first;
             while (it) |node| {
-                const field_type = &node.data.as.Struct_Field;
+                const Field = &node.data.as.Struct_Field;
 
-                full_check(ctx, field_type.typ);
-                if (field_type.value) |value| {
+                full_check(ctx, Field.typ);
+                if (Field.value) |value| {
                     report_error(ctx, value.line_info, "default values are not supported", .{});
                     common.exit(1);
                 }
 
-                const field_alignment = field_type.typ.data.alignment;
+                const field_alignment = Field.typ.data.alignment;
                 size = utils.align_u64(size, field_alignment);
-                size += field_type.typ.data.byte_size;
+                Field.offset = size;
+                size += Field.typ.data.byte_size;
                 alignment = @enumFromInt(@max(@intFromEnum(alignment), @intFromEnum(field_alignment)));
 
                 it = node.next;
@@ -304,14 +295,15 @@ fn full_check(ctx: *Context, typ: *Ast.Type) void {
 
             var it = Union.fields.first;
             while (it) |node| {
-                const field_type = node.data.as.Union_Field;
-                full_check(ctx, field_type.typ);
-                if (field_type.value) |value| {
+                const Field = &node.data.as.Union_Field;
+                full_check(ctx, Field.typ);
+                if (Field.value) |value| {
                     report_error(ctx, value.line_info, "default values are not supported", .{});
                     common.exit(1);
                 }
-                size = @max(size, field_type.typ.data.byte_size);
-                alignment = @enumFromInt(@max(@intFromEnum(alignment), @intFromEnum(field_type.typ.data.alignment)));
+                Field.offset = 0;
+                size = @max(size, Field.typ.data.byte_size);
+                alignment = @enumFromInt(@max(@intFromEnum(alignment), @intFromEnum(Field.typ.data.alignment)));
                 it = node.next;
             }
 
@@ -540,6 +532,10 @@ fn typecheck_stmt(ctx: *Context, stmt: *Ast.Stmt) void {
         },
         .Symbol => |symbol| {
             typecheck_symbol(ctx, symbol);
+            if (symbol.as == .Procedure) {
+                report_error(ctx, stmt.line_info, "no local function allowed, yet", .{});
+                common.exit(1);
+            }
         },
         .Assign => |Assign| {
             const lhs_type = typecheck_expr_only(ctx, Assign.lhs);
@@ -1414,15 +1410,7 @@ fn can_unsafe_cast(ctx: *Context, expr: *Ast.Expr, expr_type: *Ast.Type, cast_to
     var can_cast = false;
 
     switch (cast_to.data.as) {
-        .Struct, .Union, .Proc, .Void => {},
-        .Array => {
-            switch (expr_type.data.as) {
-                .Array,
-                .Pointer,
-                => can_cast = true,
-                else => {},
-            }
-        },
+        .Struct, .Union, .Proc, .Array, .Void => {},
         .Pointer, .Enum, .Integer, .Bool => {
             switch (expr_type.data.as) {
                 .Pointer,

@@ -120,6 +120,7 @@ pub fn find_symbol(ast: *Ast, key: Symbol.Key, offset: usize) ?*Symbol {
 const std = @import("std");
 const common = @import("common.zig");
 const utils = @import("utils.zig");
+const IRC = @import("irc.zig");
 
 pub const Alignment = common.Alignment;
 const LineInfo = common.LineInfo;
@@ -542,21 +543,25 @@ pub const Symbol = struct {
         typ: ?*Type,
         value: ?*Expr,
         is_typechecked: bool,
+        storage: IRC.Lvalue,
     };
 
     pub const Parameter = struct {
         typ: *Type,
         value: ?*Expr,
+        storage: IRC.Lvalue,
     };
 
     pub const Procedure = struct {
         typ: *Type,
         block: StmtList,
+        label: ?IRC.Label,
     };
 
     pub const StructField = struct {
         typ: *Type,
         value: ?*Expr,
+        offset: u64,
     };
 
     pub const EnumField = struct {

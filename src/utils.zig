@@ -3,7 +3,7 @@ pub fn compare(lhs: anytype, rhs: @TypeOf(lhs)) Order {
 }
 
 pub fn align_u64(value: u64, alignment: common.Alignment) u64 {
-    const pow2_minus_one = alignment.to_byte_size() - 1;
+    const pow2_minus_one: u64 = alignment.to_byte_size() - 1;
     var v = value;
     v += pow2_minus_one;
     v &= ~pow2_minus_one;

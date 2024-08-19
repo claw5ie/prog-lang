@@ -52,6 +52,8 @@ pub fn main() void {
 
     var ast = Parser.parse(filepath);
     Typechecker.typecheck(&ast);
+    var irc = GenIr.generate_ir(&ast);
+    irc.print();
 
     ast.arena.deinit();
     ast.symbol_table.deinit();
@@ -62,6 +64,7 @@ pub fn main() void {
             common.gpa.destroy(typ);
         }
     }
+    irc.instrs.deinit();
     std.debug.assert(common.general_purpose_allocator.deinit() == .ok);
 }
 
@@ -70,3 +73,5 @@ const common = @import("common.zig");
 const Ast = @import("ast.zig");
 const Parser = @import("parser.zig");
 const Typechecker = @import("typechecker.zig");
+const IRC = @import("irc.zig");
+const GenIr = @import("generate-ir.zig");

@@ -442,6 +442,7 @@ fn parse_partial_symbol(p: *Parser, pattern: *Ast.Expr, how_to_parse: HowToParse
                         .typ = typ,
                         .value = value,
                         .is_typechecked = false,
+                        .storage = undefined,
                     } },
                     .Enum_Field => break :as .{ .Enum_Field = .{
                         .value = value,
@@ -463,18 +464,22 @@ fn parse_partial_symbol(p: *Parser, pattern: *Ast.Expr, how_to_parse: HowToParse
                         .typ = typ,
                         .value = value,
                         .is_typechecked = false,
+                        .storage = undefined,
                     } },
                     .Parameter => break :as .{ .Parameter = .{
                         .typ = typ.?,
                         .value = value,
+                        .storage = undefined,
                     } },
                     .Struct_Field => break :as .{ .Struct_Field = .{
                         .typ = typ.?,
                         .value = value,
+                        .offset = 0,
                     } },
                     .Union_Field => break :as .{ .Union_Field = .{
                         .typ = typ.?,
                         .value = value,
+                        .offset = 0,
                     } },
                     .Type => break :as .{ .Type = typ.? },
                     .Enum_Field => {
@@ -489,18 +494,22 @@ fn parse_partial_symbol(p: *Parser, pattern: *Ast.Expr, how_to_parse: HowToParse
                         .typ = typ,
                         .value = value,
                         .is_typechecked = false,
+                        .storage = undefined,
                     } },
                     .Parameter => break :as .{ .Parameter = .{
                         .typ = typ.?,
                         .value = value,
+                        .storage = undefined,
                     } },
                     .Struct_Field => break :as .{ .Struct_Field = .{
                         .typ = typ.?,
                         .value = value,
+                        .offset = 0,
                     } },
                     .Union_Field => break :as .{ .Union_Field = .{
                         .typ = typ.?,
                         .value = value,
+                        .offset = 0,
                     } },
                     .Enum_Field => {
                         report_error(p, typ.?.line_info, "unexpected type", .{});
@@ -521,6 +530,7 @@ fn parse_partial_symbol(p: *Parser, pattern: *Ast.Expr, how_to_parse: HowToParse
                 break :as .{ .Procedure = .{
                     .typ = typ.?,
                     .block = block,
+                    .label = 0,
                 } };
             },
             .Expr => {

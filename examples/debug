@@ -1,8 +1,10 @@
-val00: i32 = 0;
+val00: i32 = -1;
 
 aaa: i32 = 0;
-aab: i64 = 0;
+aab: u64 = 0;
 aac: i6 = 0;
+aad: i6 = 0;
+aae: i6 = 0;
 
 alias e: a;
 alias a: b;
@@ -107,18 +109,18 @@ main: proc() void
   val1: i64 = 2;
   val2: bool = false;
 
-  switch val0
-    {
-      case 0 then
-      case 1
-      {
-        2 + 2;
-      }
-      case 2 {}
-    }
-  else
-    {
-    }
+  // switch val0
+  //   {
+  //     case 0 then
+  //     case 1
+  //     {
+  //       2 + 2;
+  //     }
+  //     case 2 {}
+  //   }
+  // else
+  //   {
+  //   }
 
   val0 = 4;
   val3: proc() void = main;
@@ -136,7 +138,7 @@ main: proc() void
 
   main();
 
-  print foo();
+  // print foo();
   return;
 }
 
