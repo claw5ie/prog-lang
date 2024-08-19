@@ -299,6 +299,7 @@ fn generate_ir_rvalue(ctx: *Context, has_dst: ?IRC.Lvalue, expr: *Ast.Expr) IRC.
             },
             .Field => {
                 const src = generate_ir_lvalue(ctx, expr);
+                move_src = true;
                 break :src src.as_rvalue();
             },
             .Call => |Call| {
@@ -309,7 +310,7 @@ fn generate_ir_rvalue(ctx: *Context, has_dst: ?IRC.Lvalue, expr: *Ast.Expr) IRC.
                 var it = Call.args.last;
                 while (it) |node| {
                     const arg = node.data.Expr;
-                    const arg_dst = grab_local(ctx, expr.typ.data.byte_size, .QWORD).as_lvalue();
+                    const arg_dst = grab_local(ctx, arg.typ.data.byte_size, .QWORD).as_lvalue();
                     const old_next_local_after_argument = ctx.next_local;
                     _ = generate_ir_rvalue(ctx, arg_dst, arg);
                     ctx.next_local = old_next_local_after_argument; // Remove temporary values so that arguments are contiguous.
@@ -387,6 +388,7 @@ fn generate_ir_rvalue(ctx: *Context, has_dst: ?IRC.Lvalue, expr: *Ast.Expr) IRC.
             },
             .Subscript => {
                 const src = generate_ir_lvalue(ctx, expr);
+                move_src = true;
                 break :src src.as_rvalue();
             },
             .Cast => |Cast| {
@@ -518,12 +520,15 @@ fn generate_ir_lvalue(ctx: *Context, expr: *Ast.Expr) IRC.Lvalue {
             const index = generate_ir_rvalue(ctx, null, Subscript.index);
             const dst = grab_local(ctx, 8, .QWORD);
 
-            generate_ir_instr(ctx, .{ .Binary_Op = .{
-                .dst = dst.as_lvalue(),
-                .src0 = index,
-                .src1 = .{ .Imm = expr.typ.data.byte_size },
-                .tag = .Mul,
-            } });
+            const offset = utils.align_u64(expr.typ.data.byte_size, expr.typ.data.alignment);
+            generate_ir_instr(ctx, .{
+                .Binary_Op = .{
+                    .dst = dst.as_lvalue(),
+                    .src0 = index,
+                    .src1 = .{ .Imm = offset },
+                    .tag = .Mul,
+                },
+            });
 
             if (Subscript.subexpr.typ.data.as != .Pointer) {
                 switch (subexpr) {
@@ -545,8 +550,8 @@ fn generate_ir_lvalue(ctx: *Context, expr: *Ast.Expr) IRC.Lvalue {
                         if (mem.base) |src0| {
                             generate_ir_instr(ctx, .{ .Binary_Op = .{
                                 .dst = dst.as_lvalue(),
-                                .src0 = src0.as_rvalue(),
-                                .src1 = .{ .Addr = subexpr },
+                                .src0 = dst.as_rvalue(),
+                                .src1 = src0.as_rvalue(),
                                 .tag = .Add,
                             } });
                         }
