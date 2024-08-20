@@ -78,8 +78,8 @@ bar: proc(aa: struct { x: i64 }) void
   a[0] = i32[3](2, 3, 4);
   a[0][1] = 42;
 
-  e: bool = cast(bool, 2);
-  ff := cast(bool, 2);
+  e: bool = #cast(bool, 2);
+  ff := #cast(bool, 2);
   fff: proc() void = null;
 
   g := &a[0];      // &[3]int

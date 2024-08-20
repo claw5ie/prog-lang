@@ -17,7 +17,7 @@ pub const LOOKAHEAD = 2;
 pub fn init(filepath: [:0]const u8) Lexer {
     const allocator = common.gpa;
     const source_code = utils.read_entire_file(allocator, filepath) catch {
-        common.eprint("error: failed to read from a file '{s}'.\n", .{filepath});
+        common.eprint("error: failed to read from a file '{s}'\n", .{filepath});
         common.exit(1);
     };
 
@@ -160,13 +160,11 @@ fn buffer_token(l: *Lexer) void {
                 .{ .text = "while", .as = .While },
                 .{ .text = "break", .as = .Break },
                 .{ .text = "false", .as = .{ .Boolean = false } },
-                .{ .text = "print", .as = .Print },
                 .{ .text = "alias", .as = .Alias },
                 .{ .text = "enum", .as = .Enum },
                 .{ .text = "proc", .as = .Proc },
                 .{ .text = "void", .as = .Void_Type },
                 .{ .text = "bool", .as = .Bool_Type },
-                .{ .text = "cast", .as = .Cast },
                 .{ .text = "true", .as = .{ .Boolean = true } },
                 .{ .text = "null", .as = .Null },
                 .{ .text = "then", .as = .Then },
@@ -215,8 +213,51 @@ fn buffer_token(l: *Lexer) void {
 
             break :as .{ .Identifier = new_text };
         };
+    } else if (ch == '#' and (is_alpha(src[at + 1]) or src[at + 1] == '_')) {
+        while (true) {
+            at += 1;
+            ch = src[at];
+            advance_line_info(l);
+
+            if (!is_alnum(ch) and ch != '_') break;
+        }
+
+        const SpicyKeyword = struct {
+            text: []const u8,
+            as: Token.As,
+        };
+
+        const state = struct {
+            pub const keywords = [_]SpicyKeyword{
+                .{ .text = "#byte_size_of", .as = .Byte_Size_Of },
+                .{ .text = "#alignment_of", .as = .Alignment_Of },
+                .{ .text = "#type_of", .as = .Type_Of },
+                .{ .text = "#static", .as = .{ .Attribute = .{
+                    .is_static = true,
+                } } },
+                .{ .text = "#const", .as = .{ .Attribute = .{
+                    .is_const = true,
+                } } },
+                .{ .text = "#print", .as = .Print },
+                .{ .text = "#cast", .as = .Cast },
+                .{ .text = "#as", .as = .As },
+            };
+        };
+
+        const text = src[0..at];
+
+        tok.as = as: {
+            for (state.keywords) |keyword| {
+                if (std.mem.eql(u8, text, keyword.text)) {
+                    break :as keyword.as;
+                }
+            }
+
+            common.print_error(l.filepath, tok.line_info, "invalid keyword '{s}'\n", .{text});
+            common.exit(1);
+        };
     } else if (!is_print(ch)) {
-        common.print_error(l.filepath, tok.line_info, "non-printable character with code '{}'.\n", .{ch});
+        common.print_error(l.filepath, tok.line_info, "non-printable character with code '{}'\n", .{ch});
         common.exit(1);
     } else {
         const Symbol = struct {
@@ -268,7 +309,7 @@ fn buffer_token(l: *Lexer) void {
                 }
             }
 
-            common.print_error(l.filepath, tok.line_info, "unrecognized character '{c}'.\n", .{src[at]});
+            common.print_error(l.filepath, tok.line_info, "unrecognized character '{c}'\n", .{src[at]});
             common.exit(1);
         };
     }
@@ -311,7 +352,10 @@ fn token_tag_to_text(tag: Token.Tag) []const u8 {
         .Comma => "','",
         .Equal => "'='",
 
-        .Cast => "'@cast'",
+        .Byte_Size_Of => "#byte_size_of",
+        .Alignment_Of => "#alignment_of",
+        .As => "#as",
+        .Cast => "'#cast'",
         .Boolean => "boolean literal",
         .Integer => "integer literal",
         .Identifier => "identifier",
@@ -324,8 +368,10 @@ fn token_tag_to_text(tag: Token.Tag) []const u8 {
         .Integer_Type => "integer type",
         .Bool_Type => "'bool'",
         .Void_Type => "'void'",
+        .Type_Of => "#type_of",
 
-        .Print => "'print'",
+        .Attribute => "attribute",
+        .Print => "'#print'",
         .If => "'if'",
         .Then => "'then'",
         .Else => "'else'",
@@ -389,6 +435,9 @@ pub const Token = struct {
         Comma,
         Equal,
 
+        Byte_Size_Of,
+        Alignment_Of,
+        As,
         Cast,
         Boolean,
         Integer,
@@ -402,7 +451,9 @@ pub const Token = struct {
         Integer_Type,
         Bool_Type,
         Void_Type,
+        Type_Of,
 
+        Attribute,
         Print,
         If,
         Then,
@@ -450,6 +501,9 @@ pub const Token = struct {
         Comma: void,
         Equal: void,
 
+        Byte_Size_Of: void,
+        Alignment_Of: void,
+        As: void,
         Cast: void,
         Boolean: bool,
         Integer: u64,
@@ -463,7 +517,9 @@ pub const Token = struct {
         Integer_Type: Token.IntegerType,
         Bool_Type: void,
         Void_Type: void,
+        Type_Of: void,
 
+        Attribute: Token.Attribute,
         Print: void,
         If: void,
         Then: void,
@@ -483,5 +539,10 @@ pub const Token = struct {
     pub const IntegerType = struct {
         bits: u8,
         is_signed: bool,
+    };
+
+    pub const Attribute = packed struct {
+        is_static: bool = false,
+        is_const: bool = false,
     };
 };
