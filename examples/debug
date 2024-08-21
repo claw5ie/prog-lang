@@ -6,7 +6,7 @@ aac: i6 = 0;
 aad: i6 = 0;
 aae: i6 = 0;
 
-alias e: a;
+#static #const alias e: a;
 alias a: b;
 alias b: struct { x: e^ };
 

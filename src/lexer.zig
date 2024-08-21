@@ -544,5 +544,16 @@ pub const Token = struct {
     pub const Attribute = packed struct {
         is_static: bool = false,
         is_const: bool = false,
+
+        pub fn is_empty(attr: Attribute) bool {
+            return !attr.is_static and !attr.is_const;
+        }
+
+        pub fn combine(self: Attribute, other: Attribute) Attribute {
+            return .{
+                .is_static = self.is_static or other.is_static,
+                .is_const = self.is_const or other.is_const,
+            };
+        }
     };
 };

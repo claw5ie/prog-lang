@@ -215,34 +215,24 @@ fn parse_stmt(p: *Parser) *Ast.Stmt {
 
             return stmt;
         },
-        .Alias => {
-            p.lexer.putback(tok);
-            const symbol = parse_symbol(p, .{
-                .reinterpret_variable_as = .Type,
-                .accept_type = true,
-            });
-            p.lexer.expect(.Semicolon);
-
-            const stmt = create(p, Ast.Stmt);
-            stmt.* = .{
-                .line_info = tok.line_info,
-                .as = .{ .Symbol = symbol },
-            };
-
-            return stmt;
-        },
         else => {
             p.lexer.putback(tok);
 
-            const expr = parse_expr(p);
-            switch (p.lexer.peek()) {
-                .Colon_Equal, .Colon => {
-                    const symbol = parse_partial_symbol(p, expr, .{
+            const result = try_parse_symbol(p);
+            switch (result.tag) {
+                .Type,
+                .Symbol_Without_Type,
+                .Symbol_With_Type,
+                .Symbol_With_Type_And_Value,
+                .Procedure,
+                => {
+                    const symbol = insert_symbol(p, result, .{
                         .reinterpret_variable_as = .Variable,
+                        .accept_type = true,
                         .accept_proc = true,
                     });
 
-                    if (symbol.as == .Variable) {
+                    if (symbol.as == .Variable or symbol.as == .Type) {
                         p.lexer.expect(.Semicolon);
                     }
 
@@ -251,33 +241,41 @@ fn parse_stmt(p: *Parser) *Ast.Stmt {
                         .line_info = tok.line_info,
                         .as = .{ .Symbol = symbol },
                     };
-
                     return stmt;
                 },
-                .Equal => {
-                    p.lexer.advance();
-                    const rhs = parse_expr(p);
-                    p.lexer.expect(.Semicolon);
+                .Expr => {
+                    if (!result.attributes.is_empty()) {
+                        report_error(p, tok.line_info, "unexpected attributes", .{});
+                    }
 
-                    const stmt = create(p, Ast.Stmt);
-                    stmt.* = .{
-                        .line_info = tok.line_info,
-                        .as = .{ .Assign = .{
-                            .lhs = expr,
-                            .rhs = rhs,
-                        } },
-                    };
+                    const expr = result.pattern;
+                    switch (p.lexer.peek()) {
+                        .Equal => {
+                            p.lexer.advance();
+                            const rhs = parse_expr(p);
+                            p.lexer.expect(.Semicolon);
 
-                    return stmt;
-                },
-                else => {
-                    p.lexer.expect(.Semicolon);
-                    const stmt = create(p, Ast.Stmt);
-                    stmt.* = .{
-                        .line_info = tok.line_info,
-                        .as = .{ .Expr = expr },
-                    };
-                    return stmt;
+                            const stmt = create(p, Ast.Stmt);
+                            stmt.* = .{
+                                .line_info = tok.line_info,
+                                .as = .{ .Assign = .{
+                                    .lhs = expr,
+                                    .rhs = rhs,
+                                } },
+                            };
+
+                            return stmt;
+                        },
+                        else => {
+                            p.lexer.expect(.Semicolon);
+                            const stmt = create(p, Ast.Stmt);
+                            stmt.* = .{
+                                .line_info = tok.line_info,
+                                .as = .{ .Expr = expr },
+                            };
+                            return stmt;
+                        },
+                    }
                 },
             }
         },
@@ -365,50 +363,43 @@ fn parse_stmt_list(p: *Parser) Ast.StmtList {
     return list;
 }
 
-fn parse_symbol(p: *Parser, how_to_parse: HowToParseSymbol) *Ast.Symbol {
-    var htp = how_to_parse;
-    if (p.lexer.peek() == .Alias) {
-        if (!htp.accept_type) {
-            report_error(p, p.lexer.grab_line_info(), "unexpected alias", .{});
-            common.exit(1);
-        }
+fn try_parse_symbol(p: *Parser) ParseSymbolResult {
+    var attributes = Ast.Attributes{};
 
+    while (p.lexer.peek() == .Attribute) {
+        const attribute = p.lexer.grab().as.Attribute;
+        attributes = attributes.combine(attribute);
         p.lexer.advance();
-        htp.reinterpret_variable_as = .Type;
+    }
+
+    var is_type = false;
+
+    if (p.lexer.peek() == .Alias) {
+        p.lexer.advance();
+        is_type = true;
     }
 
     const pattern = parse_expr(p);
-    const symbol = parse_partial_symbol(p, pattern, htp);
-    return symbol;
-}
-
-fn parse_partial_symbol(p: *Parser, pattern: *Ast.Expr, how_to_parse: HowToParseSymbol) *Ast.Symbol {
-    var branch: enum {
-        Symbol_Without_Type,
-        Symbol_With_Type,
-        Symbol_With_Type_And_Value,
-        Proc,
-        Expr,
-    } = .Expr;
     var typ: ?*Ast.Type = null;
     var value: ?*Ast.Expr = null;
     var block: Ast.StmtList = .{};
+    var tag: ParseSymbolResult.Tag = .Expr;
 
     switch (p.lexer.peek()) {
         .Colon_Equal => {
-            branch = .Symbol_Without_Type;
+            tag = .Symbol_Without_Type;
             p.lexer.advance();
             value = parse_expr(p);
         },
         .Colon => {
-            branch = .Symbol_With_Type;
+            tag = .Symbol_With_Type;
             p.lexer.advance();
             typ = parse_type(p);
             switch (p.lexer.peek()) {
                 .Open_Curly => {
                     switch (typ.?.data.as) {
                         .Proc => |Proc| {
-                            branch = .Proc;
+                            tag = .Procedure;
                             const old_current_scope = p.current_scope;
 
                             p.current_scope = Proc.scope;
@@ -422,7 +413,7 @@ fn parse_partial_symbol(p: *Parser, pattern: *Ast.Expr, how_to_parse: HowToParse
                     }
                 },
                 .Equal => {
-                    branch = .Symbol_With_Type_And_Value;
+                    tag = .Symbol_With_Type_And_Value;
                     p.lexer.advance();
                     value = parse_expr(p);
                 },
@@ -432,122 +423,44 @@ fn parse_partial_symbol(p: *Parser, pattern: *Ast.Expr, how_to_parse: HowToParse
         else => {},
     }
 
-    const symbol = insert_symbol(p, pattern);
-
-    symbol.as = as: {
-        switch (branch) {
-            .Symbol_Without_Type => {
-                switch (how_to_parse.reinterpret_variable_as) {
-                    .Variable => break :as .{ .Variable = .{
-                        .typ = typ,
-                        .value = value,
-                        .is_typechecked = false,
-                        .storage = undefined,
-                    } },
-                    .Enum_Field => break :as .{ .Enum_Field = .{
-                        .value = value,
-                        .computed_value = 0,
-                    } },
-                    .Parameter,
-                    .Struct_Field,
-                    .Union_Field,
-                    .Type,
-                    => {
-                        report_error(p, pattern.line_info, "missing type after expression", .{});
-                        common.exit(1);
-                    },
-                }
-            },
+    if (is_type) {
+        switch (tag) {
             .Symbol_With_Type => {
-                switch (how_to_parse.reinterpret_variable_as) {
-                    .Variable => break :as .{ .Variable = .{
-                        .typ = typ,
-                        .value = value,
-                        .is_typechecked = false,
-                        .storage = undefined,
-                    } },
-                    .Parameter => break :as .{ .Parameter = .{
-                        .typ = typ.?,
-                        .value = value,
-                        .storage = undefined,
-                    } },
-                    .Struct_Field => break :as .{ .Struct_Field = .{
-                        .typ = typ.?,
-                        .value = value,
-                        .offset = 0,
-                    } },
-                    .Union_Field => break :as .{ .Union_Field = .{
-                        .typ = typ.?,
-                        .value = value,
-                        .offset = 0,
-                    } },
-                    .Type => break :as .{ .Type = typ.? },
-                    .Enum_Field => {
-                        report_error(p, typ.?.line_info, "unexpected type", .{});
-                        common.exit(1);
-                    },
-                }
+                tag = .Type;
+            },
+            .Symbol_Without_Type => {
+                report_error(p, pattern.line_info, "missing type after expression", .{});
+                common.exit(1);
             },
             .Symbol_With_Type_And_Value => {
-                switch (how_to_parse.reinterpret_variable_as) {
-                    .Variable => break :as .{ .Variable = .{
-                        .typ = typ,
-                        .value = value,
-                        .is_typechecked = false,
-                        .storage = undefined,
-                    } },
-                    .Parameter => break :as .{ .Parameter = .{
-                        .typ = typ.?,
-                        .value = value,
-                        .storage = undefined,
-                    } },
-                    .Struct_Field => break :as .{ .Struct_Field = .{
-                        .typ = typ.?,
-                        .value = value,
-                        .offset = 0,
-                    } },
-                    .Union_Field => break :as .{ .Union_Field = .{
-                        .typ = typ.?,
-                        .value = value,
-                        .offset = 0,
-                    } },
-                    .Enum_Field => {
-                        report_error(p, typ.?.line_info, "unexpected type", .{});
-                        common.exit(1);
-                    },
-                    .Type => {
-                        report_error(p, value.?.line_info, "unexpected value", .{});
-                        common.exit(1);
-                    },
-                }
+                report_error(p, value.?.line_info, "value expression", .{});
+                common.exit(1);
             },
-            .Proc => {
-                if (!how_to_parse.accept_proc) {
-                    report_error(p, typ.?.line_info, "unexpected procedure body after non-procedure type", .{});
-                    common.exit(1);
-                }
-
-                break :as .{ .Procedure = .{
-                    .typ = typ.?,
-                    .block = block,
-                    .label = 0,
-                } };
+            .Procedure => {
+                report_error(p, value.?.line_info, "expected type definition, not procedure", .{});
+                common.exit(1);
             },
             .Expr => {
-                switch (how_to_parse.reinterpret_variable_as) {
-                    .Enum_Field => break :as .{ .Enum_Field = .{
-                        .value = value,
-                        .computed_value = 0,
-                    } },
-                    else => {
-                        report_error(p, pattern.line_info, "expected ':' or ':=' after expression", .{});
-                        common.exit(1);
-                    },
-                }
+                report_error(p, pattern.line_info, "missing type after expression", .{});
+                common.exit(1);
             },
+            .Type => unreachable,
         }
-    };
+    }
 
+    return .{
+        .attributes = attributes,
+        .pattern = pattern,
+        .typ = typ,
+        .value = value,
+        .block = block,
+        .tag = tag,
+    };
+}
+
+fn parse_symbol(p: *Parser, how_to_parse: HowToParseSymbol) *Ast.Symbol {
+    const result = try_parse_symbol(p);
+    const symbol = insert_symbol(p, result, how_to_parse);
     return symbol;
 }
 
@@ -576,36 +489,157 @@ fn parse_symbol_list(p: *Parser, how_to_parse: HowToParseSymbol) Ast.SymbolList 
     return list;
 }
 
-fn insert_symbol(p: *Parser, pattern: *Ast.Expr) *Ast.Symbol {
-    switch (pattern.as) {
-        .Identifier => |Identifier| {
-            const key = Ast.Symbol.Key{
-                .name = Identifier.name,
-                .scope = Identifier.scope,
-            };
-            const insert_result = p.symbol_table.insert(key);
+fn insert_symbol(p: *Parser, result: ParseSymbolResult, how_to_parse: HowToParseSymbol) *Ast.Symbol {
+    const symbol: *Ast.Symbol = symbol: {
+        switch (result.pattern.as) {
+            .Identifier => |Identifier| {
+                const key = Ast.Symbol.Key{
+                    .name = Identifier.name,
+                    .scope = Identifier.scope,
+                };
+                const insert_result = p.symbol_table.insert(key);
 
-            if (insert_result.found_existing) {
-                report_error(p, pattern.line_info, "symbol '{s}' is defined already", .{key.name});
-                report_note(p, insert_result.value_ptr.*.line_info, "first defined here", .{});
+                if (insert_result.found_existing) {
+                    report_error(p, result.pattern.line_info, "symbol '{s}' is defined already", .{key.name});
+                    report_note(p, insert_result.value_ptr.*.line_info, "first defined here", .{});
+                    common.exit(1);
+                }
+
+                const symbol = create(p, Ast.Symbol);
+                symbol.* = .{
+                    .line_info = result.pattern.line_info,
+                    .as = undefined,
+                    .key = key,
+                    .attributes = result.attributes,
+                };
+                insert_result.value_ptr.* = symbol;
+
+                break :symbol symbol;
+            },
+            else => {
+                report_error(p, result.pattern.line_info, "expected identifier", .{});
                 common.exit(1);
-            }
+            },
+        }
+    };
 
-            const symbol = create(p, Ast.Symbol);
-            symbol.* = .{
-                .line_info = pattern.line_info,
-                .as = undefined,
-                .key = key,
-            };
-            insert_result.value_ptr.* = symbol;
+    symbol.as = as: {
+        switch (result.tag) {
+            .Type => {
+                if (!how_to_parse.accept_type) {
+                    report_error(p, result.pattern.line_info, "unexpected type", .{});
+                    common.exit(1);
+                }
 
-            return symbol;
-        },
-        else => {
-            report_error(p, pattern.line_info, "expected identifier", .{});
-            common.exit(1);
-        },
-    }
+                break :as .{ .Type = result.typ.? };
+            },
+            .Symbol_Without_Type => {
+                switch (how_to_parse.reinterpret_variable_as) {
+                    .Variable => break :as .{ .Variable = .{
+                        .typ = result.typ,
+                        .value = result.value,
+                        .is_typechecked = false,
+                        .storage = undefined,
+                    } },
+                    .Enum_Field => break :as .{ .Enum_Field = .{
+                        .value = result.value,
+                        .computed_value = 0,
+                    } },
+                    .Parameter,
+                    .Struct_Field,
+                    .Union_Field,
+                    => {
+                        report_error(p, result.pattern.line_info, "missing type after expression", .{});
+                        common.exit(1);
+                    },
+                }
+            },
+            .Symbol_With_Type => {
+                switch (how_to_parse.reinterpret_variable_as) {
+                    .Variable => break :as .{ .Variable = .{
+                        .typ = result.typ,
+                        .value = result.value,
+                        .is_typechecked = false,
+                        .storage = undefined,
+                    } },
+                    .Parameter => break :as .{ .Parameter = .{
+                        .typ = result.typ.?,
+                        .value = result.value,
+                        .storage = undefined,
+                    } },
+                    .Struct_Field => break :as .{ .Struct_Field = .{
+                        .typ = result.typ.?,
+                        .value = result.value,
+                        .offset = 0,
+                    } },
+                    .Union_Field => break :as .{ .Union_Field = .{
+                        .typ = result.typ.?,
+                        .value = result.value,
+                        .offset = 0,
+                    } },
+                    .Enum_Field => {
+                        report_error(p, result.typ.?.line_info, "unexpected type", .{});
+                        common.exit(1);
+                    },
+                }
+            },
+            .Symbol_With_Type_And_Value => {
+                switch (how_to_parse.reinterpret_variable_as) {
+                    .Variable => break :as .{ .Variable = .{
+                        .typ = result.typ,
+                        .value = result.value,
+                        .is_typechecked = false,
+                        .storage = undefined,
+                    } },
+                    .Parameter => break :as .{ .Parameter = .{
+                        .typ = result.typ.?,
+                        .value = result.value,
+                        .storage = undefined,
+                    } },
+                    .Struct_Field => break :as .{ .Struct_Field = .{
+                        .typ = result.typ.?,
+                        .value = result.value,
+                        .offset = 0,
+                    } },
+                    .Union_Field => break :as .{ .Union_Field = .{
+                        .typ = result.typ.?,
+                        .value = result.value,
+                        .offset = 0,
+                    } },
+                    .Enum_Field => {
+                        report_error(p, result.typ.?.line_info, "unexpected type", .{});
+                        common.exit(1);
+                    },
+                }
+            },
+            .Procedure => {
+                if (!how_to_parse.accept_proc) {
+                    report_error(p, result.typ.?.line_info, "unexpected procedure body after non-procedure type", .{});
+                    common.exit(1);
+                }
+
+                break :as .{ .Procedure = .{
+                    .typ = result.typ.?,
+                    .block = result.block,
+                    .label = 0,
+                } };
+            },
+            .Expr => {
+                switch (how_to_parse.reinterpret_variable_as) {
+                    .Enum_Field => break :as .{ .Enum_Field = .{
+                        .value = result.value,
+                        .computed_value = 0,
+                    } },
+                    else => {
+                        report_error(p, result.pattern.line_info, "expected ':' or ':=' after expression", .{});
+                        common.exit(1);
+                    },
+                }
+            },
+        }
+    };
+
+    return symbol;
 }
 
 fn parse_type(p: *Parser) *Ast.Type {
@@ -1345,6 +1379,24 @@ const Allocator = std.mem.Allocator;
 const Token = Lexer.Token;
 const LineInfo = common.LineInfo;
 
+const ParseSymbolResult = struct {
+    attributes: Ast.Attributes,
+    pattern: *Ast.Expr,
+    typ: ?*Ast.Type,
+    value: ?*Ast.Expr,
+    block: Ast.StmtList,
+    tag: Tag,
+
+    pub const Tag = enum {
+        Type,
+        Symbol_Without_Type,
+        Symbol_With_Type,
+        Symbol_With_Type_And_Value,
+        Procedure,
+        Expr,
+    };
+};
+
 const HowToParseSymbol = packed struct {
     reinterpret_variable_as: enum(u3) {
         Variable,
@@ -1352,7 +1404,6 @@ const HowToParseSymbol = packed struct {
         Struct_Field,
         Union_Field,
         Enum_Field,
-        Type,
     },
     accept_type: bool = false,
     accept_proc: bool = false,

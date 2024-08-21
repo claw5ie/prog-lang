@@ -120,10 +120,13 @@ pub fn find_symbol(ast: *Ast, key: Symbol.Key, offset: usize) ?*Symbol {
 const std = @import("std");
 const common = @import("common.zig");
 const utils = @import("utils.zig");
+const Lexer = @import("lexer.zig");
 const IRC = @import("irc.zig");
 
 pub const Alignment = common.Alignment;
 const LineInfo = common.LineInfo;
+
+pub const Attributes = Lexer.Token.Attribute;
 
 pub const Scope = struct {
     parent: ?*Scope,
@@ -528,6 +531,7 @@ pub const Symbol = struct {
     line_info: LineInfo,
     as: As,
     key: Key,
+    attributes: Attributes,
 
     pub const As = union(enum) {
         Variable: Symbol.Variable,
