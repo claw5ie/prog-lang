@@ -39,6 +39,11 @@ pub fn create(ast: *Ast, comptime T: type) *T {
     };
 }
 
+pub fn integer_type_from_u64(value: u64) *Ast.Type {
+    const bits = utils.count_bits(value);
+    return Ast.lookup_integer_type(bits, false);
+}
+
 pub fn lookup_integer_type(bits: u8, is_signed: bool) *Type {
     std.debug.assert(bits <= 64);
 
@@ -86,7 +91,10 @@ pub fn find_symbol_in_scope(ast: *Ast, key: Symbol.Key, offset: usize) ?*Symbol 
             .Variable,
             .Parameter,
             => {
-                if (symbol.line_info.offset < offset) {
+                if (symbol.attributes.is_const or
+                    symbol.attributes.is_static or
+                    symbol.line_info.offset < offset)
+                {
                     return symbol;
                 }
             },
@@ -174,7 +182,7 @@ pub const Type = struct {
             .Void => try writer.writeAll("void"),
             .Bool => try writer.writeAll("bool"),
             .Integer => |Int| try writer.print("{c}{}", .{ @as(u8, if (Int.is_signed) 'i' else 'u'), Int.bits }),
-            .Identifier => unreachable,
+            .Identifier, .Type_Of => unreachable,
         }
     }
 
@@ -213,7 +221,7 @@ pub const Type = struct {
                 flags.is_ordered = true;
             },
             .Bool => flags.is_comparable = true,
-            .Identifier => unreachable,
+            .Identifier, .Type_Of => unreachable,
         }
 
         return flags;
@@ -287,7 +295,7 @@ pub const Type = struct {
             .Void => {
                 return other.data.as == .Void;
             },
-            .Identifier => unreachable,
+            .Identifier, .Type_Of => unreachable,
         }
     }
 
@@ -309,6 +317,7 @@ pub const Type = struct {
         Bool: void,
         Void: void,
         Identifier: Type.Identifier,
+        Type_Of: *Ast.Expr,
     };
 
     pub const Struct = struct {
@@ -368,6 +377,7 @@ pub const Expr = struct {
     as: As,
     typ: *Type,
     flags: Flags,
+    typechecking: Stage,
 
     pub const As = union(enum) {
         Binary_Op: Expr.BinaryOp,
@@ -379,6 +389,9 @@ pub const Expr = struct {
         Call: Expr.Call,
         Constructor: Expr.Constructor,
         Subscript: Expr.Subscript,
+        Byte_Size_Of: *Ast.Expr,
+        Alignment_Of: *Ast.Expr,
+        As: Expr.Cast,
         Cast: Expr.Cast,
         Type: Type,
         Integer: u64,
@@ -460,6 +473,7 @@ pub const Expr = struct {
 
     pub const Flags = packed struct {
         is_lvalue: bool = false,
+        is_const: bool = false,
     };
 };
 
@@ -532,6 +546,7 @@ pub const Symbol = struct {
     as: As,
     key: Key,
     attributes: Attributes,
+    typechecking: Stage,
 
     pub const As = union(enum) {
         Variable: Symbol.Variable,
@@ -546,7 +561,6 @@ pub const Symbol = struct {
     pub const Variable = struct {
         typ: ?*Type,
         value: ?*Expr,
-        is_typechecked: bool,
         storage: IRC.Lvalue,
     };
 

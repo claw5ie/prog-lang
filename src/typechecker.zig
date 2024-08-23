@@ -1,4 +1,5 @@
 ast: *Ast,
+enum_type: ?*Ast.Type,
 return_type: ?*Ast.Type,
 is_in_loop: bool,
 
@@ -15,6 +16,7 @@ fn compute_const_expr(ctx: *Context, expr: *Ast.Expr) u64 {
 pub fn typecheck(ast: *Ast) void {
     var context = Context{
         .ast = ast,
+        .enum_type = null,
         .return_type = null,
         .is_in_loop = false,
     };
@@ -58,13 +60,81 @@ fn typecheck_top_level(ctx: *Context) void {
     }
 }
 
-fn typecheck_symbol(ctx: *Context, symbol: *Ast.Symbol) void {
+fn typecheck_symbol_type(ctx: *Context, symbol: *Ast.Symbol) void {
     switch (symbol.as) {
-        .Variable => |*Variable| {
+        .Variable => |Variable| {
             if (Variable.typ) |typ| {
                 typecheck_type(ctx, typ);
                 reject_void_type(ctx, typ);
+            }
+        },
+        .Parameter => |Parameter| {
+            if (!symbol.attributes.is_empty()) {
+                report_error(ctx, symbol.line_info, "attributes for parameters are not supported", .{});
+                common.exit(1);
+            }
+            typecheck_type(ctx, Parameter.typ);
+            reject_void_type(ctx, Parameter.typ);
+            if (Parameter.value) |value| {
+                report_error(ctx, value.line_info, "default values are not supported", .{});
+                common.exit(1);
+            }
+        },
+        .Procedure => |Procedure| {
+            typecheck_type(ctx, Procedure.typ);
+        },
+        .Struct_Field => |Field| {
+            if (!symbol.attributes.is_empty()) {
+                report_error(ctx, symbol.line_info, "attributes for struct fields are not supported", .{});
+                common.exit(1);
+            }
+            typecheck_type(ctx, Field.typ);
+            reject_void_type(ctx, Field.typ);
+            if (Field.value) |value| {
+                report_error(ctx, value.line_info, "default values are not supported", .{});
+                common.exit(1);
+            }
+        },
+        .Union_Field => |Field| {
+            if (!symbol.attributes.is_empty()) {
+                report_error(ctx, symbol.line_info, "attributes for union fields are not supported", .{});
+                common.exit(1);
+            }
+            typecheck_type(ctx, Field.typ);
+            reject_void_type(ctx, Field.typ);
+            if (Field.value) |value| {
+                report_error(ctx, value.line_info, "default values are not supported", .{});
+                common.exit(1);
+            }
+        },
+        .Enum_Field => {
+            if (!symbol.attributes.is_empty()) {
+                report_error(ctx, symbol.line_info, "attributes for enum fields are not supported", .{});
+                common.exit(1);
+            }
+        },
+        .Type => |typ| {
+            typ.symbol = symbol;
+        },
+    }
+}
 
+fn typecheck_symbol(ctx: *Context, symbol: *Ast.Symbol) void {
+    switch (symbol.typechecking) {
+        .None => symbol.typechecking = .Going,
+        .Going => {
+            report_error(ctx, symbol.line_info, "found cyclic reference", .{});
+            common.exit(1);
+        },
+        .Done => return,
+    }
+    defer symbol.typechecking = .Done;
+
+    typecheck_symbol_type(ctx, symbol);
+
+    switch (symbol.as) {
+        .Variable => |*Variable| {
+            if (Variable.typ) |typ| {
                 if (Variable.value) |value| {
                     const value_type = typecheck_expr_only(ctx, value);
                     if (!safe_cast(ctx, value, value_type, typ)) {
@@ -73,10 +143,20 @@ fn typecheck_symbol(ctx: *Context, symbol: *Ast.Symbol) void {
                         report_note(ctx, value.line_info, "expression is here", .{});
                         common.exit(1);
                     }
+
+                    if (symbol.attributes.is_const and !value.flags.is_const) {
+                        report_error(ctx, value.line_info, "expression is not constant", .{});
+                        common.exit(1);
+                    }
                 }
             } else if (Variable.value) |value| {
                 const value_type = typecheck_expr_only(ctx, value);
                 reject_void_type(ctx, value_type);
+
+                if (symbol.attributes.is_const and !value.flags.is_const) {
+                    report_error(ctx, value.line_info, "expression is not constant", .{});
+                    common.exit(1);
+                }
 
                 Variable.typ = value_type;
 
@@ -84,12 +164,8 @@ fn typecheck_symbol(ctx: *Context, symbol: *Ast.Symbol) void {
             } else {
                 unreachable;
             }
-
-            Variable.is_typechecked = true;
         },
         .Procedure => |Procedure| {
-            typecheck_type(ctx, Procedure.typ);
-
             const old_return_type = ctx.return_type;
             ctx.return_type = Procedure.typ.data.as.Proc.return_type;
 
@@ -102,7 +178,6 @@ fn typecheck_symbol(ctx: *Context, symbol: *Ast.Symbol) void {
             ctx.return_type = old_return_type;
         },
         .Type => |typ| {
-            typ.symbol = symbol;
             typecheck_type(ctx, typ);
         },
         .Parameter, .Struct_Field, .Union_Field, .Enum_Field => unreachable,
@@ -148,6 +223,13 @@ fn unpack(ctx: *Context, typ: *Ast.Type) void {
                 report_error(ctx, typ.line_info, "symbol '{s}' is not defined", .{Identifier.name});
                 common.exit(1);
             }
+        },
+        .Type_Of => |expr| {
+            const expr_result = typecheck_expr(ctx, expr);
+            if (expr_result.tag == .Type) {
+                unpack(ctx, expr_result.typ);
+            }
+            typ.data = expr_result.typ.data;
         },
         .Struct,
         .Union,
@@ -197,7 +279,7 @@ fn shallow_check(ctx: *Context, typ: *Ast.Type) void {
         .Bool,
         .Void,
         => {},
-        .Identifier => unreachable,
+        .Identifier, .Type_Of => unreachable,
     }
 }
 
@@ -218,7 +300,6 @@ fn void_array_check(ctx: *Context, typ: *Ast.Type) void {
                 switch (node.data.as) {
                     .Struct_Field, .Union_Field => |Field| {
                         void_array_check(ctx, Field.typ);
-                        reject_void_type(ctx, Field.typ);
                     },
                     else => unreachable,
                 }
@@ -230,7 +311,6 @@ fn void_array_check(ctx: *Context, typ: *Ast.Type) void {
             while (it) |node| {
                 const Parameter = &node.data.as.Parameter;
                 void_array_check(ctx, Parameter.typ);
-                reject_void_type(ctx, Parameter.typ);
                 it = node.next;
             }
             void_array_check(ctx, Proc.return_type);
@@ -247,12 +327,12 @@ fn void_array_check(ctx: *Context, typ: *Ast.Type) void {
         .Bool,
         .Void,
         => {},
-        .Identifier => unreachable,
+        .Identifier, .Type_Of => unreachable,
     }
 }
 
 // TODO: don't go through all stages when the top one is done.
-fn full_check(ctx: *Context, typ: *Ast.Type) void {
+fn typecheck_type(ctx: *Context, typ: *Ast.Type) void {
     void_array_check(ctx, typ);
 
     const data = typ.data;
@@ -269,14 +349,10 @@ fn full_check(ctx: *Context, typ: *Ast.Type) void {
 
             var it = Struct.fields.first;
             while (it) |node| {
-                const Field = &node.data.as.Struct_Field;
+                const symbol = node.data;
+                typecheck_symbol_type(ctx, symbol);
 
-                full_check(ctx, Field.typ);
-                if (Field.value) |value| {
-                    report_error(ctx, value.line_info, "default values are not supported", .{});
-                    common.exit(1);
-                }
-
+                const Field = &symbol.as.Struct_Field;
                 const field_alignment = Field.typ.data.alignment;
                 size = utils.align_u64(size, field_alignment);
                 Field.offset = size;
@@ -295,12 +371,10 @@ fn full_check(ctx: *Context, typ: *Ast.Type) void {
 
             var it = Union.fields.first;
             while (it) |node| {
+                const symbol = node.data;
+                typecheck_symbol_type(ctx, symbol);
+
                 const Field = &node.data.as.Union_Field;
-                full_check(ctx, Field.typ);
-                if (Field.value) |value| {
-                    report_error(ctx, value.line_info, "default values are not supported", .{});
-                    common.exit(1);
-                }
                 Field.offset = 0;
                 size = @max(size, Field.typ.data.byte_size);
                 alignment = @enumFromInt(@max(@intFromEnum(alignment), @intFromEnum(Field.typ.data.alignment)));
@@ -311,6 +385,9 @@ fn full_check(ctx: *Context, typ: *Ast.Type) void {
             data.alignment = alignment;
         },
         .Enum => |*Enum| {
+            const old_enum_type = ctx.enum_type;
+            ctx.enum_type = typ;
+
             var next_value: u64 = 0;
             var max_value: u64 = 0;
             var is_signed = false;
@@ -356,6 +433,8 @@ fn full_check(ctx: *Context, typ: *Ast.Type) void {
             Enum.integer_type = integer_type;
             data.byte_size = integer_type.data.byte_size;
             data.alignment = integer_type.data.alignment;
+
+            ctx.enum_type = old_enum_type;
         },
         .Proc => |Proc| {
             std.debug.assert(data.byte_size == Ast.pointer_byte_size and
@@ -363,20 +442,15 @@ fn full_check(ctx: *Context, typ: *Ast.Type) void {
 
             var it = Proc.params.first;
             while (it) |node| {
-                const Parameter = &node.data.as.Parameter;
-
-                full_check(ctx, Parameter.typ);
-                if (Parameter.value) |value| {
-                    report_error(ctx, value.line_info, "default values are not supported", .{});
-                    common.exit(1);
-                }
+                const symbol = node.data;
+                typecheck_symbol_type(ctx, symbol);
 
                 it = node.next;
             }
-            full_check(ctx, Proc.return_type);
+            typecheck_type(ctx, Proc.return_type);
         },
         .Array => |*Array| {
-            full_check(ctx, Array.subtype);
+            typecheck_type(ctx, Array.subtype);
 
             const size_type = typecheck_expr_only(ctx, Array.size);
             if (safe_cast_to_integer(ctx, Array.size, size_type, .Unsigned) == null) {
@@ -392,7 +466,7 @@ fn full_check(ctx: *Context, typ: *Ast.Type) void {
         .Pointer => |subtype| {
             std.debug.assert(data.byte_size == Ast.pointer_byte_size and
                 data.alignment == Ast.pointer_alignment);
-            full_check(ctx, subtype);
+            typecheck_type(ctx, subtype);
         },
         .Integer => {
             std.debug.assert(data.byte_size != 0);
@@ -405,12 +479,8 @@ fn full_check(ctx: *Context, typ: *Ast.Type) void {
             std.debug.assert(data.byte_size == 0 and
                 data.alignment == .BYTE);
         },
-        .Identifier => unreachable,
+        .Identifier, .Type_Of => unreachable,
     }
-}
-
-fn typecheck_type(ctx: *Context, typ: *Ast.Type) void {
-    full_check(ctx, typ);
 }
 
 fn typecheck_stmt_list(ctx: *Context, list: Ast.StmtList) void {
@@ -543,6 +613,9 @@ fn typecheck_stmt(ctx: *Context, stmt: *Ast.Stmt) void {
             if (!Assign.lhs.flags.is_lvalue) {
                 report_error(ctx, Assign.lhs.line_info, "expression is not an lvalue", .{});
                 common.exit(1);
+            } else if (Assign.lhs.flags.is_const) {
+                report_error(ctx, Assign.lhs.line_info, "can't assign to constant expression", .{});
+                common.exit(1);
             }
 
             const rhs_type = typecheck_expr_only(ctx, Assign.rhs);
@@ -562,22 +635,35 @@ fn typecheck_stmt(ctx: *Context, stmt: *Ast.Stmt) void {
 
 fn typecheck_expr_only(ctx: *Context, expr: *Ast.Expr) *Ast.Type {
     const result = typecheck_expr(ctx, expr);
-    if (result.is_type) {
-        report_error(ctx, expr.line_info, "expected expression, not a type", .{});
+    if (result.tag != .Value) {
+        report_error(ctx, expr.line_info, "expected expression", .{});
         common.exit(1);
     }
     return result.typ;
 }
 
+// NOTE: Types are typechecked lazily (only when used). 'cause if a type is not fully formed (like ambiguous pointer/array), we need to typecheck it from the top level.
 fn typecheck_expr(ctx: *Context, expr: *Ast.Expr) TypecheckExprResult {
-    var is_type = false;
-    const typ: *Ast.Type = typ: {
+    switch (expr.typechecking) {
+        .None => expr.typechecking = .Going,
+        .Going => {
+            report_error(ctx, expr.line_info, "found cyclic reference", .{});
+            common.exit(1);
+        },
+        .Done => return .{ .typ = expr.typ, .tag = if (expr.as == .Type) .Type else .Value }, // Non values should be filtered at  this point?
+    }
+    defer expr.typechecking = .Done;
+
+    const result: TypecheckExprResult = result: {
         switch (expr.as) {
             .Binary_Op => |Binary_Op| {
                 const lhs_type = typecheck_expr_only(ctx, Binary_Op.lhs);
                 const rhs_type = typecheck_expr_only(ctx, Binary_Op.rhs);
                 const lhs_flags = lhs_type.compare();
                 const rhs_flags = rhs_type.compare();
+
+                expr.flags.is_const = Binary_Op.lhs.flags.is_const and
+                    Binary_Op.rhs.flags.is_const;
 
                 switch (Binary_Op.tag) {
                     .Or, .And => {
@@ -588,7 +674,7 @@ fn typecheck_expr(ctx: *Context, expr: *Ast.Expr) TypecheckExprResult {
                             common.exit(1);
                         }
 
-                        break :typ Ast.bool_type;
+                        break :result .{ .typ = Ast.bool_type, .tag = .Value };
                     },
                     .Eq, .Neq => {
                         if (!lhs_flags.is_comparable) {
@@ -599,7 +685,7 @@ fn typecheck_expr(ctx: *Context, expr: *Ast.Expr) TypecheckExprResult {
                             common.exit(1);
                         }
 
-                        break :typ Ast.bool_type;
+                        break :result .{ .typ = Ast.bool_type, .tag = .Value };
                     },
                     .Lt, .Leq, .Gt, .Geq => {
                         if (!lhs_flags.is_ordered) {
@@ -610,23 +696,23 @@ fn typecheck_expr(ctx: *Context, expr: *Ast.Expr) TypecheckExprResult {
                             common.exit(1);
                         }
 
-                        break :typ Ast.bool_type;
+                        break :result .{ .typ = Ast.bool_type, .tag = .Value };
                     },
                     .Add => {
                         if (lhs_flags.is_void_pointer or rhs_flags.is_void_pointer) {
                             report_error(ctx, Binary_Op.line_info, "can't add 'void' pointers", .{});
                             common.exit(1);
                         } else if (lhs_flags.is_pointer and safe_cast_to_integer(ctx, Binary_Op.rhs, rhs_type, .Unsigned) != null) {
-                            break :typ lhs_type;
+                            break :result .{ .typ = lhs_type, .tag = .Value };
                         } else if (rhs_flags.is_pointer and safe_cast_to_integer(ctx, Binary_Op.lhs, lhs_type, .Unsigned) != null) {
-                            break :typ rhs_type;
+                            break :result .{ .typ = rhs_type, .tag = .Value };
                         } else {
                             const casted = safe_cast_two_integers(ctx, Binary_Op.lhs, lhs_type, Binary_Op.rhs, rhs_type);
                             if (casted == null) {
                                 report_error(ctx, Binary_Op.line_info, "expected integer/pointer: '{}' and '{}'", .{ lhs_type, rhs_type });
                                 common.exit(1);
                             }
-                            break :typ casted.?;
+                            break :result .{ .typ = casted.?, .tag = .Value };
                         }
                     },
                     .Sub => {
@@ -634,14 +720,14 @@ fn typecheck_expr(ctx: *Context, expr: *Ast.Expr) TypecheckExprResult {
                             report_error(ctx, Binary_Op.line_info, "can't subtract 'void' pointer", .{});
                             common.exit(1);
                         } else if (lhs_flags.is_pointer and safe_cast_to_integer(ctx, Binary_Op.rhs, rhs_type, .Unsigned) != null) {
-                            break :typ lhs_type;
+                            break :result .{ .typ = lhs_type, .tag = .Value };
                         } else {
                             const casted = safe_cast_two_integers(ctx, Binary_Op.lhs, lhs_type, Binary_Op.rhs, rhs_type);
                             if (casted == null) {
                                 report_error(ctx, Binary_Op.line_info, "expected integer/pointer: '{}' and '{}'", .{ lhs_type, rhs_type });
                                 common.exit(1);
                             }
-                            break :typ casted.?;
+                            break :result .{ .typ = casted.?, .tag = .Value };
                         }
                     },
                     .Mul, .Div, .Mod => {
@@ -650,12 +736,14 @@ fn typecheck_expr(ctx: *Context, expr: *Ast.Expr) TypecheckExprResult {
                             report_error(ctx, Binary_Op.line_info, "expected integer/pointer: '{}' and '{}'", .{ lhs_type, rhs_type });
                             common.exit(1);
                         }
-                        break :typ casted.?;
+                        break :result .{ .typ = casted.?, .tag = .Value };
                     },
                 }
             },
             .Unary_Op => |Unary_Op| {
                 const subexpr_type = typecheck_expr_only(ctx, Unary_Op.subexpr);
+
+                expr.flags.is_const = Unary_Op.subexpr.flags.is_const;
 
                 switch (Unary_Op.tag) {
                     .Pos => {
@@ -664,7 +752,7 @@ fn typecheck_expr(ctx: *Context, expr: *Ast.Expr) TypecheckExprResult {
                             report_error(ctx, Unary_Op.subexpr.line_info, "expected integer, but got '{}'", .{subexpr_type});
                             common.exit(1);
                         }
-                        break :typ casted.?;
+                        break :result .{ .typ = casted.?, .tag = .Value };
                     },
                     .Neg => {
                         const casted = safe_cast_to_integer(ctx, Unary_Op.subexpr, subexpr_type, .Signed);
@@ -672,7 +760,7 @@ fn typecheck_expr(ctx: *Context, expr: *Ast.Expr) TypecheckExprResult {
                             report_error(ctx, Unary_Op.subexpr.line_info, "expected integer, but got '{}'", .{subexpr_type});
                             common.exit(1);
                         }
-                        break :typ casted.?;
+                        break :result .{ .typ = casted.?, .tag = .Value };
                     },
                     .Not => {
                         if (!safe_cast(ctx, Unary_Op.subexpr, subexpr_type, Ast.bool_type)) {
@@ -680,7 +768,7 @@ fn typecheck_expr(ctx: *Context, expr: *Ast.Expr) TypecheckExprResult {
                             common.exit(1);
                         }
 
-                        break :typ Ast.bool_type;
+                        break :result .{ .typ = Ast.bool_type, .tag = .Value };
                     },
                 }
             },
@@ -689,6 +777,9 @@ fn typecheck_expr(ctx: *Context, expr: *Ast.Expr) TypecheckExprResult {
 
                 if (!subexpr.flags.is_lvalue) {
                     report_error(ctx, subexpr.line_info, "expression is not an lvalue", .{});
+                    common.exit(1);
+                } else if (subexpr.flags.is_const) {
+                    report_error(ctx, subexpr.line_info, "can't take raferences to constant expression", .{});
                     common.exit(1);
                 }
 
@@ -706,12 +797,14 @@ fn typecheck_expr(ctx: *Context, expr: *Ast.Expr) TypecheckExprResult {
                     .symbol = null,
                 };
 
-                break :typ typ;
+                expr.flags.is_const = subexpr.flags.is_const;
+
+                break :result .{ .typ = typ, .tag = .Value };
             },
             .Deref => |subexpr| {
                 const subexpr_result = typecheck_expr(ctx, subexpr);
 
-                if (subexpr_result.is_type) {
+                if (subexpr_result.tag == .Type) {
                     const data = ctx.ast.create(Ast.Type.SharedData);
                     data.* = .{
                         .as = .{ .Pointer = subexpr_result.typ },
@@ -726,9 +819,9 @@ fn typecheck_expr(ctx: *Context, expr: *Ast.Expr) TypecheckExprResult {
                         .symbol = null,
                     } };
 
-                    is_type = true;
+                    expr.flags.is_const = true;
 
-                    break :typ &expr.as.Type;
+                    break :result .{ .typ = &expr.as.Type, .tag = .Type };
                 } else {
                     const subexpr_type = subexpr_result.typ;
                     const can_be_dereferenced = subexpr_type.compare().can_be_dereferenced;
@@ -739,8 +832,9 @@ fn typecheck_expr(ctx: *Context, expr: *Ast.Expr) TypecheckExprResult {
                     }
 
                     expr.flags.is_lvalue = true;
+                    expr.flags.is_const = subexpr.flags.is_const;
 
-                    break :typ subexpr_type.data.as.Pointer;
+                    break :result .{ .typ = subexpr_type.data.as.Pointer, .tag = .Value };
                 }
             },
             .If => |If| {
@@ -761,17 +855,25 @@ fn typecheck_expr(ctx: *Context, expr: *Ast.Expr) TypecheckExprResult {
                     common.exit(1);
                 }
 
-                break :typ true_branch_type;
+                expr.flags.is_const = If.condition.flags.is_const and
+                    If.true_branch.flags.is_const and
+                    If.false_branch.flags.is_const;
+
+                break :result .{ .typ = true_branch_type, .tag = .Value };
             },
             .Call => |Call| {
                 const subexpr_result = typecheck_expr(ctx, Call.subexpr);
 
-                if (subexpr_result.is_type) {
+                if (subexpr_result.tag == .Type) {
                     const typ = subexpr_result.typ;
+
+                    var is_const = false;
 
                     typecheck_type(ctx, typ);
                     switch (typ.data.as) {
                         .Struct, .Union => |Struct| {
+                            is_const = true;
+
                             var it = Call.args.first;
                             while (it) |node| {
                                 switch (node.data.*) {
@@ -785,6 +887,7 @@ fn typecheck_expr(ctx: *Context, expr: *Ast.Expr) TypecheckExprResult {
                                                     report_error(ctx, expr.line_info, "expected '{}', but got '{}'", .{ Field.typ, rhs_type });
                                                     common.exit(1);
                                                 }
+                                                is_const = is_const and Designator.rhs.flags.is_const;
                                             },
                                             else => {
                                                 report_error(ctx, typ.line_info, "expected a structure or union field", .{});
@@ -807,6 +910,8 @@ fn typecheck_expr(ctx: *Context, expr: *Ast.Expr) TypecheckExprResult {
                                 common.exit(1);
                             }
 
+                            is_const = true;
+
                             var it = Call.args.first;
                             while (it) |node| {
                                 switch (node.data.*) {
@@ -820,6 +925,7 @@ fn typecheck_expr(ctx: *Context, expr: *Ast.Expr) TypecheckExprResult {
                                             report_error(ctx, arg.line_info, "expected '{}', but got '{}'", .{ Array.subtype, arg_type });
                                             common.exit(1);
                                         }
+                                        is_const = is_const and arg.flags.is_const;
                                     },
                                 }
 
@@ -849,6 +955,8 @@ fn typecheck_expr(ctx: *Context, expr: *Ast.Expr) TypecheckExprResult {
                                         report_error(ctx, expr.line_info, "expected '{}', but got '{}'", .{ typ, arg_type });
                                         common.exit(1);
                                     }
+
+                                    is_const = arg.flags.is_const;
                                 },
                             }
                         },
@@ -856,7 +964,7 @@ fn typecheck_expr(ctx: *Context, expr: *Ast.Expr) TypecheckExprResult {
                             report_error(ctx, expr.line_info, "can't construct expression of type 'void'", .{});
                             common.exit(1);
                         },
-                        .Identifier => unreachable,
+                        .Identifier, .Type_Of => unreachable,
                     }
 
                     const args = Call.args;
@@ -864,8 +972,9 @@ fn typecheck_expr(ctx: *Context, expr: *Ast.Expr) TypecheckExprResult {
                         .typ = typ,
                         .args = args,
                     } };
+                    expr.flags.is_const = is_const;
 
-                    break :typ typ;
+                    break :result .{ .typ = typ, .tag = .Value };
                 } else {
                     const subexpr_type = subexpr_result.typ;
 
@@ -880,6 +989,8 @@ fn typecheck_expr(ctx: *Context, expr: *Ast.Expr) TypecheckExprResult {
                         report_error(ctx, Call.subexpr.line_info, "expected {} arguments, but got {}", .{ Proc.params.len, Call.args.len });
                         common.exit(1);
                     }
+
+                    var is_const = true;
 
                     var pit = Proc.params.first;
                     var ait = Call.args.first;
@@ -902,6 +1013,8 @@ fn typecheck_expr(ctx: *Context, expr: *Ast.Expr) TypecheckExprResult {
                                     report_error(ctx, arg.line_info, "expected '{}', but got '{}'", .{ param_type, arg_type });
                                     common.exit(1);
                                 }
+
+                                is_const = is_const and arg.flags.is_const;
                             },
                         }
 
@@ -909,14 +1022,16 @@ fn typecheck_expr(ctx: *Context, expr: *Ast.Expr) TypecheckExprResult {
                         ait = anode.next;
                     }
 
-                    break :typ Proc.return_type;
+                    expr.flags.is_const = is_const;
+
+                    break :result .{ .typ = Proc.return_type, .tag = .Value };
                 }
             },
             .Constructor => unreachable,
             .Subscript => |Subscript| {
                 const subexpr_result = typecheck_expr(ctx, Subscript.subexpr);
 
-                if (subexpr_result.is_type) {
+                if (subexpr_result.tag == .Type) {
                     const data = ctx.ast.create(Ast.Type.SharedData);
                     data.* = .{
                         .as = .{ .Array = .{
@@ -935,9 +1050,9 @@ fn typecheck_expr(ctx: *Context, expr: *Ast.Expr) TypecheckExprResult {
                         .symbol = null,
                     } };
 
-                    is_type = true;
+                    expr.flags.is_const = true;
 
-                    break :typ &expr.as.Type;
+                    break :result .{ .typ = &expr.as.Type, .tag = .Type };
                 } else {
                     const subexpr_type = subexpr_result.typ;
                     const index_type = typecheck_expr_only(ctx, Subscript.index);
@@ -948,15 +1063,16 @@ fn typecheck_expr(ctx: *Context, expr: *Ast.Expr) TypecheckExprResult {
                     }
 
                     expr.flags.is_lvalue = true;
+                    expr.flags.is_const = Subscript.subexpr.flags.is_const and Subscript.index.flags.is_const;
 
                     switch (subexpr_type.data.as) {
                         .Array => |Array| {
-                            break :typ Array.subtype;
+                            break :result .{ .typ = Array.subtype, .tag = .Value };
                         },
                         .Pointer => |subtype| {
                             switch (subtype.data.as) {
-                                .Array => |Array| break :typ Array.subtype,
-                                else => break :typ subtype,
+                                .Array => |Array| break :result .{ .typ = Array.subtype, .tag = .Value },
+                                else => break :result .{ .typ = subtype, .tag = .Value },
                             }
                         },
                         else => {
@@ -969,7 +1085,7 @@ fn typecheck_expr(ctx: *Context, expr: *Ast.Expr) TypecheckExprResult {
             .Field => |Field| {
                 const subexpr_result = typecheck_expr(ctx, Field.subexpr);
 
-                if (subexpr_result.is_type) {
+                if (subexpr_result.tag == .Type) {
                     typecheck_type(ctx, subexpr_result.typ);
 
                     const scope: *Ast.Scope = switch (subexpr_result.typ.data.as) {
@@ -985,34 +1101,30 @@ fn typecheck_expr(ctx: *Context, expr: *Ast.Expr) TypecheckExprResult {
                             report_error(ctx, subexpr_result.typ.line_info, "expected struct, union, or enum type, but got '{}'", .{subexpr_result.typ});
                             common.exit(1);
                         },
-                        .Identifier => unreachable,
+                        .Identifier, .Type_Of => unreachable,
                     };
 
                     const symbol = resolve_identifier(ctx, Field.field, scope);
 
                     switch (symbol.as) {
+                        .Variable, .Parameter, .Procedure => unreachable,
+                        .Struct_Field, .Union_Field => |Struct_Field| {
+                            expr.as = .{ .Symbol = symbol };
+                            break :result .{ .typ = Struct_Field.typ, .tag = .Non_Value };
+                        },
                         .Enum_Field => {
                             expr.as = .{ .Symbol = symbol };
-                            break :typ subexpr_result.typ;
+                            break :result .{ .typ = subexpr_result.typ, .tag = .Value };
                         },
                         .Type => |Type| {
                             expr.as = .{ .Type = Type.* };
-                            is_type = true;
-                            break :typ &expr.as.Type;
-                        },
-                        .Variable,
-                        .Parameter,
-                        .Procedure,
-                        .Struct_Field,
-                        .Union_Field,
-                        => {
-                            // TODO: Allow these for 'typeof()'?
-                            report_error(ctx, Field.field.line_info, "????", .{});
-                            common.exit(1);
+                            expr.flags.is_const = true;
+                            break :result .{ .typ = &expr.as.Type, .tag = .Type };
                         },
                     }
                 } else {
                     expr.flags.is_lvalue = true;
+                    expr.flags.is_const = Field.subexpr.flags.is_const;
 
                     const scope: *Ast.Scope = switch (subexpr_result.typ.data.as) {
                         .Struct, .Union => |Struct| Struct.scope,
@@ -1033,11 +1145,45 @@ fn typecheck_expr(ctx: *Context, expr: *Ast.Expr) TypecheckExprResult {
 
                     switch (symbol.as) {
                         .Struct_Field, .Union_Field => |Struct_Field| {
-                            break :typ Struct_Field.typ;
+                            break :result .{ .typ = Struct_Field.typ, .tag = .Value };
                         },
                         else => unreachable,
                     }
                 }
+            },
+            .Byte_Size_Of => |subexpr| {
+                const subexpr_result = typecheck_expr(ctx, subexpr);
+                if (subexpr_result.tag == .Type) {
+                    typecheck_type(ctx, subexpr_result.typ);
+                }
+                const byte_size = subexpr_result.typ.data.byte_size;
+
+                expr.as = .{ .Integer = byte_size };
+                expr.flags.is_const = true;
+
+                break :result .{ .typ = Ast.integer_type_from_u64(byte_size), .tag = .Value };
+            },
+            .Alignment_Of => |subexpr| {
+                const subexpr_result = typecheck_expr(ctx, subexpr);
+                if (subexpr_result.tag == .Type) {
+                    typecheck_type(ctx, subexpr_result.typ);
+                }
+                const alignment = subexpr_result.typ.data.alignment.to_byte_size();
+
+                expr.as = .{ .Integer = alignment };
+                expr.flags.is_const = true;
+
+                break :result .{ .typ = Ast.integer_type_from_u64(alignment), .tag = .Value };
+            },
+            .As => |As| {
+                typecheck_type(ctx, As.typ);
+                const expr_type = typecheck_expr_only(ctx, As.expr);
+                if (!safe_cast(ctx, As.expr, expr_type, As.typ)) {
+                    report_error(ctx, As.expr.line_info, "can't reinterpret '{}' as '{}'", .{ As.typ, expr_type });
+                    common.exit(1);
+                }
+                expr.flags.is_const = As.expr.flags.is_const;
+                break :result .{ .typ = As.typ, .tag = .Value };
             },
             .Cast => |Cast| {
                 typecheck_type(ctx, Cast.typ);
@@ -1046,20 +1192,24 @@ fn typecheck_expr(ctx: *Context, expr: *Ast.Expr) TypecheckExprResult {
                     report_error(ctx, Cast.expr.line_info, "can't cast '{}' to '{}'", .{ Cast.typ, expr_type });
                     common.exit(1);
                 }
-                break :typ Cast.typ;
+                expr.flags.is_const = Cast.expr.flags.is_const;
+                break :result .{ .typ = Cast.typ, .tag = .Value };
             },
             .Boolean => {
-                break :typ expr.typ;
+                expr.flags.is_const = true;
+                break :result .{ .typ = expr.typ, .tag = .Value };
             },
             .Integer => {
-                break :typ expr.typ;
+                expr.flags.is_const = true;
+                break :result .{ .typ = expr.typ, .tag = .Value };
             },
             .Null => {
-                break :typ expr.typ;
+                expr.flags.is_const = true;
+                break :result .{ .typ = expr.typ, .tag = .Value };
             },
             .Type => |*Type| {
-                is_type = true;
-                break :typ Type;
+                expr.flags.is_const = true;
+                break :result .{ .typ = Type, .tag = .Type };
             },
             .Symbol => unreachable,
             .Identifier => |Identifier| {
@@ -1070,37 +1220,33 @@ fn typecheck_expr(ctx: *Context, expr: *Ast.Expr) TypecheckExprResult {
 
                 if (has_symbol) |symbol| {
                     expr.as = .{ .Symbol = symbol };
+                    expr.flags.is_const = symbol.attributes.is_const;
+
+                    typecheck_symbol_type(ctx, symbol);
 
                     switch (symbol.as) {
-                        .Variable => |Variable| {
-                            if (!Variable.is_typechecked) {
-                                report_error(ctx, expr.line_info, "can't use variable in its own definition", .{});
-                                common.exit(1);
-                            }
-
-                            std.debug.assert(Variable.typ.?.data.stages.full_check == .Done);
+                        .Variable => |*Variable| {
+                            typecheck_symbol(ctx, symbol); // TODO: allow cyclic references when using #type_of/#alignment_of, etc.
 
                             expr.flags.is_lvalue = true;
 
-                            break :typ Variable.typ.?;
+                            break :result .{ .typ = Variable.typ.?, .tag = .Value };
                         },
                         .Parameter => |Parameter| {
-                            std.debug.assert(Parameter.typ.data.stages.full_check == .Done);
                             expr.flags.is_lvalue = true;
-                            break :typ Parameter.typ;
+                            break :result .{ .typ = Parameter.typ, .tag = .Value };
                         },
                         .Procedure => |Procedure| {
-                            typecheck_type(ctx, Procedure.typ);
-                            break :typ Procedure.typ;
+                            break :result .{ .typ = Procedure.typ, .tag = .Value };
                         },
                         .Type => |Type| {
-                            is_type = true;
-                            Type.symbol = symbol; // TODO: FIX THIS. Duplicated code in 'typecheck_symbol'.
-                            break :typ Type;
+                            break :result .{ .typ = Type, .tag = .Type };
                         },
-                        .Struct_Field, .Union_Field, .Enum_Field => {
-                            report_error(ctx, expr.line_info, "unexpected field", .{});
-                            common.exit(1);
+                        .Struct_Field, .Union_Field => |Field| {
+                            break :result .{ .typ = Field.typ, .tag = .Non_Value };
+                        },
+                        .Enum_Field => {
+                            break :result .{ .typ = ctx.enum_type.?, .tag = .Value };
                         },
                     }
                 } else {
@@ -1111,9 +1257,9 @@ fn typecheck_expr(ctx: *Context, expr: *Ast.Expr) TypecheckExprResult {
         }
     };
 
-    expr.typ = typ;
+    expr.typ = result.typ;
 
-    return .{ .typ = typ, .is_type = is_type };
+    return result;
 }
 
 fn resolve_identifier(ctx: *Context, expr: *Ast.Expr, scope: *Ast.Scope) *Ast.Symbol {
@@ -1240,7 +1386,10 @@ fn safe_cast_two_integers(ctx: *Context, lhs: *Ast.Expr, lhs_type: *Ast.Type, rh
                 .expr = subexpr,
             } },
             .typ = typ,
-            .flags = .{},
+            .flags = .{
+                .is_const = subexpr.flags.is_const,
+            },
+            .typechecking = .Done,
         };
     }
 
@@ -1255,7 +1404,10 @@ fn safe_cast_two_integers(ctx: *Context, lhs: *Ast.Expr, lhs_type: *Ast.Type, rh
                 .expr = subexpr,
             } },
             .typ = typ,
-            .flags = .{},
+            .flags = .{
+                .is_const = subexpr.flags.is_const,
+            },
+            .typechecking = .Done,
         };
     }
 
@@ -1274,7 +1426,7 @@ fn safe_cast_to_integer(ctx: *Context, expr: *Ast.Expr, expr_type: *Ast.Type, wh
         .Proc, .Pointer => Ast.lookup_integer_type(64, false),
         .Integer => expr_type,
         .Bool => Ast.lookup_integer_type(1, false),
-        .Identifier => unreachable,
+        .Identifier, .Type_Of => unreachable,
     };
 
     {
@@ -1312,7 +1464,10 @@ fn safe_cast_to_integer(ctx: *Context, expr: *Ast.Expr, expr_type: *Ast.Type, wh
                 .expr = subexpr,
             } },
             .typ = typ,
-            .flags = .{},
+            .flags = .{
+                .is_const = subexpr.flags.is_const,
+            },
+            .typechecking = .Done,
         };
     }
 
@@ -1379,7 +1534,7 @@ fn safe_cast(ctx: *Context, expr: *Ast.Expr, expr_type: *Ast.Type, cast_to: *Ast
                     else => {},
                 }
             },
-            .Identifier => unreachable,
+            .Identifier, .Type_Of => unreachable,
         }
 
         break :can_cast false;
@@ -1395,7 +1550,10 @@ fn safe_cast(ctx: *Context, expr: *Ast.Expr, expr_type: *Ast.Type, cast_to: *Ast
                 .expr = subexpr,
             } },
             .typ = cast_to,
-            .flags = .{},
+            .flags = .{
+                .is_const = subexpr.flags.is_const,
+            },
+            .typechecking = .Done,
         };
     }
 
@@ -1421,7 +1579,7 @@ fn can_unsafe_cast(ctx: *Context, expr: *Ast.Expr, expr_type: *Ast.Type, cast_to
                 else => {},
             }
         },
-        .Identifier => unreachable,
+        .Identifier, .Type_Of => unreachable,
     }
 
     return can_cast;
@@ -1445,7 +1603,13 @@ const Alignment = common.Alignment;
 
 const TypecheckExprResult = struct {
     typ: *Ast.Type,
-    is_type: bool,
+    tag: Tag,
+
+    pub const Tag = enum {
+        Value,
+        Type,
+        Non_Value,
+    };
 };
 
 const Sign = enum {

@@ -405,6 +405,8 @@ fn try_parse_symbol(p: *Parser) ParseSymbolResult {
                             p.current_scope = Proc.scope;
                             block = parse_stmt_list(p);
                             p.current_scope = old_current_scope;
+
+                            attributes.is_const = true;
                         },
                         else => {
                             report_error(p, p.lexer.grab_line_info(), "unexpected procedure body", .{});
@@ -424,6 +426,7 @@ fn try_parse_symbol(p: *Parser) ParseSymbolResult {
     }
 
     if (is_type) {
+        attributes.is_const = true;
         switch (tag) {
             .Symbol_With_Type => {
                 tag = .Type;
@@ -511,6 +514,7 @@ fn insert_symbol(p: *Parser, result: ParseSymbolResult, how_to_parse: HowToParse
                     .as = undefined,
                     .key = key,
                     .attributes = result.attributes,
+                    .typechecking = .None,
                 };
                 insert_result.value_ptr.* = symbol;
 
@@ -538,7 +542,6 @@ fn insert_symbol(p: *Parser, result: ParseSymbolResult, how_to_parse: HowToParse
                     .Variable => break :as .{ .Variable = .{
                         .typ = result.typ,
                         .value = result.value,
-                        .is_typechecked = false,
                         .storage = undefined,
                     } },
                     .Enum_Field => break :as .{ .Enum_Field = .{
@@ -559,7 +562,6 @@ fn insert_symbol(p: *Parser, result: ParseSymbolResult, how_to_parse: HowToParse
                     .Variable => break :as .{ .Variable = .{
                         .typ = result.typ,
                         .value = result.value,
-                        .is_typechecked = false,
                         .storage = undefined,
                     } },
                     .Parameter => break :as .{ .Parameter = .{
@@ -588,7 +590,6 @@ fn insert_symbol(p: *Parser, result: ParseSymbolResult, how_to_parse: HowToParse
                     .Variable => break :as .{ .Variable = .{
                         .typ = result.typ,
                         .value = result.value,
-                        .is_typechecked = false,
                         .storage = undefined,
                     } },
                     .Parameter => break :as .{ .Parameter = .{
@@ -793,6 +794,30 @@ fn try_parse_type_by_value(p: *Parser, dst: *Ast.Type) bool {
                     .symbol = null,
                 };
             },
+            .Type_Of => {
+                var exprs: [1]*Ast.Expr = undefined;
+                const count = parse_fixed_size_expr_list(p, &exprs);
+                switch (count) {
+                    1 => {
+                        const data = create(p, Ast.Type.SharedData);
+                        data.* = .{
+                            .as = .{ .Type_Of = exprs[0] },
+                            .byte_size = 0,
+                            .alignment = .BYTE,
+                            .stages = Ast.default_stages_none,
+                        };
+                        break :dst .{
+                            .line_info = tok.line_info,
+                            .data = data,
+                            .symbol = null,
+                        };
+                    },
+                    else => {
+                        report_error(p, tok.line_info, "expected 1 arguments, but got {}", .{count});
+                        common.exit(1);
+                    },
+                }
+            },
             .Identifier => |name| {
                 const data = create(p, Ast.Type.SharedData);
                 data.* = .{
@@ -898,6 +923,7 @@ fn parse_expr_prec(p: *Parser, min_prec: i32) *Ast.Expr {
                 } },
                 .typ = Ast.void_type,
                 .flags = .{},
+                .typechecking = .None,
             };
             lhs = new_lhs;
 
@@ -929,6 +955,7 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                     } },
                     .typ = Ast.void_type,
                     .flags = .{},
+                    .typechecking = .None,
                 };
                 base = new_base;
             },
@@ -946,6 +973,7 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                     } },
                     .typ = Ast.void_type,
                     .flags = .{},
+                    .typechecking = .None,
                 };
                 base = new_base;
             },
@@ -958,6 +986,7 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                     .as = .{ .Deref = base },
                     .typ = Ast.void_type,
                     .flags = .{},
+                    .typechecking = .None,
                 };
                 base = new_base;
             },
@@ -974,6 +1003,7 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                     } },
                     .typ = Ast.void_type,
                     .flags = .{},
+                    .typechecking = .None,
                 };
                 base = new_base;
             },
@@ -997,6 +1027,7 @@ fn parse_expr_base(p: *Parser) *Ast.Expr {
                 .as = .{ .Ref = subsubexpr },
                 .typ = Ast.void_type,
                 .flags = .{},
+                .typechecking = .None,
             };
             subexpr.line_info.column += 1;
             subexpr.line_info.offset += 1;
@@ -1006,6 +1037,7 @@ fn parse_expr_base(p: *Parser) *Ast.Expr {
                 .as = .{ .Ref = subexpr },
                 .typ = Ast.void_type,
                 .flags = .{},
+                .typechecking = .None,
             };
             return expr;
         },
@@ -1020,6 +1052,7 @@ fn parse_expr_base(p: *Parser) *Ast.Expr {
                 } },
                 .typ = Ast.void_type,
                 .flags = .{},
+                .typechecking = .None,
             };
             return expr;
         },
@@ -1031,6 +1064,7 @@ fn parse_expr_base(p: *Parser) *Ast.Expr {
                 .as = .{ .Ref = subexpr },
                 .typ = Ast.void_type,
                 .flags = .{},
+                .typechecking = .None,
             };
             return expr;
         },
@@ -1059,6 +1093,7 @@ fn parse_expr_base(p: *Parser) *Ast.Expr {
                 } },
                 .typ = Ast.void_type,
                 .flags = .{},
+                .typechecking = .None,
             };
 
             return expr;
@@ -1070,6 +1105,7 @@ fn parse_expr_base(p: *Parser) *Ast.Expr {
                 .as = .{ .Boolean = value },
                 .typ = Ast.bool_type,
                 .flags = .{},
+                .typechecking = .None,
             };
             return expr;
         },
@@ -1080,6 +1116,7 @@ fn parse_expr_base(p: *Parser) *Ast.Expr {
                 .as = .Null,
                 .typ = Ast.void_pointer_type,
                 .flags = .{},
+                .typechecking = .None,
             };
             return expr;
         },
@@ -1093,19 +1130,91 @@ fn parse_expr_base(p: *Parser) *Ast.Expr {
                 } },
                 .typ = Ast.void_type,
                 .flags = .{},
+                .typechecking = .None,
             };
             return expr;
         },
         .Integer => |value| {
-            const typ = integer_type_from_value(value);
+            const typ = Ast.integer_type_from_u64(value);
             const expr = create(p, Ast.Expr);
             expr.* = .{
                 .line_info = tok.line_info,
                 .as = .{ .Integer = value },
                 .typ = typ,
                 .flags = .{},
+                .typechecking = .None,
             };
             return expr;
+        },
+        .Byte_Size_Of => {
+            var exprs: [1]*Ast.Expr = undefined;
+            const count = parse_fixed_size_expr_list(p, &exprs);
+
+            switch (count) {
+                1 => {
+                    const expr = create(p, Ast.Expr);
+                    expr.* = .{
+                        .line_info = tok.line_info,
+                        .as = .{ .Byte_Size_Of = exprs[0] },
+                        .typ = Ast.void_type,
+                        .flags = .{},
+                        .typechecking = .None,
+                    };
+                    return expr;
+                },
+                else => {
+                    report_error(p, tok.line_info, "expected 1 argument, but got {}", .{count});
+                    common.exit(1);
+                },
+            }
+        },
+        .Alignment_Of => {
+            var exprs: [1]*Ast.Expr = undefined;
+            const count = parse_fixed_size_expr_list(p, &exprs);
+
+            switch (count) {
+                1 => {
+                    const expr = create(p, Ast.Expr);
+                    expr.* = .{
+                        .line_info = tok.line_info,
+                        .as = .{ .Alignment_Of = exprs[0] },
+                        .typ = Ast.void_type,
+                        .flags = .{},
+                        .typechecking = .None,
+                    };
+                    return expr;
+                },
+                else => {
+                    report_error(p, tok.line_info, "expected 1 argument, but got {}", .{count});
+                    common.exit(1);
+                },
+            }
+        },
+        .As => {
+            var exprs: [2]*Ast.Expr = undefined;
+            const count = parse_fixed_size_expr_list(p, &exprs);
+
+            switch (count) {
+                2 => {
+                    const typ = expr_to_type(p, exprs[0]);
+                    const expr = create(p, Ast.Expr);
+                    expr.* = .{
+                        .line_info = tok.line_info,
+                        .as = .{ .As = .{
+                            .typ = typ,
+                            .expr = exprs[1],
+                        } },
+                        .typ = typ,
+                        .flags = .{},
+                        .typechecking = .None,
+                    };
+                    return expr;
+                },
+                else => {
+                    report_error(p, tok.line_info, "expected 2 arguments, but got {}", .{count});
+                    common.exit(1);
+                },
+            }
         },
         .Cast => {
             var exprs: [2]*Ast.Expr = undefined;
@@ -1123,6 +1232,7 @@ fn parse_expr_base(p: *Parser) *Ast.Expr {
                         } },
                         .typ = typ,
                         .flags = .{},
+                        .typechecking = .None,
                     };
                     return expr;
                 },
@@ -1147,6 +1257,7 @@ fn parse_expr_base(p: *Parser) *Ast.Expr {
                 .as = .{ .Type = typ },
                 .typ = Ast.void_type,
                 .flags = .{},
+                .typechecking = .None,
             };
             expr.typ = &expr.as.Type;
 
@@ -1352,11 +1463,6 @@ fn token_tag_to_unary_op_tag(op: Token.Tag) Ast.Expr.UnaryOp.Tag {
         .Not => .Not,
         else => unreachable,
     };
-}
-
-fn integer_type_from_value(value: u64) *Ast.Type {
-    const bits = utils.count_bits(value);
-    return Ast.lookup_integer_type(bits, false);
 }
 
 fn report_error(p: *Parser, line_info: LineInfo, comptime format: []const u8, args: anytype) void {

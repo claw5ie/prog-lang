@@ -2,8 +2,8 @@ val00: i32 = -1;
 
 aaa: i32 = 0;
 aab: u64 = 0;
-aac: i6 = 0;
-aad: i6 = 0;
+aac: i6 = aad;
+#const aad: i6 = 0;
 aae: i6 = 0;
 
 #static #const alias e: a;
