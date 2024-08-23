@@ -91,10 +91,7 @@ pub fn find_symbol_in_scope(ast: *Ast, key: Symbol.Key, offset: usize) ?*Symbol 
             .Variable,
             .Parameter,
             => {
-                if (symbol.attributes.is_const or
-                    symbol.attributes.is_static or
-                    symbol.line_info.offset < offset)
-                {
+                if (symbol.line_info.offset < offset) {
                     return symbol;
                 }
             },
@@ -545,7 +542,6 @@ pub const Symbol = struct {
     line_info: LineInfo,
     as: As,
     key: Key,
-    attributes: Attributes,
     typechecking: Stage,
 
     pub const As = union(enum) {

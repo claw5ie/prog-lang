@@ -69,10 +69,6 @@ fn typecheck_symbol_type(ctx: *Context, symbol: *Ast.Symbol) void {
             }
         },
         .Parameter => |Parameter| {
-            if (!symbol.attributes.is_empty()) {
-                report_error(ctx, symbol.line_info, "attributes for parameters are not supported", .{});
-                common.exit(1);
-            }
             typecheck_type(ctx, Parameter.typ);
             reject_void_type(ctx, Parameter.typ);
             if (Parameter.value) |value| {
@@ -84,10 +80,6 @@ fn typecheck_symbol_type(ctx: *Context, symbol: *Ast.Symbol) void {
             typecheck_type(ctx, Procedure.typ);
         },
         .Struct_Field => |Field| {
-            if (!symbol.attributes.is_empty()) {
-                report_error(ctx, symbol.line_info, "attributes for struct fields are not supported", .{});
-                common.exit(1);
-            }
             typecheck_type(ctx, Field.typ);
             reject_void_type(ctx, Field.typ);
             if (Field.value) |value| {
@@ -96,10 +88,6 @@ fn typecheck_symbol_type(ctx: *Context, symbol: *Ast.Symbol) void {
             }
         },
         .Union_Field => |Field| {
-            if (!symbol.attributes.is_empty()) {
-                report_error(ctx, symbol.line_info, "attributes for union fields are not supported", .{});
-                common.exit(1);
-            }
             typecheck_type(ctx, Field.typ);
             reject_void_type(ctx, Field.typ);
             if (Field.value) |value| {
@@ -107,12 +95,7 @@ fn typecheck_symbol_type(ctx: *Context, symbol: *Ast.Symbol) void {
                 common.exit(1);
             }
         },
-        .Enum_Field => {
-            if (!symbol.attributes.is_empty()) {
-                report_error(ctx, symbol.line_info, "attributes for enum fields are not supported", .{});
-                common.exit(1);
-            }
-        },
+        .Enum_Field => {},
         .Type => |typ| {
             typ.symbol = symbol;
         },
@@ -143,20 +126,10 @@ fn typecheck_symbol(ctx: *Context, symbol: *Ast.Symbol) void {
                         report_note(ctx, value.line_info, "expression is here", .{});
                         common.exit(1);
                     }
-
-                    if (symbol.attributes.is_const and !value.flags.is_const) {
-                        report_error(ctx, value.line_info, "expression is not constant", .{});
-                        common.exit(1);
-                    }
                 }
             } else if (Variable.value) |value| {
                 const value_type = typecheck_expr_only(ctx, value);
                 reject_void_type(ctx, value_type);
-
-                if (symbol.attributes.is_const and !value.flags.is_const) {
-                    report_error(ctx, value.line_info, "expression is not constant", .{});
-                    common.exit(1);
-                }
 
                 Variable.typ = value_type;
 
@@ -1220,7 +1193,6 @@ fn typecheck_expr(ctx: *Context, expr: *Ast.Expr) TypecheckExprResult {
 
                 if (has_symbol) |symbol| {
                     expr.as = .{ .Symbol = symbol };
-                    expr.flags.is_const = symbol.attributes.is_const;
 
                     typecheck_symbol_type(ctx, symbol);
 

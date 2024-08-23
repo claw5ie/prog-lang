@@ -405,8 +405,6 @@ fn try_parse_symbol(p: *Parser) ParseSymbolResult {
                             p.current_scope = Proc.scope;
                             block = parse_stmt_list(p);
                             p.current_scope = old_current_scope;
-
-                            attributes.is_const = true;
                         },
                         else => {
                             report_error(p, p.lexer.grab_line_info(), "unexpected procedure body", .{});
@@ -426,7 +424,6 @@ fn try_parse_symbol(p: *Parser) ParseSymbolResult {
     }
 
     if (is_type) {
-        attributes.is_const = true;
         switch (tag) {
             .Symbol_With_Type => {
                 tag = .Type;
@@ -508,12 +505,16 @@ fn insert_symbol(p: *Parser, result: ParseSymbolResult, how_to_parse: HowToParse
                     common.exit(1);
                 }
 
+                if (!result.attributes.is_empty()) {
+                    report_error(p, result.pattern.line_info, "attributes are not supported yet", .{});
+                    common.exit(1);
+                }
+
                 const symbol = create(p, Ast.Symbol);
                 symbol.* = .{
                     .line_info = result.pattern.line_info,
                     .as = undefined,
                     .key = key,
-                    .attributes = result.attributes,
                     .typechecking = .None,
                 };
                 insert_result.value_ptr.* = symbol;
