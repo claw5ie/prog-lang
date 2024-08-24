@@ -11,8 +11,6 @@ pub fn print(irc: *IRC) void {
         switch (instr) {
             .Binary_Op => |Binary_Op| {
                 const op: []const u8 = switch (Binary_Op.tag) {
-                    .Or => "or ",
-                    .And => "and",
                     .Eq => "eq ",
                     .Neq => "neq",
                     .Lt => "lt ",
@@ -24,6 +22,17 @@ pub fn print(irc: *IRC) void {
                     .Mul => "mul",
                     .Div => "div",
                     .Mod => "mod",
+                    .Eqi => "eqi ",
+                    .Neqi => "neqi",
+                    .Lti => "lti ",
+                    .Leqi => "leqi",
+                    .Gti => "gti ",
+                    .Geqi => "geqi",
+                    .Addi => "addi",
+                    .Subi => "subi",
+                    .Muli => "muli",
+                    .Divi => "divi",
+                    .Modi => "modi",
                 };
                 common.oprint(IDENT ++ "{s}      {}, {}, {}", .{ op, Binary_Op.dst, Binary_Op.src0, Binary_Op.src1 });
             },
@@ -103,8 +112,6 @@ pub const Instr = union(enum) {
         tag: Tag,
 
         pub const Tag = enum {
-            Or,
-            And,
             Eq,
             Neq,
             Lt,
@@ -116,6 +123,18 @@ pub const Instr = union(enum) {
             Mul,
             Div,
             Mod,
+
+            Eqi,
+            Neqi,
+            Lti,
+            Leqi,
+            Gti,
+            Geqi,
+            Addi,
+            Subi,
+            Muli,
+            Divi,
+            Modi,
         };
     };
 

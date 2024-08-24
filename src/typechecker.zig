@@ -132,8 +132,6 @@ fn typecheck_symbol(ctx: *Context, symbol: *Ast.Symbol) void {
                 reject_void_type(ctx, value_type);
 
                 Variable.typ = value_type;
-
-                // TODO[local-funcs]: don't allow assigning local function pointers to variables.
             } else {
                 unreachable;
             }
@@ -329,6 +327,7 @@ fn typecheck_type(ctx: *Context, typ: *Ast.Type) void {
                 const field_alignment = Field.typ.data.alignment;
                 size = utils.align_u64(size, field_alignment);
                 Field.offset = size;
+
                 size += Field.typ.data.byte_size;
                 alignment = @enumFromInt(@max(@intFromEnum(alignment), @intFromEnum(field_alignment)));
 
@@ -349,8 +348,10 @@ fn typecheck_type(ctx: *Context, typ: *Ast.Type) void {
 
                 const Field = &node.data.as.Union_Field;
                 Field.offset = 0;
+
                 size = @max(size, Field.typ.data.byte_size);
                 alignment = @enumFromInt(@max(@intFromEnum(alignment), @intFromEnum(Field.typ.data.alignment)));
+
                 it = node.next;
             }
 
@@ -593,8 +594,6 @@ fn typecheck_stmt(ctx: *Context, stmt: *Ast.Stmt) void {
 
             const rhs_type = typecheck_expr_only(ctx, Assign.rhs);
 
-            // TODO[local-funcs]: don't allow assigning local function pointers to variables.
-
             if (!safe_cast(ctx, Assign.rhs, rhs_type, lhs_type)) {
                 report_error(ctx, stmt.line_info, "expected '{}', but got '{}'", .{ lhs_type, rhs_type });
                 common.exit(1);
@@ -615,7 +614,7 @@ fn typecheck_expr_only(ctx: *Context, expr: *Ast.Expr) *Ast.Type {
     return result.typ;
 }
 
-// NOTE: Types are typechecked lazily (only when used). 'cause if a type is not fully formed (like ambiguous pointer/array), we need to typecheck it from the top level.
+// Types are typechecked lazily (only when used). 'cause if a type is not fully formed (like ambiguous pointer/array), we need to typecheck it from the top level.
 fn typecheck_expr(ctx: *Context, expr: *Ast.Expr) TypecheckExprResult {
     switch (expr.typechecking) {
         .None => expr.typechecking = .Going,
@@ -629,7 +628,7 @@ fn typecheck_expr(ctx: *Context, expr: *Ast.Expr) TypecheckExprResult {
 
     const result: TypecheckExprResult = result: {
         switch (expr.as) {
-            .Binary_Op => |Binary_Op| {
+            .Binary_Op => |*Binary_Op| {
                 const lhs_type = typecheck_expr_only(ctx, Binary_Op.lhs);
                 const rhs_type = typecheck_expr_only(ctx, Binary_Op.rhs);
                 const lhs_flags = lhs_type.compare();
@@ -647,13 +646,51 @@ fn typecheck_expr(ctx: *Context, expr: *Ast.Expr) TypecheckExprResult {
                             common.exit(1);
                         }
 
+                        switch (Binary_Op.tag) {
+                            .Or => {
+                                const true_branch = ctx.ast.create(Ast.Expr);
+                                true_branch.* = .{
+                                    .line_info = expr.line_info,
+                                    .as = .{ .Boolean = true },
+                                    .typ = Ast.bool_type,
+                                    .flags = .{
+                                        .is_const = true,
+                                    },
+                                    .typechecking = .Done,
+                                };
+                                expr.as = .{ .If = .{
+                                    .condition = Binary_Op.lhs,
+                                    .true_branch = true_branch,
+                                    .false_branch = Binary_Op.rhs,
+                                } };
+                            },
+                            .And => {
+                                const false_branch = ctx.ast.create(Ast.Expr);
+                                false_branch.* = .{
+                                    .line_info = expr.line_info,
+                                    .as = .{ .Boolean = false },
+                                    .typ = Ast.bool_type,
+                                    .flags = .{
+                                        .is_const = true,
+                                    },
+                                    .typechecking = .Done,
+                                };
+                                expr.as = .{ .If = .{
+                                    .condition = Binary_Op.lhs,
+                                    .true_branch = Binary_Op.rhs,
+                                    .false_branch = false_branch,
+                                } };
+                            },
+                            else => unreachable,
+                        }
+
                         break :result .{ .typ = Ast.bool_type, .tag = .Value };
                     },
                     .Eq, .Neq => {
-                        if (!lhs_flags.is_comparable) {
-                            report_error(ctx, Binary_Op.line_info, "expression of type '{}' is not comparable", .{lhs_type});
+                        if (!lhs_flags.is_comparable or !rhs_flags.is_comparable) { // TODO: only one side needs to be comparable?
+                            report_error(ctx, Binary_Op.line_info, "errror messages suuuuuuuuuuuuuuuuuck. One of the {}/{} is not comparable", .{ lhs_type, rhs_type });
                             common.exit(1);
-                        } else if (!safe_cast(ctx, Binary_Op.rhs, rhs_type, lhs_type)) {
+                        } else if (!symetric_safe_cast(ctx, Binary_Op.lhs, lhs_type, Binary_Op.rhs, rhs_type)) {
                             report_error(ctx, Binary_Op.line_info, "mismatched types: '{}' and '{}'", .{ lhs_type, rhs_type });
                             common.exit(1);
                         }
@@ -661,10 +698,10 @@ fn typecheck_expr(ctx: *Context, expr: *Ast.Expr) TypecheckExprResult {
                         break :result .{ .typ = Ast.bool_type, .tag = .Value };
                     },
                     .Lt, .Leq, .Gt, .Geq => {
-                        if (!lhs_flags.is_ordered) {
+                        if (!lhs_flags.is_ordered or !rhs_flags.is_ordered) {
                             report_error(ctx, Binary_Op.line_info, "expression of type '{}' is not comparable", .{lhs_type});
                             common.exit(1);
-                        } else if (!safe_cast(ctx, Binary_Op.rhs, rhs_type, lhs_type)) {
+                        } else if (!symetric_safe_cast(ctx, Binary_Op.lhs, lhs_type, Binary_Op.rhs, rhs_type)) {
                             report_error(ctx, Binary_Op.line_info, "mismatched types: '{}' and '{}'", .{ lhs_type, rhs_type });
                             common.exit(1);
                         }
@@ -676,8 +713,10 @@ fn typecheck_expr(ctx: *Context, expr: *Ast.Expr) TypecheckExprResult {
                             report_error(ctx, Binary_Op.line_info, "can't add 'void' pointers", .{});
                             common.exit(1);
                         } else if (lhs_flags.is_pointer and safe_cast_to_integer(ctx, Binary_Op.rhs, rhs_type, .Unsigned) != null) {
+                            Binary_Op.rhs = make_expr_pointer_mul_integer(ctx, Binary_Op.rhs, lhs_type.data.as.Pointer.data);
                             break :result .{ .typ = lhs_type, .tag = .Value };
                         } else if (rhs_flags.is_pointer and safe_cast_to_integer(ctx, Binary_Op.lhs, lhs_type, .Unsigned) != null) {
+                            Binary_Op.lhs = make_expr_pointer_mul_integer(ctx, Binary_Op.lhs, rhs_type.data.as.Pointer.data);
                             break :result .{ .typ = rhs_type, .tag = .Value };
                         } else {
                             const casted = safe_cast_two_integers(ctx, Binary_Op.lhs, lhs_type, Binary_Op.rhs, rhs_type);
@@ -693,6 +732,7 @@ fn typecheck_expr(ctx: *Context, expr: *Ast.Expr) TypecheckExprResult {
                             report_error(ctx, Binary_Op.line_info, "can't subtract 'void' pointer", .{});
                             common.exit(1);
                         } else if (lhs_flags.is_pointer and safe_cast_to_integer(ctx, Binary_Op.rhs, rhs_type, .Unsigned) != null) {
+                            Binary_Op.rhs = make_expr_pointer_mul_integer(ctx, Binary_Op.rhs, lhs_type.data.as.Pointer.data);
                             break :result .{ .typ = lhs_type, .tag = .Value };
                         } else {
                             const casted = safe_cast_two_integers(ctx, Binary_Op.lhs, lhs_type, Binary_Op.rhs, rhs_type);
@@ -821,9 +861,7 @@ fn typecheck_expr(ctx: *Context, expr: *Ast.Expr) TypecheckExprResult {
                 const true_branch_type = typecheck_expr_only(ctx, If.true_branch);
                 const false_branch_type = typecheck_expr_only(ctx, If.false_branch);
 
-                if (!safe_cast(ctx, If.false_branch, false_branch_type, true_branch_type) and
-                    !safe_cast(ctx, If.true_branch, true_branch_type, false_branch_type))
-                {
+                if (!symetric_safe_cast(ctx, If.true_branch, true_branch_type, If.false_branch, false_branch_type)) {
                     report_error(ctx, If.condition.line_info, "mismatched types: '{}' and '{}'", .{ true_branch_type, false_branch_type });
                     common.exit(1);
                 }
@@ -1345,7 +1383,7 @@ fn safe_cast_two_integers(ctx: *Context, lhs: *Ast.Expr, lhs_type: *Ast.Type, rh
         },
     }
 
-    // NOTE: Should we undo the cast if integers are incompatible?
+    // Should we undo the cast if integers are incompatible?
 
     if (which_side_to_cast == .Left or which_side_to_cast == .Both) {
         const typ = casted.?;
@@ -1476,7 +1514,7 @@ fn safe_cast(ctx: *Context, expr: *Ast.Expr, expr_type: *Ast.Type, cast_to: *Ast
                     },
                     .Pointer => |ssubtype| {
                         if (dsubtype.equal(Ast.void_type) or ssubtype.equal(Ast.void_type)) {
-                            return true; // NOTE: Don't need to cast.
+                            return true; // Don't need to cast.
                         }
                     },
                     else => {},
@@ -1532,6 +1570,10 @@ fn safe_cast(ctx: *Context, expr: *Ast.Expr, expr_type: *Ast.Type, cast_to: *Ast
     return can_cast;
 }
 
+fn symetric_safe_cast(ctx: *Context, lhs: *Ast.Expr, lhs_type: *Ast.Type, rhs: *Ast.Expr, rhs_type: *Ast.Type) bool {
+    return safe_cast(ctx, lhs, lhs_type, rhs_type) or safe_cast(ctx, rhs, rhs_type, lhs_type);
+}
+
 fn can_unsafe_cast(ctx: *Context, expr: *Ast.Expr, expr_type: *Ast.Type, cast_to: *Ast.Type) bool {
     if (safe_cast(ctx, expr, expr_type, cast_to)) {
         return true;
@@ -1555,6 +1597,37 @@ fn can_unsafe_cast(ctx: *Context, expr: *Ast.Expr, expr_type: *Ast.Type, cast_to
     }
 
     return can_cast;
+}
+
+fn make_expr_pointer_mul_integer(ctx: *Context, expr: *Ast.Expr, data: *Ast.Type.SharedData) *Ast.Expr {
+    const size = utils.align_u64(data.byte_size, data.alignment);
+    const rhs = ctx.ast.create(Ast.Expr);
+    rhs.* = .{
+        .line_info = expr.line_info,
+        .as = .{ .Integer = size },
+        .typ = Ast.integer_type_from_u64(size),
+        .flags = .{
+            .is_const = true,
+        },
+        .typechecking = .Done,
+    };
+    std.debug.assert(symetric_safe_cast(ctx, expr, expr.typ, rhs, rhs.typ));
+    const new_expr = ctx.ast.create(Ast.Expr);
+    new_expr.* = .{
+        .line_info = expr.line_info,
+        .as = .{ .Binary_Op = .{
+            .lhs = expr,
+            .rhs = rhs,
+            .tag = .Mul,
+            .line_info = undefined,
+        } },
+        .typ = expr.typ,
+        .flags = .{
+            .is_const = expr.flags.is_const,
+        },
+        .typechecking = .Done,
+    };
+    return new_expr;
 }
 
 fn report_error(ctx: *Context, line_info: LineInfo, comptime format: []const u8, args: anytype) void {

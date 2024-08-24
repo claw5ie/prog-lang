@@ -2,7 +2,6 @@ lexer: Lexer,
 global_symbols: Ast.SymbolList,
 symbol_table: Ast.SymbolTable,
 arena: common.ArenaAllocator,
-
 current_scope: *Ast.Scope,
 had_error: bool,
 

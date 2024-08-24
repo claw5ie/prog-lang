@@ -224,6 +224,18 @@ pub const Type = struct {
         return flags;
     }
 
+    pub fn is_signed(typ: *Type) bool {
+        switch (typ.data.as) {
+            .Enum => |Enumerator| {
+                return Enumerator.integer_type.data.as.Integer.is_signed;
+            },
+            .Integer => |Integer| {
+                return Integer.is_signed;
+            },
+            else => return false,
+        }
+    }
+
     pub fn equal(self: *Type, other: *Type) bool {
         if (self.symbol != null and self.symbol == other.symbol) {
             return true;

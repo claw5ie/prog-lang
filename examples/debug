@@ -49,6 +49,7 @@ alias Bar: struct
 
 bar: proc(aa: struct { x: i64 }) void
 {
+  aac < aaa;
   {
     {
       a := if true 2 else 42;

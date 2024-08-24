@@ -219,21 +219,39 @@ fn generate_ir_rvalue(ctx: *Context, has_dst: ?IRC.Lvalue, expr: *Ast.Expr) IRC.
 
                 const dst = maybe_grab_local_from_type(ctx, has_dst, expr.typ.data);
 
-                // TODO: signed? pointers?
-                const tag: IRC.Instr.BinaryOp.Tag = switch (Binary_Op.tag) {
-                    .Or => .Or,
-                    .And => .And,
-                    .Eq => .Eq,
-                    .Neq => .Neq,
-                    .Lt => .Lt,
-                    .Leq => .Leq,
-                    .Gt => .Gt,
-                    .Geq => .Geq,
-                    .Add => .Add,
-                    .Sub => .Sub,
-                    .Mul => .Mul,
-                    .Div => .Div,
-                    .Mod => .Mod,
+                const tag: IRC.Instr.BinaryOp.Tag = tag: {
+                    if (Binary_Op.lhs.typ.is_signed()) {
+                        std.debug.assert(Binary_Op.rhs.typ.is_signed());
+                        break :tag switch (Binary_Op.tag) {
+                            .Or, .And => unreachable,
+                            .Eq => .Eqi,
+                            .Neq => .Neqi,
+                            .Lt => .Lti,
+                            .Leq => .Leqi,
+                            .Gt => .Gti,
+                            .Geq => .Geqi,
+                            .Add => .Addi,
+                            .Sub => .Subi,
+                            .Mul => .Muli,
+                            .Div => .Divi,
+                            .Mod => .Modi,
+                        };
+                    } else {
+                        break :tag switch (Binary_Op.tag) {
+                            .Or, .And => unreachable,
+                            .Eq => .Eq,
+                            .Neq => .Neq,
+                            .Lt => .Lt,
+                            .Leq => .Leq,
+                            .Gt => .Gt,
+                            .Geq => .Geq,
+                            .Add => .Add,
+                            .Sub => .Sub,
+                            .Mul => .Mul,
+                            .Div => .Div,
+                            .Mod => .Mod,
+                        };
+                    }
                 };
 
                 generate_ir_instr(ctx, .{ .Binary_Op = .{
@@ -383,7 +401,7 @@ fn generate_ir_rvalue(ctx: *Context, has_dst: ?IRC.Lvalue, expr: *Ast.Expr) IRC.
                         const arg = Constructor.args.first.?.data.Expr;
                         break :src generate_ir_rvalue(ctx, null, arg);
                     },
-                    .Void, .Identifier => unreachable,
+                    .Void, .Identifier, .Type_Of => unreachable,
                 }
             },
             .Subscript => {
@@ -391,7 +409,9 @@ fn generate_ir_rvalue(ctx: *Context, has_dst: ?IRC.Lvalue, expr: *Ast.Expr) IRC.
                 move_src = true;
                 break :src src.as_rvalue();
             },
-            .Cast => |Cast| {
+            .Byte_Size_Of => unreachable,
+            .Alignment_Of => unreachable,
+            .As, .Cast => |Cast| {
                 var typ = Cast.typ;
                 if (typ.data.as == .Enum) { // TODO: fix this? Not a good solution if we need to do some enum specific stuff.
                     typ = typ.data.as.Enum.integer_type;
@@ -437,7 +457,7 @@ fn generate_ir_rvalue(ctx: *Context, has_dst: ?IRC.Lvalue, expr: *Ast.Expr) IRC.
                         } });
                         break :src dst.as_rvalue();
                     },
-                    .Void, .Identifier => unreachable,
+                    .Void, .Identifier, .Type_Of => unreachable,
                 }
             },
             .Integer => |value| {
@@ -599,6 +619,9 @@ fn generate_ir_lvalue(ctx: *Context, expr: *Ast.Expr) IRC.Lvalue {
         .If,
         .Call,
         .Constructor,
+        .Byte_Size_Of,
+        .Alignment_Of,
+        .As,
         .Cast,
         .Type,
         .Integer,
