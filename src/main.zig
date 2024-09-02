@@ -52,8 +52,8 @@ pub fn main() void {
 
     var ast = Parser.parse(filepath);
     Typechecker.typecheck(&ast);
-    // var irc = GenIr.generate_ir(&ast);
-    // irc.print();
+    var irc = GenIr.generate_ir(&ast);
+    irc.print();
 
     ast.arena.deinit();
     ast.symbol_table.deinit();
@@ -64,7 +64,7 @@ pub fn main() void {
             common.gpa.destroy(typ);
         }
     }
-    // irc.instrs.deinit();
+    irc.instrs.deinit();
     std.debug.assert(common.general_purpose_allocator.deinit() == .ok);
 }
 

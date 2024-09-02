@@ -192,8 +192,8 @@ fn generate_ir_stmt(ctx: *Context, stmt: *Ast.Stmt) void {
             generate_ir_local_symbol(ctx, symbol);
         },
         .Assign => |Assign| {
-            const dst = generate_ir_lvalue(ctx, Assign.lhs);
-            _ = generate_ir_rvalue(ctx, dst, Assign.rhs);
+            const dst = generate_ir_rvalue(ctx, null, Assign.lhs);
+            _ = generate_ir_rvalue(ctx, dst.Lvalue, Assign.rhs);
         },
         .Expr => |expr| {
             _ = generate_ir_rvalue(ctx, null, expr);
@@ -293,12 +293,14 @@ fn generate_ir_rvalue(ctx: *Context, has_dst: ?IRC.Lvalue, expr: *Ast.Expr) IRC.
             },
             .Ref => |subexpr| {
                 move_src = true;
-                const src = generate_ir_lvalue(ctx, subexpr);
+                const src = generate_ir_rvalue(ctx, null, subexpr).Lvalue;
                 break :src .{ .Addr = src };
             },
-            .Deref => {
+            .Deref => |subexpr| {
                 move_src = true;
-                break :src generate_ir_lvalue(ctx, expr).as_rvalue();
+                const src = generate_ir_rvalue(ctx, null, subexpr);
+                const new_src = deref_rvalue(ctx, src, expr.typ.data.byte_size);
+                break :src new_src.as_rvalue();
             },
             .If => |If| {
                 const false_branch_label = grab_label(ctx);
@@ -315,10 +317,20 @@ fn generate_ir_rvalue(ctx: *Context, has_dst: ?IRC.Lvalue, expr: *Ast.Expr) IRC.
 
                 break :src dst.as_rvalue();
             },
-            .Field => {
-                const src = generate_ir_lvalue(ctx, expr);
+            .Field => |Field| {
                 move_src = true;
-                break :src src.as_rvalue();
+
+                const offset: u64 = switch (Field.field.as.Symbol.as) {
+                    .Struct_Field, .Union_Field => |Struct_Field| Struct_Field.offset,
+                    else => unreachable,
+                };
+                const src = generate_ir_rvalue(ctx, null, Field.subexpr).Lvalue;
+
+                if (Field.subexpr.typ.data.as != .Pointer) {
+                    break :src bump_lvalue(src, offset, expr.typ.data.byte_size).as_rvalue();
+                } else {
+                    break :src deref_lvalue(ctx, src, offset, expr.typ.data.byte_size).as_rvalue();
+                }
             },
             .Call => |Call| {
                 const dst = maybe_grab_local_from_type(ctx, has_dst, expr.typ.data);
@@ -404,10 +416,75 @@ fn generate_ir_rvalue(ctx: *Context, has_dst: ?IRC.Lvalue, expr: *Ast.Expr) IRC.
                     .Void, .Identifier, .Type_Of => unreachable,
                 }
             },
-            .Subscript => {
-                const src = generate_ir_lvalue(ctx, expr);
+            .Subscript => |Subscript| {
                 move_src = true;
-                break :src src.as_rvalue();
+
+                const subexpr = generate_ir_rvalue(ctx, null, Subscript.subexpr).Lvalue;
+                const index = generate_ir_rvalue(ctx, null, Subscript.index);
+                const dst = grab_local(ctx, 8, .QWORD);
+
+                const offset = utils.align_u64(expr.typ.data.byte_size, expr.typ.data.alignment);
+                generate_ir_instr(ctx, .{
+                    .Binary_Op = .{
+                        .dst = dst.as_lvalue(),
+                        .src0 = index,
+                        .src1 = .{ .Imm = offset },
+                        .tag = .Mul,
+                    },
+                });
+
+                if (Subscript.subexpr.typ.data.as != .Pointer) {
+                    switch (subexpr) {
+                        .Tmp => {
+                            generate_ir_instr(ctx, .{ .Binary_Op = .{
+                                .dst = dst.as_lvalue(),
+                                .src0 = dst.as_rvalue(),
+                                .src1 = .{ .Addr = subexpr },
+                                .tag = .Add,
+                            } });
+
+                            break :src .{ .Lvalue = .{
+                                .Mem = .{
+                                    .base = dst,
+                                    .offset = 0,
+                                    .size = expr.typ.data.byte_size,
+                                },
+                            } };
+                        },
+                        .Mem => |mem| {
+                            if (mem.base) |src0| {
+                                generate_ir_instr(ctx, .{ .Binary_Op = .{
+                                    .dst = dst.as_lvalue(),
+                                    .src0 = dst.as_rvalue(),
+                                    .src1 = src0.as_rvalue(),
+                                    .tag = .Add,
+                                } });
+                            }
+
+                            break :src .{ .Lvalue = .{
+                                .Mem = .{
+                                    .base = dst,
+                                    .offset = mem.offset,
+                                    .size = expr.typ.data.byte_size,
+                                },
+                            } };
+                        },
+                    }
+                } else {
+                    generate_ir_instr(ctx, .{ .Binary_Op = .{
+                        .dst = dst.as_lvalue(),
+                        .src0 = dst.as_rvalue(),
+                        .src1 = subexpr.as_rvalue(),
+                        .tag = .Add,
+                    } });
+                    break :src .{ .Lvalue = .{
+                        .Mem = .{
+                            .base = dst,
+                            .offset = 0,
+                            .size = expr.typ.data.byte_size,
+                        },
+                    } };
+                }
             },
             .Byte_Size_Of => unreachable,
             .Alignment_Of => unreachable,
@@ -515,124 +592,6 @@ fn generate_ir_rvalue(ctx: *Context, has_dst: ?IRC.Lvalue, expr: *Ast.Expr) IRC.
     }
 
     return src;
-}
-
-fn generate_ir_lvalue(ctx: *Context, expr: *Ast.Expr) IRC.Lvalue {
-    switch (expr.as) {
-        .Deref => |subexpr| {
-            const src = generate_ir_rvalue(ctx, null, subexpr);
-            return deref_rvalue(ctx, src, expr.typ.data.byte_size);
-        },
-        .Field => |Field| {
-            const offset: u64 = switch (Field.field.as.Symbol.as) {
-                .Struct_Field, .Union_Field => |Struct_Field| Struct_Field.offset,
-                else => unreachable,
-            };
-            const src = generate_ir_lvalue(ctx, Field.subexpr);
-            if (Field.subexpr.typ.data.as != .Pointer) {
-                return bump_lvalue(src, offset, expr.typ.data.byte_size);
-            } else {
-                return deref_lvalue(ctx, src, offset, expr.typ.data.byte_size);
-            }
-        },
-        .Subscript => |Subscript| {
-            const subexpr = generate_ir_lvalue(ctx, Subscript.subexpr);
-            const index = generate_ir_rvalue(ctx, null, Subscript.index);
-            const dst = grab_local(ctx, 8, .QWORD);
-
-            const offset = utils.align_u64(expr.typ.data.byte_size, expr.typ.data.alignment);
-            generate_ir_instr(ctx, .{
-                .Binary_Op = .{
-                    .dst = dst.as_lvalue(),
-                    .src0 = index,
-                    .src1 = .{ .Imm = offset },
-                    .tag = .Mul,
-                },
-            });
-
-            if (Subscript.subexpr.typ.data.as != .Pointer) {
-                switch (subexpr) {
-                    .Tmp => {
-                        generate_ir_instr(ctx, .{ .Binary_Op = .{
-                            .dst = dst.as_lvalue(),
-                            .src0 = dst.as_rvalue(),
-                            .src1 = .{ .Addr = subexpr },
-                            .tag = .Add,
-                        } });
-
-                        return .{ .Mem = .{
-                            .base = dst,
-                            .offset = 0,
-                            .size = expr.typ.data.byte_size,
-                        } };
-                    },
-                    .Mem => |mem| {
-                        if (mem.base) |src0| {
-                            generate_ir_instr(ctx, .{ .Binary_Op = .{
-                                .dst = dst.as_lvalue(),
-                                .src0 = dst.as_rvalue(),
-                                .src1 = src0.as_rvalue(),
-                                .tag = .Add,
-                            } });
-                        }
-
-                        return .{ .Mem = .{
-                            .base = dst,
-                            .offset = mem.offset,
-                            .size = expr.typ.data.byte_size,
-                        } };
-                    },
-                }
-            } else {
-                generate_ir_instr(ctx, .{ .Binary_Op = .{
-                    .dst = dst.as_lvalue(),
-                    .src0 = dst.as_rvalue(),
-                    .src1 = subexpr.as_rvalue(),
-                    .tag = .Add,
-                } });
-                return .{ .Mem = .{
-                    .base = dst,
-                    .offset = 0,
-                    .size = expr.typ.data.byte_size,
-                } };
-            }
-        },
-        .Symbol => |symbol| {
-            switch (symbol.as) {
-                .Variable => |Variable| {
-                    return Variable.storage;
-                },
-                .Parameter => |Parameter| {
-                    return Parameter.storage;
-                },
-                .Procedure,
-                .Struct_Field,
-                .Union_Field,
-                .Enum_Field,
-                .Type,
-                => unreachable,
-            }
-        },
-        .Binary_Op,
-        .Unary_Op,
-        .Ref,
-        .If,
-        .Call,
-        .Constructor,
-        .Byte_Size_Of,
-        .Alignment_Of,
-        .As,
-        .Cast,
-        .Type,
-        .Integer,
-        .Boolean,
-        .Null,
-        .Identifier,
-        => {
-            const src = generate_ir_rvalue(ctx, null, expr);
-            return deref_rvalue(ctx, src, expr.typ.data.byte_size);
-        },
-    }
 }
 
 fn generate_ir_jmpc(ctx: *Context, expr: *Ast.Expr, label: IRC.Label, jump_if_true: bool) void {

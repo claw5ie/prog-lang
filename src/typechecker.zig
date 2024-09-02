@@ -845,7 +845,7 @@ fn typecheck_expr(ctx: *Context, expr: *Ast.Expr) TypecheckExprResult {
                     }
 
                     expr.flags.is_lvalue = true;
-                    expr.flags.is_const = subexpr.flags.is_const;
+                    expr.flags.is_const = false;
 
                     break :result .{ .typ = subexpr_type.data.as.Pointer, .tag = .Value };
                 }
@@ -1073,7 +1073,7 @@ fn typecheck_expr(ctx: *Context, expr: *Ast.Expr) TypecheckExprResult {
                         common.exit(1);
                     }
 
-                    expr.flags.is_lvalue = true;
+                    expr.flags.is_lvalue = Subscript.subexpr.flags.is_lvalue;
                     expr.flags.is_const = Subscript.subexpr.flags.is_const and Subscript.index.flags.is_const;
 
                     switch (subexpr_type.data.as) {
@@ -1134,7 +1134,7 @@ fn typecheck_expr(ctx: *Context, expr: *Ast.Expr) TypecheckExprResult {
                         },
                     }
                 } else {
-                    expr.flags.is_lvalue = true;
+                    expr.flags.is_lvalue = Field.subexpr.flags.is_lvalue;
                     expr.flags.is_const = Field.subexpr.flags.is_const;
 
                     const scope: *Ast.Scope = switch (subexpr_result.typ.data.as) {

@@ -79,10 +79,10 @@ pub fn print(irc: *IRC) void {
                 common.oprint(IDENT ++ "ret      {}, {}", .{ Ret.dst, Ret.src });
             },
             .GFB => |GFB| {
-                common.oprint("l{}, {}B:", .{ GFB.label, GFB.stack_space_used });
+                common.oprint("GFB l{}, {}B:", .{ GFB.label, GFB.stack_space_used });
             },
             .GFE => |GFE| {
-                common.oprint("l{}, {}B:", .{ GFE.label, GFE.stack_space_used });
+                common.oprint("GFE l{}, {}B:", .{ GFE.label, GFE.stack_space_used });
             },
         }
 
