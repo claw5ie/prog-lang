@@ -299,7 +299,7 @@ fn generate_ir_rvalue(ctx: *Context, has_dst: ?IRC.Lvalue, expr: *Ast.Expr) IRC.
             .Deref => |subexpr| {
                 move_src = true;
                 const src = generate_ir_rvalue(ctx, null, subexpr);
-                const new_src = deref_rvalue(ctx, src, expr.typ.data.byte_size);
+                const new_src = deref_rvalue(ctx, src, 0, expr.typ.data.byte_size);
                 break :src new_src.as_rvalue();
             },
             .If => |If| {
@@ -324,12 +324,12 @@ fn generate_ir_rvalue(ctx: *Context, has_dst: ?IRC.Lvalue, expr: *Ast.Expr) IRC.
                     .Struct_Field, .Union_Field => |Struct_Field| Struct_Field.offset,
                     else => unreachable,
                 };
-                const src = generate_ir_rvalue(ctx, null, Field.subexpr).Lvalue;
+                const src = generate_ir_rvalue(ctx, null, Field.subexpr);
 
                 if (Field.subexpr.typ.data.as != .Pointer) {
-                    break :src bump_lvalue(src, offset, expr.typ.data.byte_size).as_rvalue();
+                    break :src bump_lvalue(src.Lvalue, offset, expr.typ.data.byte_size).as_rvalue();
                 } else {
-                    break :src deref_lvalue(ctx, src, offset, expr.typ.data.byte_size).as_rvalue();
+                    break :src deref_rvalue(ctx, src, offset, expr.typ.data.byte_size).as_rvalue();
                 }
             },
             .Call => |Call| {
@@ -419,7 +419,7 @@ fn generate_ir_rvalue(ctx: *Context, has_dst: ?IRC.Lvalue, expr: *Ast.Expr) IRC.
             .Subscript => |Subscript| {
                 move_src = true;
 
-                const subexpr = generate_ir_rvalue(ctx, null, Subscript.subexpr).Lvalue;
+                const subexpr = generate_ir_rvalue(ctx, null, Subscript.subexpr);
                 const index = generate_ir_rvalue(ctx, null, Subscript.index);
                 const dst = grab_local(ctx, 8, .QWORD);
 
@@ -434,12 +434,12 @@ fn generate_ir_rvalue(ctx: *Context, has_dst: ?IRC.Lvalue, expr: *Ast.Expr) IRC.
                 });
 
                 if (Subscript.subexpr.typ.data.as != .Pointer) {
-                    switch (subexpr) {
+                    switch (subexpr.Lvalue) {
                         .Tmp => {
                             generate_ir_instr(ctx, .{ .Binary_Op = .{
                                 .dst = dst.as_lvalue(),
                                 .src0 = dst.as_rvalue(),
-                                .src1 = .{ .Addr = subexpr },
+                                .src1 = .{ .Addr = subexpr.Lvalue },
                                 .tag = .Add,
                             } });
 
@@ -474,7 +474,7 @@ fn generate_ir_rvalue(ctx: *Context, has_dst: ?IRC.Lvalue, expr: *Ast.Expr) IRC.
                     generate_ir_instr(ctx, .{ .Binary_Op = .{
                         .dst = dst.as_lvalue(),
                         .src0 = dst.as_rvalue(),
-                        .src1 = subexpr.as_rvalue(),
+                        .src1 = subexpr,
                         .tag = .Add,
                     } });
                     break :src .{ .Lvalue = .{
@@ -708,10 +708,10 @@ fn deref_lvalue(ctx: *Context, src: IRC.Lvalue, offset: u64, size: u64) IRC.Lval
     }
 }
 
-fn deref_rvalue(ctx: *Context, src: IRC.Rvalue, size: u64) IRC.Lvalue {
+fn deref_rvalue(ctx: *Context, src: IRC.Rvalue, offset: u64, size: u64) IRC.Lvalue {
     switch (src) {
         .Lvalue => |lvalue| {
-            return deref_lvalue(ctx, lvalue, 0, size);
+            return deref_lvalue(ctx, lvalue, offset, size);
         },
         .Addr => {
             const dst = grab_local(ctx, 8, .QWORD);
@@ -722,21 +722,21 @@ fn deref_rvalue(ctx: *Context, src: IRC.Rvalue, size: u64) IRC.Lvalue {
             } });
             return .{ .Mem = .{
                 .base = dst,
-                .offset = 0,
+                .offset = offset,
                 .size = size,
             } };
         },
         .Label => |label| {
             return .{ .Mem = .{
                 .base = null,
-                .offset = label,
+                .offset = label + offset,
                 .size = size,
             } };
         },
         .Imm => |imm| {
             return .{ .Mem = .{
                 .base = null,
-                .offset = imm,
+                .offset = imm + offset,
                 .size = size,
             } };
         },
