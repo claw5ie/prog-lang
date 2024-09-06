@@ -543,7 +543,10 @@ fn typecheck_stmt(ctx: *Context, stmt: *Ast.Stmt) void {
                         .Case => |case| {
                             const value_type = typecheck_expr_only(ctx, case.value);
 
-                            if (!safe_cast(ctx, case.value, value_type, condition_type)) {
+                            if (!case.value.flags.is_const) {
+                                report_error(ctx, case.value.line_info, "expression is not constant", .{});
+                                common.exit(1);
+                            } else if (!safe_cast(ctx, case.value, value_type, condition_type)) {
                                 report_error(ctx, case.value.line_info, "mismatched types: '{}' and '{}'", .{ condition_type, value_type });
                                 report_note(ctx, case.value.line_info, "switch case is here", .{});
                                 report_note(ctx, Switch.condition.line_info, "switch condition is here", .{});

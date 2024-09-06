@@ -232,8 +232,69 @@ fn generate_ir_stmt(ctx: *Context, stmt: *Ast.Stmt) void {
         .Continue => {
             generate_ir_instr(ctx, .{ .Jmp = ctx.loop_condition_label });
         },
-        .Switch => {
-            unreachable;
+        .Switch => |Switch| {
+            const condition = generate_ir_rvalue(ctx, null, Switch.condition);
+            const is_signed = Switch.condition.typ.is_signed();
+
+            const first_label = grab_many_labels(ctx, Switch.cases.len);
+            const end_label = grab_label(ctx);
+
+            {
+                var label = first_label;
+                var it = Switch.cases.first;
+                while (it) |node| {
+                    var case = node.data;
+                    while (true) {
+                        switch (case.*) {
+                            .Case => |Case| {
+                                const src = generate_ir_rvalue(ctx, null, Case.value);
+                                generate_ir_instr(ctx, .{ .Jmpc = .{
+                                    .src0 = condition,
+                                    .src1 = src,
+                                    .label = label,
+                                    .tag = .Eq,
+                                    .is_signed = is_signed,
+                                } });
+                                case = Case.subcase;
+                            },
+                            .Stmt => break,
+                        }
+                    }
+                    label += 1;
+
+                    it = node.next;
+                }
+            }
+
+            if (Switch.default_case) |else_stmt| {
+                generate_ir_stmt(ctx, else_stmt);
+            }
+
+            generate_ir_instr(ctx, .{ .Jmp = end_label });
+
+            {
+                var label = first_label;
+                var it = Switch.cases.first;
+                while (it) |node| {
+                    var case = node.data;
+                    while (true) {
+                        switch (case.*) {
+                            .Case => |Case| case = Case.subcase,
+                            .Stmt => |substmt| {
+                                generate_ir_instr(ctx, .{ .Label = label });
+                                generate_ir_stmt(ctx, substmt);
+                                generate_ir_instr(ctx, .{ .Jmp = end_label });
+                                break;
+                            },
+                        }
+                    }
+                    label += 1;
+
+                    it = node.next;
+                }
+            }
+
+            generate_ir_instr(ctx, .{ .Label = end_label });
         },
         .Return => |has_expr| {
             if (has_expr) |expr| {
@@ -839,8 +900,12 @@ fn grab_global_from_type(ctx: *Context, data: *Ast.Type.SharedData) IRC.Tmp {
 }
 
 fn grab_label(ctx: *Context) IRC.Label {
+    return grab_many_labels(ctx, 1);
+}
+
+fn grab_many_labels(ctx: *Context, count: usize) IRC.Label {
     const label = ctx.next_label;
-    ctx.next_label += 1;
+    ctx.next_label += count;
     return label;
 }
 
