@@ -1,24 +1,24 @@
-main := proc()
+main: proc() void
 {
   {
-    i := 0;
+    i: u8 = 0;
     while i < 12 do
       {
         if fibs_rec(0, 1, i) != fibs(0, 1, i)
-          print i;
+          #print i;
         i = i + 1;
       }
   }
 }
 
-fibs_rec := proc(fst: int, snd: int, count: int) -> int
+fibs_rec: proc(fst: i64, snd: i64, count: i64) i64
 {
   return if count <= 0 fst
     else if count == 1 snd
     else fibs_rec(snd, fst + snd, count - 1);
 }
 
-fibs := proc(fst: int, snd: int, count: int) -> int
+fibs: proc(fst: i64, snd: i64, count: i64) i64
 {
   while count > 1
     {

@@ -191,8 +191,8 @@ fn generate_ir_stmt(ctx: *Context, stmt: *Ast.Stmt) void {
                 generate_ir_jmpc(ctx, If.condition, false_branch_label, false);
 
                 _ = generate_ir_stmt(ctx, If.true_branch);
-                generate_ir_instr(ctx, .{ .Label = false_branch_label });
                 generate_ir_instr(ctx, .{ .Jmp = end_label });
+                generate_ir_instr(ctx, .{ .Label = false_branch_label });
                 _ = generate_ir_stmt(ctx, false_branch);
                 generate_ir_instr(ctx, .{ .Label = end_label });
             } else {
@@ -426,8 +426,8 @@ fn generate_ir_rvalue(ctx: *Context, has_dst: ?IRC.Lvalue, expr: *Ast.Expr) IRC.
                 const dst = maybe_grab_local_from_type(ctx, has_dst, expr.typ.data);
 
                 _ = generate_ir_rvalue(ctx, dst, If.true_branch);
-                generate_ir_instr(ctx, .{ .Label = false_branch_label });
                 generate_ir_instr(ctx, .{ .Jmp = end_label });
+                generate_ir_instr(ctx, .{ .Label = false_branch_label });
                 _ = generate_ir_rvalue(ctx, dst, If.false_branch);
                 generate_ir_instr(ctx, .{ .Label = end_label });
 
