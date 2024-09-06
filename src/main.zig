@@ -54,6 +54,7 @@ pub fn main() void {
     Typechecker.typecheck(&ast);
     var irc = GenIr.generate_ir(&ast);
     irc.print();
+    Interp.interpret(&irc);
 
     ast.arena.deinit();
     ast.symbol_table.deinit();
@@ -75,3 +76,4 @@ const Parser = @import("parser.zig");
 const Typechecker = @import("typechecker.zig");
 const IRC = @import("irc.zig");
 const GenIr = @import("generate-ir.zig");
+const Interp = @import("interpreter.zig");

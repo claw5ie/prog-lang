@@ -469,7 +469,18 @@ fn typecheck_stmt(ctx: *Context, stmt: *Ast.Stmt) void {
     switch (stmt.as) {
         .Print => |expr| {
             const expr_type = typecheck_expr_only(ctx, expr);
-            reject_void_type(ctx, expr_type);
+            switch (expr_type.data.as) {
+                .Struct, .Union, .Proc, .Array, .Void => {
+                    report_error(ctx, expr.line_info, "can't print value of type '{}'", .{expr.typ});
+                    common.exit(1);
+                },
+                .Enum,
+                .Pointer,
+                .Integer,
+                .Bool,
+                => {},
+                .Identifier, .Type_Of => unreachable,
+            }
         },
         .Block => |block| {
             typecheck_stmt_list(ctx, block);

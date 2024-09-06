@@ -1,18 +1,18 @@
-val00: i32 = -1;
+// val00: i32 = -1;
 
-aaa: i32 = 0;
-aab: u64 = 0;
-aac: i6 = 0;
-aad: i6 = 0;
-aae: i6 = 0;
+// aaa: i32 = 0;
+// aab: u64 = 0;
+// aac: i6 = 0;
+// aad: i6 = 0;
+// aae: i6 = 0;
 
 alias e: a;
 alias a: b;
 alias b: struct { x: e^ };
 
-aa: struct { x: i64 }; // _(x = 2);
-bb := &aa;
-cc := bb^;
+// aa: struct { x: i64 }; // _(x = 2);
+// bb := &aa;
+// cc := bb^;
 
 alias BazBaz: struct
 {
@@ -49,7 +49,7 @@ alias Bar: struct
 
 bar: proc(aa: struct { x: i64 }) void
 {
-  aac < aaa;
+  // aac < aaa;
   {
     {
       a := if true 2 else 42;
@@ -83,13 +83,14 @@ bar: proc(aa: struct { x: i64 }) void
   ff := #cast(bool, 2);
   fff: proc() void = null;
 
-  g := &a[0];      // &[3]int
+  // Fix precedence
+  g := (&a)[0];      // &[3]int
   h: i32[3]^ = &g;
   i := &a;         // &[2][3]int
 
   if false then {} else {}
 
-  val00 = val00 + 42;
+  // val00 = val00 + 42;
   return;
 }
 
@@ -125,7 +126,7 @@ main: proc() void
 
   val0 = 4;
   val3: proc() void = main;
-  val3();
+  // val3();
 
   if !true || false && true
     { }
@@ -137,7 +138,7 @@ main: proc() void
   val6: void^ = null;
   val7: void^ = &val6;
 
-  main();
+  // main();
 
   // print foo();
   return;

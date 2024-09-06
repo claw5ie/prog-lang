@@ -236,6 +236,18 @@ pub const Type = struct {
         }
     }
 
+    pub fn bits(typ: *Type) bool {
+        switch (typ.data.as) {
+            .Enum => |Enumerator| {
+                return Enumerator.integer_type.data.as.Integer.bits;
+            },
+            .Integer => |Integer| {
+                return Integer.bits;
+            },
+            else => unreachable,
+        }
+    }
+
     pub fn equal(self: *Type, other: *Type) bool {
         if (self.symbol != null and self.symbol == other.symbol) {
             return true;

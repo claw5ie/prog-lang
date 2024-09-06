@@ -2,6 +2,35 @@ pub fn compare(lhs: anytype, rhs: @TypeOf(lhs)) Order {
     return if (lhs < rhs) .Less else if (lhs > rhs) .Greater else .Equal;
 }
 
+pub fn left_shift(value: u64, offset: u64) u64 {
+    return if (offset < 64)
+        value << @as(u6, @intCast(offset))
+    else
+        0;
+}
+
+pub fn right_shift(value: u64, offset: u64) u64 {
+    return if (offset < 64)
+        value >> @as(u6, @intCast(offset))
+    else
+        0;
+}
+
+pub fn sign_extend(value: u64, bits: u8) u64 {
+    if (bits == 0 or bits == 64) {
+        return value;
+    }
+
+    const b: u6 = @intCast(bits);
+
+    if ((value >> (b - 1)) & 0x1 == 1) {
+        const ones = @as(u64, 0xFFFF_FFFF_FFFF_FFFF) << b;
+        return value | ones;
+    }
+
+    return value;
+}
+
 pub fn align_u64(value: u64, alignment: common.Alignment) u64 {
     const pow2_minus_one: u64 = alignment.to_byte_size() - 1;
     var v = value;

@@ -622,7 +622,7 @@ fn insert_symbol(p: *Parser, result: ParseSymbolResult, how_to_parse: HowToParse
                 break :as .{ .Procedure = .{
                     .typ = result.typ.?,
                     .block = result.block,
-                    .label = 0,
+                    .label = null,
                 } };
             },
             .Expr => {
