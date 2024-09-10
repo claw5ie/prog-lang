@@ -1,3 +1,24 @@
+const std = @import("std");
+
+const Allocator = std.mem.Allocator;
+
+pub const Alignment = enum(u2) {
+    BYTE = 0,
+    WORD = 1,
+    DWORD = 2,
+    QWORD = 3,
+
+    pub inline fn to_byte_size(alignment: Alignment) u4 {
+        return @as(u4, 1) << @intFromEnum(alignment);
+    }
+};
+
+pub const Order = enum(u2) {
+    Less = 0,
+    Greater = 1,
+    Equal = 2,
+};
+
 pub fn compare(lhs: anytype, rhs: @TypeOf(lhs)) Order {
     return if (lhs < rhs) .Less else if (lhs > rhs) .Greater else .Equal;
 }
@@ -31,7 +52,7 @@ pub fn sign_extend(value: u64, bits: u8) u64 {
     return value;
 }
 
-pub fn align_u64(value: u64, alignment: common.Alignment) u64 {
+pub fn align_u64(value: u64, alignment: Alignment) u64 {
     const pow2_minus_one: u64 = alignment.to_byte_size() - 1;
     var v = value;
     v += pow2_minus_one;
@@ -92,14 +113,3 @@ pub fn read_entire_file(allocator: Allocator, filepath: []const u8) ![:0]u8 {
 pub fn is_prefix(prefix: []const u8, rest: []const u8) bool {
     return prefix.len <= rest.len and std.mem.eql(u8, prefix, rest[0..prefix.len]);
 }
-
-const std = @import("std");
-const common = @import("common.zig");
-
-const Allocator = std.mem.Allocator;
-
-pub const Order = enum(u2) {
-    Less = 0,
-    Greater = 1,
-    Equal = 2,
-};

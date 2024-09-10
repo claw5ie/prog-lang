@@ -1,79 +1,68 @@
-irc: *IRC,
-stack: []u8,
-rsp: u64,
-rbp: u64,
+const std = @import("std");
+const utils = @import("utils.zig");
+const Compiler = @import("compiler.zig");
 
-const Interp = @This();
+const IRC = Compiler.IRC;
 
-pub fn interpret(irc: *IRC) void {
-    const stack = common.gpa.alloc(u8, 2 * 1024 * 1024) catch {
+pub fn interpret(c: *Compiler) void {
+    c.interp.stack = Compiler.gpa.alloc(u8, 2 * 1024 * 1024) catch {
         std.posix.exit(1);
     };
-    defer common.gpa.free(stack);
-
-    var interpreter = Interp{
-        .irc = irc,
-        .stack = stack,
-        .rsp = 0,
-        .rbp = 0,
+    c.interp.labels = Compiler.gpa.alloc(u64, c.irc.label_count) catch {
+        Compiler.exit(1);
     };
 
-    interpret_top_level(&interpreter);
+    interpret_top_level(c);
 }
 
-fn interpret_top_level(interp: *Interp) void {
-    const labels = common.gpa.alloc(u64, interp.irc.label_count) catch {
-        std.posix.exit(1);
-    };
-    defer common.gpa.free(labels);
-
-    for (interp.irc.instrs.items, 0..) |instr, i| {
+fn interpret_top_level(c: *Compiler) void {
+    for (c.irc.instrs.items, 0..) |instr, i| {
         switch (instr) {
             .GFB => |gfb| {
-                labels[gfb.label] = i;
+                c.interp.labels[gfb.label] = i;
             },
             .GFE => |gfe| {
-                labels[gfe.label] = i;
+                c.interp.labels[gfe.label] = i;
             },
             .Label => |label| {
-                labels[label] = i;
+                c.interp.labels[label] = i;
             },
             else => {},
         }
     }
 
-    interp.rsp = @intCast(interp.irc.globals_count + 128);
-    interp.rbp = interp.rsp;
+    c.interp.rsp = @intCast(c.irc.globals_count + 128);
+    c.interp.rbp = c.interp.rsp;
 
     var ip: u64 = 0;
-    while (ip < interp.irc.instrs.items.len) {
-        switch (interp.irc.instrs.items[ip]) {
+    while (ip < c.irc.instrs.items.len) {
+        switch (c.irc.instrs.items[ip]) {
             .Print => |Print| {
                 switch (Print) {
                     .Pointer => |src| {
-                        const value = grab_u64_from_rvalue(interp, src);
-                        common.oprint("0x{x}\n", .{value});
+                        const value = grab_u64_from_rvalue(c, src);
+                        Compiler.oprint("0x{x}\n", .{value});
                     },
                     .Integer => |Integer| {
                         if (Integer.is_signed) {
-                            const value = grab_i64_from_rvalue(interp, Integer.src);
-                            common.oprint("{}\n", .{value});
+                            const value = grab_i64_from_rvalue(c, Integer.src);
+                            Compiler.oprint("{}\n", .{value});
                         } else {
-                            const value = grab_u64_from_rvalue(interp, Integer.src);
-                            common.oprint("{}\n", .{value});
+                            const value = grab_u64_from_rvalue(c, Integer.src);
+                            Compiler.oprint("{}\n", .{value});
                         }
                     },
                     .Boolean => |src| {
-                        const value = grab_u64_from_rvalue(interp, src);
-                        common.oprint("{s}\n", .{if (value != 0) "true" else "false"});
+                        const value = grab_u64_from_rvalue(c, src);
+                        Compiler.oprint("{s}\n", .{if (value != 0) "true" else "false"});
                     },
                 }
             },
             .Binary_Op => |op| {
                 if (op.is_signed) {
-                    const dst = grab_pointer_from_lvalue(interp, op.dst);
-                    var src0 = grab_i64_from_rvalue(interp, op.src0);
-                    const src1 = grab_i64_from_rvalue(interp, op.src1);
+                    const dst = grab_pointer_from_lvalue(c, op.dst);
+                    var src0 = grab_i64_from_rvalue(c, op.src0);
+                    const src1 = grab_i64_from_rvalue(c, op.src1);
 
                     switch (op.tag) {
                         .Eq => src0 = @intFromBool(src0 == src1),
@@ -89,11 +78,11 @@ fn interpret_top_level(interp: *Interp) void {
                         .Mod => src0 = @rem(src0, src1),
                     }
 
-                    stack_write(interp, dst, @bitCast(src0), op.dst.grab_size());
+                    stack_write(c, dst, @bitCast(src0), op.dst.grab_size());
                 } else {
-                    const dst = grab_pointer_from_lvalue(interp, op.dst);
-                    var src0 = grab_u64_from_rvalue(interp, op.src0);
-                    const src1 = grab_u64_from_rvalue(interp, op.src1);
+                    const dst = grab_pointer_from_lvalue(c, op.dst);
+                    var src0 = grab_u64_from_rvalue(c, op.src0);
+                    const src1 = grab_u64_from_rvalue(c, op.src1);
 
                     switch (op.tag) {
                         .Eq => src0 = @intFromBool(src0 == src1),
@@ -109,41 +98,41 @@ fn interpret_top_level(interp: *Interp) void {
                         .Mod => src0 = @rem(src0, src1),
                     }
 
-                    stack_write(interp, dst, src0, op.dst.grab_size());
+                    stack_write(c, dst, src0, op.dst.grab_size());
                 }
             },
             .Unary_Op => |op| {
                 if (op.is_signed) {
-                    const dst = grab_pointer_from_lvalue(interp, op.dst);
-                    var src = grab_i64_from_rvalue(interp, op.src);
+                    const dst = grab_pointer_from_lvalue(c, op.dst);
+                    var src = grab_i64_from_rvalue(c, op.src);
 
                     switch (op.tag) {
                         .Not => src = @intFromBool(src == 0),
                         .Neg => src = -src,
                     }
 
-                    stack_write(interp, dst, @bitCast(src), op.dst.grab_size());
+                    stack_write(c, dst, @bitCast(src), op.dst.grab_size());
                 } else {
-                    const dst = grab_pointer_from_lvalue(interp, op.dst);
-                    var src = grab_u64_from_rvalue(interp, op.src);
+                    const dst = grab_pointer_from_lvalue(c, op.dst);
+                    var src = grab_u64_from_rvalue(c, op.src);
 
                     switch (op.tag) {
                         .Not => src = @intFromBool(src == 0),
                         .Neg => unreachable,
                     }
 
-                    stack_write(interp, dst, src, op.dst.grab_size());
+                    stack_write(c, dst, src, op.dst.grab_size());
                 }
             },
             .Jmp => |label| {
-                ip = labels[label];
+                ip = c.interp.labels[label];
                 continue;
             },
             .Jmpc => |jmpc| {
                 var condition = false;
                 if (jmpc.is_signed) {
-                    var src0 = grab_i64_from_rvalue(interp, jmpc.src0);
-                    const src1 = grab_i64_from_rvalue(interp, jmpc.src1);
+                    var src0 = grab_i64_from_rvalue(c, jmpc.src0);
+                    const src1 = grab_i64_from_rvalue(c, jmpc.src1);
 
                     switch (jmpc.tag) {
                         .Eq => src0 = @intFromBool(src0 == src1),
@@ -156,8 +145,8 @@ fn interpret_top_level(interp: *Interp) void {
 
                     condition = src0 != 0;
                 } else {
-                    var src0 = grab_u64_from_rvalue(interp, jmpc.src0);
-                    const src1 = grab_u64_from_rvalue(interp, jmpc.src1);
+                    var src0 = grab_u64_from_rvalue(c, jmpc.src0);
+                    const src1 = grab_u64_from_rvalue(c, jmpc.src1);
 
                     switch (jmpc.tag) {
                         .Eq => src0 = @intFromBool(src0 == src1),
@@ -172,59 +161,59 @@ fn interpret_top_level(interp: *Interp) void {
                 }
 
                 if (condition) {
-                    ip = labels[jmpc.label];
+                    ip = c.interp.labels[jmpc.label];
                     continue;
                 }
             },
             .Setnz => |Setnz| {
-                const dst = grab_pointer_from_lvalue(interp, Setnz.dst);
-                const src = grab_u64_from_rvalue(interp, Setnz.src);
+                const dst = grab_pointer_from_lvalue(c, Setnz.dst);
+                const src = grab_u64_from_rvalue(c, Setnz.src);
 
-                stack_write(interp, dst, @intFromBool(src != 0), Setnz.dst.grab_size());
+                stack_write(c, dst, @intFromBool(src != 0), Setnz.dst.grab_size());
             },
             .Mov => |Mov| {
-                move_rvalue_to_lvalue(interp, Mov.dst, Mov.src);
+                move_rvalue_to_lvalue(c, Mov.dst, Mov.src);
             },
             .Movsx => |Movsx| {
-                const dst = grab_pointer_from_lvalue(interp, Movsx.dst);
-                var src = grab_u64_from_rvalue(interp, Movsx.src);
+                const dst = grab_pointer_from_lvalue(c, Movsx.dst);
+                var src = grab_u64_from_rvalue(c, Movsx.src);
                 src = utils.sign_extend(src, Movsx.src_bits);
-                stack_write(interp, dst, src, Movsx.dst.grab_size());
+                stack_write(c, dst, src, Movsx.dst.grab_size());
             },
             .Call => |Call| {
-                const dst = grab_pointer_from_lvalue(interp, Call.dst);
-                stack_push(interp, dst);
-                stack_push(interp, ip);
-                stack_push(interp, interp.rbp);
+                const dst = grab_pointer_from_lvalue(c, Call.dst);
+                stack_push(c, dst);
+                stack_push(c, ip);
+                stack_push(c, c.interp.rbp);
 
-                const label = grab_u64_from_rvalue(interp, Call.src);
-                ip = labels[label];
+                const label = grab_u64_from_rvalue(c, Call.src);
+                ip = c.interp.labels[label];
                 continue;
             },
             .Push => |src| {
-                stack_push_rvalue(interp, src);
+                stack_push_rvalue(c, src);
             },
             .Pop => |bytes| {
-                interp.rsp -= bytes;
+                c.interp.rsp -= bytes;
             },
             .Ret0 => |label| {
-                ip = labels[label];
+                ip = c.interp.labels[label];
                 continue;
             },
             .Ret1 => |Ret1| {
-                move_rvalue_to_lvalue(interp, Ret1.dst, Ret1.src);
-                ip = labels[Ret1.label];
+                move_rvalue_to_lvalue(c, Ret1.dst, Ret1.src);
+                ip = c.interp.labels[Ret1.label];
                 continue;
             },
             .GFB => |gfb| {
-                interp.rbp = interp.rsp;
-                interp.rsp += gfb.stack_space_used;
+                c.interp.rbp = c.interp.rsp;
+                c.interp.rsp += gfb.stack_space_used;
             },
             .GFE => |gfe| {
-                interp.rsp -= gfe.stack_space_used;
-                interp.rbp = stack_pop(interp);
-                ip = stack_pop(interp);
-                _ = stack_pop(interp);
+                c.interp.rsp -= gfe.stack_space_used;
+                c.interp.rbp = stack_pop(c);
+                ip = stack_pop(c);
+                _ = stack_pop(c);
             },
             .Label => {},
             .Exit => break,
@@ -234,39 +223,39 @@ fn interpret_top_level(interp: *Interp) void {
     }
 }
 
-fn move_rvalue_to_lvalue(interp: *Interp, dst: IRC.Lvalue, src: IRC.Rvalue) void {
-    const pointer = grab_pointer_from_lvalue(interp, dst);
-    move_rvalue_to_pointer(interp, pointer, src, dst.grab_size());
+fn move_rvalue_to_lvalue(c: *Compiler, dst: IRC.Lvalue, src: IRC.Rvalue) void {
+    const pointer = grab_pointer_from_lvalue(c, dst);
+    move_rvalue_to_pointer(c, pointer, src, dst.grab_size());
 }
 
-fn move_rvalue_to_pointer(interp: *Interp, dst: u64, src: IRC.Rvalue, size: u64) void {
+fn move_rvalue_to_pointer(c: *Compiler, dst: u64, src: IRC.Rvalue, size: u64) void {
     if (size <= 8) {
-        const value = grab_u64_from_rvalue(interp, src);
-        stack_write(interp, dst, value, size);
+        const value = grab_u64_from_rvalue(c, src);
+        stack_write(c, dst, value, size);
     } else {
-        const src_ptr = grab_pointer_from_lvalue(interp, src.Lvalue);
+        const src_ptr = grab_pointer_from_lvalue(c, src.Lvalue);
 
-        const dst_view: []u8 = interp.stack[dst .. dst + size];
-        const src_view: []u8 = interp.stack[src_ptr .. src_ptr + size];
+        const dst_view: []u8 = c.interp.stack[dst .. dst + size];
+        const src_view: []u8 = c.interp.stack[src_ptr .. src_ptr + size];
         @memcpy(dst_view, src_view);
     }
 }
 
-fn grab_pointer_from_tmp(interp: *Interp, tmp: IRC.Tmp) u64 {
+fn grab_pointer_from_tmp(c: *Compiler, tmp: IRC.Tmp) u64 {
     return switch (tmp.offset) {
         .Global => |offset| offset,
         .Local => |offset| if (offset >= 0)
-            interp.rbp + @as(u64, @intCast(offset))
+            c.interp.rbp + @as(u64, @intCast(offset))
         else
-            @bitCast(interp.rbp - @as(u64, @intCast((-offset)))),
+            @bitCast(c.interp.rbp - @as(u64, @intCast((-offset)))),
     };
 }
 
-fn grab_pointer_from_mem(interp: *Interp, mem: IRC.Mem) u64 {
+fn grab_pointer_from_mem(c: *Compiler, mem: IRC.Mem) u64 {
     var offset: u64 = 0;
 
     if (mem.base) |base| {
-        offset += grab_value_from_tmp(interp, base, false);
+        offset += grab_value_from_tmp(c, base, false);
     }
 
     offset += mem.offset;
@@ -274,48 +263,48 @@ fn grab_pointer_from_mem(interp: *Interp, mem: IRC.Mem) u64 {
     return offset;
 }
 
-fn grab_pointer_from_lvalue(interp: *Interp, lvalue: IRC.Lvalue) u64 {
+fn grab_pointer_from_lvalue(c: *Compiler, lvalue: IRC.Lvalue) u64 {
     return switch (lvalue) {
-        .Tmp => |tmp| grab_pointer_from_tmp(interp, tmp),
-        .Mem => |mem| grab_pointer_from_mem(interp, mem),
+        .Tmp => |tmp| grab_pointer_from_tmp(c, tmp),
+        .Mem => |mem| grab_pointer_from_mem(c, mem),
     };
 }
 
-fn grab_value_from_tmp(interp: *Interp, tmp: IRC.Tmp, is_signed: bool) u64 {
-    const pointer = grab_pointer_from_tmp(interp, tmp);
-    return stack_read(interp, pointer, tmp.size, is_signed);
+fn grab_value_from_tmp(c: *Compiler, tmp: IRC.Tmp, is_signed: bool) u64 {
+    const pointer = grab_pointer_from_tmp(c, tmp);
+    return stack_read(c, pointer, tmp.size, is_signed);
 }
 
-fn grab_value_from_rvalue(interp: *Interp, rvalue: IRC.Rvalue, is_signed: bool) u64 {
+fn grab_value_from_rvalue(c: *Compiler, rvalue: IRC.Rvalue, is_signed: bool) u64 {
     switch (rvalue) {
         .Lvalue => |lvalue| {
-            const pointer = grab_pointer_from_lvalue(interp, lvalue);
-            return stack_read(interp, pointer, lvalue.grab_size(), is_signed);
+            const pointer = grab_pointer_from_lvalue(c, lvalue);
+            return stack_read(c, pointer, lvalue.grab_size(), is_signed);
         },
-        .Addr => |lvalue| return grab_pointer_from_lvalue(interp, lvalue),
+        .Addr => |lvalue| return grab_pointer_from_lvalue(c, lvalue),
         .Label => |label| return label,
         .Imm => |value| return value,
     }
 }
 
-inline fn grab_u64_from_rvalue(interp: *Interp, rvalue: IRC.Rvalue) u64 {
-    return grab_value_from_rvalue(interp, rvalue, false);
+inline fn grab_u64_from_rvalue(c: *Compiler, rvalue: IRC.Rvalue) u64 {
+    return grab_value_from_rvalue(c, rvalue, false);
 }
 
-inline fn grab_i64_from_rvalue(interp: *Interp, rvalue: IRC.Rvalue) i64 {
-    return @bitCast(grab_value_from_rvalue(interp, rvalue, true));
+inline fn grab_i64_from_rvalue(c: *Compiler, rvalue: IRC.Rvalue) i64 {
+    return @bitCast(grab_value_from_rvalue(c, rvalue, true));
 }
 
-fn stack_read(interp: *Interp, pointer: u64, size: u64, is_signed: bool) u64 {
+fn stack_read(c: *Compiler, pointer: u64, size: u64, is_signed: bool) u64 {
     std.debug.assert(size <= 8);
 
-    check_bounds(interp, pointer, size);
+    check_bounds(c, pointer, size);
 
     const offset: u6 = @intCast((pointer % 8) * 8);
     const bits: u8 = @intCast(size * 8);
     const ones: u64 = utils.left_shift(0xFFFF_FFFF_FFFF_FFFF, bits);
 
-    var value = @as(*u64, @alignCast(@ptrCast(&interp.stack[pointer - (pointer % 8)]))).*;
+    var value = @as(*u64, @alignCast(@ptrCast(&c.interp.stack[pointer - (pointer % 8)]))).*;
     value >>= offset;
     value &= ~ones;
 
@@ -326,10 +315,10 @@ fn stack_read(interp: *Interp, pointer: u64, size: u64, is_signed: bool) u64 {
     return value;
 }
 
-fn stack_write(interp: *Interp, pointer: u64, value: u64, size: u64) void {
+fn stack_write(c: *Compiler, pointer: u64, value: u64, size: u64) void {
     std.debug.assert(size <= 8);
 
-    check_bounds(interp, pointer, size);
+    check_bounds(c, pointer, size);
 
     if (size == 0) {
         return;
@@ -339,36 +328,31 @@ fn stack_write(interp: *Interp, pointer: u64, value: u64, size: u64) void {
     const end_offset: u8 = 64 - start_offset - @as(u8, @intCast(size * 8));
     const ones: u64 = utils.left_shift(0xFFFF_FFFF_FFFF_FFFF, start_offset) &
         utils.right_shift((0xFFFF_FFFF_FFFF_FFFF), end_offset);
-    const ptr = @as(*u64, @alignCast(@ptrCast(&interp.stack[pointer - (pointer % 8)])));
+    const ptr = @as(*u64, @alignCast(@ptrCast(&c.interp.stack[pointer - (pointer % 8)])));
     ptr.* &= ~ones;
     ptr.* |= utils.left_shift(value, start_offset) & ones;
 }
 
-fn stack_push(interp: *Interp, value: u64) void {
-    interp.rsp = utils.align_u64(interp.rsp, .QWORD);
-    stack_write(interp, interp.rsp, value, 8);
-    interp.rsp += 8;
+fn stack_push(c: *Compiler, value: u64) void {
+    c.interp.rsp = utils.align_u64(c.interp.rsp, .QWORD);
+    stack_write(c, c.interp.rsp, value, 8);
+    c.interp.rsp += 8;
 }
 
-fn check_bounds(interp: *Interp, pointer: u64, size: u64) void {
-    if (pointer + size > interp.stack.len) {
+fn check_bounds(c: *Compiler, pointer: u64, size: u64) void {
+    if (pointer + size > c.interp.stack.len) {
         std.debug.print("error: stack overflow: reading {} bytes at {}\n", .{ size, pointer });
-        common.exit(1);
+        Compiler.exit(1);
     }
 }
 
-fn stack_push_rvalue(interp: *Interp, rvalue: IRC.Rvalue) void {
+fn stack_push_rvalue(c: *Compiler, rvalue: IRC.Rvalue) void {
     const size = utils.align_u64(rvalue.grab_size(), .QWORD);
-    move_rvalue_to_pointer(interp, interp.rsp, rvalue, size);
-    interp.rsp += size;
+    move_rvalue_to_pointer(c, c.interp.rsp, rvalue, size);
+    c.interp.rsp += size;
 }
 
-fn stack_pop(interp: *Interp) u64 {
-    interp.rsp -= 8;
-    return stack_read(interp, interp.rsp, 8, false);
+fn stack_pop(c: *Compiler) u64 {
+    c.interp.rsp -= 8;
+    return stack_read(c, c.interp.rsp, 8, false);
 }
-
-const std = @import("std");
-const utils = @import("utils.zig");
-const common = @import("common.zig");
-const IRC = @import("irc.zig");
