@@ -1322,6 +1322,20 @@ pub fn compile(c: *Compiler) void {
     generate_ir(c);
     c.irc.print();
     interpret(c);
+
+    c.ast.arena.deinit();
+    for (Ast.integer_types) |has_type| {
+        if (has_type) |typ| {
+            gpa.destroy(typ.data);
+            gpa.destroy(typ);
+        }
+    }
+    c.irc.instrs.deinit();
+    gpa.free(c.interp.stack);
+    gpa.free(c.interp.labels);
+    c.symbol_table.deinit();
+    c.string_pool.deinit();
+    gpa.free(c.source_code);
 }
 
 pub fn find_symbol_in_scope(c: *Compiler, key: Ast.Symbol.Key, offset: usize) ?*Ast.Symbol {
