@@ -1,6 +1,7 @@
 const std = @import("std");
 const utils = @import("utils.zig");
 const Compiler = @import("compiler.zig");
+const IRCGen = @import("generate-ir.zig");
 
 const Ast = Compiler.Ast;
 const Alignment = utils.Alignment;
@@ -146,7 +147,7 @@ fn typecheck_symbol(c: *Compiler, symbol: *Ast.Symbol) void {
                 unreachable;
             }
         },
-        .Procedure => |Procedure| {
+        .Procedure => |*Procedure| {
             const old_return_type = c.typechecker.return_type;
             c.typechecker.return_type = Procedure.typ.data.as.Proc.return_type;
 
@@ -157,6 +158,10 @@ fn typecheck_symbol(c: *Compiler, symbol: *Ast.Symbol) void {
             }
 
             c.typechecker.return_type = old_return_type;
+
+            std.debug.assert(Procedure.start_label == null);
+            Procedure.start_label = IRCGen.grab_label(c);
+            Procedure.end_label = IRCGen.grab_label(c);
         },
         .Type => |typ| {
             typecheck_type(c, typ);

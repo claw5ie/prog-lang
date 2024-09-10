@@ -638,7 +638,8 @@ fn insert_symbol(c: *Compiler, result: ParseSymbolResult, how_to_parse: HowToPar
                 break :as .{ .Procedure = .{
                     .typ = result.typ.?,
                     .block = result.block,
-                    .label = null,
+                    .start_label = null,
+                    .end_label = null,
                 } };
             },
             .Expr => {

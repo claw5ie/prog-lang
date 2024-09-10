@@ -693,7 +693,8 @@ pub const Ast = struct {
         pub const Procedure = struct {
             typ: *Type,
             block: StmtList,
-            label: ?IRC.Label,
+            start_label: ?IRC.Label,
+            end_label: ?IRC.Label,
         };
 
         pub const StructField = struct {

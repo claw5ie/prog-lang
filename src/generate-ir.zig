@@ -16,16 +16,10 @@ pub fn generate_ir(c: *Compiler) void {
 fn generate_ir_top_level(c: *Compiler) void {
     {
         const Procedure = &c.ast.main.?.as.Procedure;
-
-        // TODO: remove duplicated code here.
-        if (Procedure.label == null) {
-            Procedure.label = grab_label(c);
-        }
-
         const dst = grab_global(c, 8, .QWORD).as_lvalue();
         generate_ir_instr(c, .{ .Call = .{
             .dst = dst,
-            .src = .{ .Label = Procedure.label.? },
+            .src = .{ .Label = Procedure.start_label.? },
         } });
         generate_ir_instr(c, .Exit);
     }
@@ -68,16 +62,8 @@ fn generate_ir_global_symbol(c: *Compiler, symbol: *Ast.Symbol) void {
                 it = node.next;
             }
 
-            const start_label = start_label: {
-                if (Procedure.label) |label| {
-                    break :start_label label;
-                } else {
-                    const label = grab_label(c);
-                    Procedure.label = label;
-                    break :start_label label;
-                }
-            };
-            const end_label = grab_label(c);
+            const start_label = Procedure.start_label.?;
+            const end_label = Procedure.end_label.?;
 
             const old_return_label = c.ircgen.return_label;
             c.ircgen.return_label = end_label;
@@ -664,13 +650,7 @@ fn generate_ir_rvalue(c: *Compiler, has_dst: ?IRC.Lvalue, expr: *Ast.Expr) IRC.R
                     },
                     .Procedure => |*Procedure| {
                         move_src = true;
-                        if (Procedure.label) |label| {
-                            break :src .{ .Label = label };
-                        } else {
-                            const label = grab_label(c);
-                            Procedure.label = label;
-                            break :src .{ .Label = label };
-                        }
+                        break :src .{ .Label = Procedure.start_label.? };
                     },
                     .Struct_Field, .Union_Field => unreachable,
                     .Enum_Field => |Enum_Field| {
@@ -881,11 +861,11 @@ fn grab_global_from_type(c: *Compiler, data: *Ast.Type.SharedData) IRC.Tmp {
     return grab_global(c, data.byte_size, data.alignment);
 }
 
-fn grab_label(c: *Compiler) IRC.Label {
+pub fn grab_label(c: *Compiler) IRC.Label {
     return grab_many_labels(c, 1);
 }
 
-fn grab_many_labels(c: *Compiler, count: usize) IRC.Label {
+pub fn grab_many_labels(c: *Compiler, count: usize) IRC.Label {
     const label = c.ircgen.next_label;
     c.ircgen.next_label += count;
     return label;
