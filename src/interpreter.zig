@@ -5,10 +5,7 @@ const Compiler = @import("compiler.zig");
 const IRC = Compiler.IRC;
 
 pub fn interpret(c: *Compiler) void {
-    c.interp.stack = Compiler.gpa.alloc(u8, 2 * 1024 * 1024) catch {
-        std.posix.exit(1);
-    };
-    c.interp.labels = Compiler.gpa.alloc(u64, c.irc.label_count) catch {
+    c.interp.labels.resize(c.irc.label_count) catch {
         Compiler.exit(1);
     };
 
@@ -19,13 +16,13 @@ fn interpret_top_level(c: *Compiler) void {
     for (c.irc.instrs.items, 0..) |instr, i| {
         switch (instr) {
             .GFB => |gfb| {
-                c.interp.labels[gfb.label] = i;
+                c.interp.labels.items[gfb.label] = i;
             },
             .GFE => |gfe| {
-                c.interp.labels[gfe.label] = i;
+                c.interp.labels.items[gfe.label] = i;
             },
             .Label => |label| {
-                c.interp.labels[label] = i;
+                c.interp.labels.items[label] = i;
             },
             else => {},
         }
@@ -125,7 +122,7 @@ fn interpret_top_level(c: *Compiler) void {
                 }
             },
             .Jmp => |label| {
-                ip = c.interp.labels[label];
+                ip = c.interp.labels.items[label];
                 continue;
             },
             .Jmpc => |jmpc| {
@@ -161,7 +158,7 @@ fn interpret_top_level(c: *Compiler) void {
                 }
 
                 if (condition) {
-                    ip = c.interp.labels[jmpc.label];
+                    ip = c.interp.labels.items[jmpc.label];
                     continue;
                 }
             },
@@ -187,7 +184,7 @@ fn interpret_top_level(c: *Compiler) void {
                 stack_push(c, c.interp.rbp);
 
                 const label = grab_u64_from_rvalue(c, Call.src);
-                ip = c.interp.labels[label];
+                ip = c.interp.labels.items[label];
                 continue;
             },
             .Push => |src| {
@@ -197,12 +194,12 @@ fn interpret_top_level(c: *Compiler) void {
                 c.interp.rsp -= bytes;
             },
             .Ret0 => |label| {
-                ip = c.interp.labels[label];
+                ip = c.interp.labels.items[label];
                 continue;
             },
             .Ret1 => |Ret1| {
                 move_rvalue_to_lvalue(c, Ret1.dst, Ret1.src);
-                ip = c.interp.labels[Ret1.label];
+                ip = c.interp.labels.items[Ret1.label];
                 continue;
             },
             .GFB => |gfb| {

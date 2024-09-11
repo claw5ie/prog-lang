@@ -1128,9 +1128,11 @@ pub const IRCGenerator = struct {
 
 pub const Interpreter = struct {
     stack: []u8,
-    labels: []u64,
+    labels: LabelList,
     rsp: u64,
     rbp: u64,
+
+    pub const LabelList = std.ArrayList(u64);
 };
 
 pub const SymbolTable = struct {
@@ -1279,10 +1281,7 @@ fn init() Compiler {
         data[0] = 0;
         break :empty_source_code data[0..0 :0];
     };
-    const empty_stack = gpa.alloc(u8, 0) catch {
-        exit(1);
-    };
-    const empty_labels = gpa.alloc(u64, 0) catch {
+    const stack = gpa.alloc(u8, 2 * 1024 * 1024) catch {
         exit(1);
     };
 
@@ -1320,8 +1319,8 @@ fn init() Compiler {
             .return_label = null,
         },
         .interp = .{
-            .stack = empty_stack,
-            .labels = empty_labels,
+            .stack = stack,
+            .labels = Interpreter.LabelList.init(gpa),
             .rsp = 0,
             .rbp = 0,
         },
@@ -1343,7 +1342,7 @@ fn deinit(c: *Compiler) void {
     }
     c.irc.instrs.deinit();
     gpa.free(c.interp.stack);
-    gpa.free(c.interp.labels);
+    c.interp.labels.deinit();
     c.symbol_table.deinit();
     c.string_pool.deinit();
     gpa.free(c.source_code);
