@@ -1306,7 +1306,7 @@ pub fn init() Compiler {
 pub fn compile(c: *Compiler) void {
     const parse = @import("parser.zig").parse;
     const typecheck = @import("typechecker.zig").typecheck;
-    const generate_ir = @import("generate-ir.zig").generate_ir;
+    const generate_ir = @import("irc-generator.zig").generate_irc;
     const interpret = @import("interpreter.zig").interpret;
 
     var args = std.process.args();

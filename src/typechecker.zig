@@ -1,7 +1,7 @@
 const std = @import("std");
 const utils = @import("utils.zig");
 const Compiler = @import("compiler.zig");
-const IRCGen = @import("generate-ir.zig");
+const IRCGen = @import("irc-generator.zig");
 
 const Ast = Compiler.Ast;
 const Alignment = utils.Alignment;

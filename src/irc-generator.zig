@@ -6,32 +6,32 @@ const Ast = Compiler.Ast;
 const IRC = Compiler.IRC;
 const Alignment = utils.Alignment;
 
-pub fn generate_ir(c: *Compiler) void {
-    generate_ir_top_level(c);
+pub fn generate_irc(c: *Compiler) void {
+    generate_irc_top_level(c);
 
     c.irc.label_count = c.ircgen.next_label;
     c.irc.globals_count = c.ircgen.next_global;
 }
 
-fn generate_ir_top_level(c: *Compiler) void {
+fn generate_irc_top_level(c: *Compiler) void {
     {
         const Procedure = &c.ast.main.?.as.Procedure;
         const dst = grab_global(c, 8, .QWORD).as_lvalue();
-        generate_ir_instr(c, .{ .Call = .{
+        generate_irc_instr(c, .{ .Call = .{
             .dst = dst,
             .src = .{ .Label = Procedure.start_label.? },
         } });
-        generate_ir_instr(c, .Exit);
+        generate_irc_instr(c, .Exit);
     }
 
     var it = c.ast.globals.first;
     while (it) |node| {
-        generate_ir_global_symbol(c, node.data);
+        generate_irc_global_symbol(c, node.data);
         it = node.next;
     }
 }
 
-fn generate_ir_global_symbol(c: *Compiler, symbol: *Ast.Symbol) void {
+fn generate_irc_global_symbol(c: *Compiler, symbol: *Ast.Symbol) void {
     switch (symbol.as) {
         .Variable => {
             std.debug.print("{s}:{}:{}: ewwow: oopsie doopsie, cawn't cweate gwobaw vawiabwes fow now, UwU\n", .{ c.filepath, symbol.line_info.line, symbol.line_info.column });
@@ -41,7 +41,7 @@ fn generate_ir_global_symbol(c: *Compiler, symbol: *Ast.Symbol) void {
             // Variable.storage = dst;
 
             // if (Variable.value) |value| {
-            //     _ = generate_ir_rvalue(c, dst, value);
+            //     _ = generate_irc_rvalue(c, dst, value);
             // }
         },
         .Procedure => |*Procedure| {
@@ -69,9 +69,9 @@ fn generate_ir_global_symbol(c: *Compiler, symbol: *Ast.Symbol) void {
             c.ircgen.return_label = end_label;
 
             const index = c.irc.instrs.items.len;
-            generate_ir_instr(c, undefined);
-            generate_ir_stmt_list(c, Procedure.block);
-            generate_ir_instr(c, .{ .GFE = .{
+            generate_irc_instr(c, undefined);
+            generate_irc_stmt_list(c, Procedure.block);
+            generate_irc_instr(c, .{ .GFE = .{
                 .label = end_label,
                 .stack_space_used = @intCast(c.ircgen.biggest_next_local),
             } });
@@ -89,14 +89,14 @@ fn generate_ir_global_symbol(c: *Compiler, symbol: *Ast.Symbol) void {
     }
 }
 
-fn generate_ir_local_symbol(c: *Compiler, symbol: *Ast.Symbol) void {
+fn generate_irc_local_symbol(c: *Compiler, symbol: *Ast.Symbol) void {
     switch (symbol.as) {
         .Variable => |*Variable| {
             const dst = grab_local_from_type(c, Variable.typ.?.data).as_lvalue();
             Variable.storage = dst;
 
             if (Variable.value) |value| {
-                _ = generate_ir_rvalue(c, dst, value);
+                _ = generate_irc_rvalue(c, dst, value);
             }
         },
         .Procedure, .Parameter, .Struct_Field, .Union_Field, .Enum_Field => unreachable,
@@ -104,13 +104,13 @@ fn generate_ir_local_symbol(c: *Compiler, symbol: *Ast.Symbol) void {
     }
 }
 
-fn generate_ir_stmt(c: *Compiler, stmt: *Ast.Stmt) void {
+fn generate_irc_stmt(c: *Compiler, stmt: *Ast.Stmt) void {
     switch (stmt.as) {
         .Print => |expr| {
-            const src = generate_ir_rvalue(c, null, expr);
+            const src = generate_irc_rvalue(c, null, expr);
             switch (expr.typ.data.as) {
                 .Enum => {
-                    generate_ir_instr(c, .{ .Print = .{
+                    generate_irc_instr(c, .{ .Print = .{
                         .Integer = .{
                             .src = src,
                             .is_signed = expr.typ.is_signed(),
@@ -118,12 +118,12 @@ fn generate_ir_stmt(c: *Compiler, stmt: *Ast.Stmt) void {
                     } });
                 },
                 .Pointer => {
-                    generate_ir_instr(c, .{ .Print = .{
+                    generate_irc_instr(c, .{ .Print = .{
                         .Pointer = src,
                     } });
                 },
                 .Integer => {
-                    generate_ir_instr(c, .{ .Print = .{
+                    generate_irc_instr(c, .{ .Print = .{
                         .Integer = .{
                             .src = src,
                             .is_signed = expr.typ.is_signed(),
@@ -131,7 +131,7 @@ fn generate_ir_stmt(c: *Compiler, stmt: *Ast.Stmt) void {
                     } });
                 },
                 .Bool => {
-                    generate_ir_instr(c, .{ .Print = .{
+                    generate_irc_instr(c, .{ .Print = .{
                         .Boolean = src,
                     } });
                 },
@@ -148,7 +148,7 @@ fn generate_ir_stmt(c: *Compiler, stmt: *Ast.Stmt) void {
         .Block => |block| {
             // Clean locals allocated on the stack.
             const old_next_local = c.ircgen.next_local;
-            generate_ir_stmt_list(c, block);
+            generate_irc_stmt_list(c, block);
             c.ircgen.next_local = old_next_local;
         },
         .If => |If| {
@@ -156,19 +156,19 @@ fn generate_ir_stmt(c: *Compiler, stmt: *Ast.Stmt) void {
                 const false_branch_label = grab_label(c);
                 const end_label = grab_label(c);
 
-                generate_ir_jmpc(c, If.condition, false_branch_label, false);
+                generate_irc_jmpc(c, If.condition, false_branch_label, false);
 
-                _ = generate_ir_stmt(c, If.true_branch);
-                generate_ir_instr(c, .{ .Jmp = end_label });
-                generate_ir_instr(c, .{ .Label = false_branch_label });
-                _ = generate_ir_stmt(c, false_branch);
-                generate_ir_instr(c, .{ .Label = end_label });
+                _ = generate_irc_stmt(c, If.true_branch);
+                generate_irc_instr(c, .{ .Jmp = end_label });
+                generate_irc_instr(c, .{ .Label = false_branch_label });
+                _ = generate_irc_stmt(c, false_branch);
+                generate_irc_instr(c, .{ .Label = end_label });
             } else {
                 const end_label = grab_label(c);
-                generate_ir_jmpc(c, If.condition, end_label, false);
+                generate_irc_jmpc(c, If.condition, end_label, false);
 
-                _ = generate_ir_stmt(c, If.true_branch);
-                generate_ir_instr(c, .{ .Label = end_label });
+                _ = generate_irc_stmt(c, If.true_branch);
+                generate_irc_instr(c, .{ .Label = end_label });
             }
         },
         .While, .Do_While => |While| {
@@ -183,25 +183,25 @@ fn generate_ir_stmt(c: *Compiler, stmt: *Ast.Stmt) void {
             c.ircgen.loop_end_label = end_label;
 
             if (stmt.as == .While) {
-                generate_ir_instr(c, .{ .Jmp = condition_label });
+                generate_irc_instr(c, .{ .Jmp = condition_label });
             }
-            generate_ir_instr(c, .{ .Label = start_label });
-            generate_ir_stmt(c, While.body);
-            generate_ir_instr(c, .{ .Label = condition_label });
-            generate_ir_jmpc(c, While.condition, start_label, true);
-            generate_ir_instr(c, .{ .Label = end_label });
+            generate_irc_instr(c, .{ .Label = start_label });
+            generate_irc_stmt(c, While.body);
+            generate_irc_instr(c, .{ .Label = condition_label });
+            generate_irc_jmpc(c, While.condition, start_label, true);
+            generate_irc_instr(c, .{ .Label = end_label });
 
             c.ircgen.loop_condition_label = old_loop_condition_label;
             c.ircgen.loop_end_label = old_loop_end_label;
         },
         .Break => {
-            generate_ir_instr(c, .{ .Jmp = c.ircgen.loop_end_label.? });
+            generate_irc_instr(c, .{ .Jmp = c.ircgen.loop_end_label.? });
         },
         .Continue => {
-            generate_ir_instr(c, .{ .Jmp = c.ircgen.loop_condition_label.? });
+            generate_irc_instr(c, .{ .Jmp = c.ircgen.loop_condition_label.? });
         },
         .Switch => |Switch| {
-            const condition = generate_ir_rvalue(c, null, Switch.condition);
+            const condition = generate_irc_rvalue(c, null, Switch.condition);
             const is_signed = Switch.condition.typ.is_signed();
 
             const first_label = grab_many_labels(c, Switch.cases.len);
@@ -215,8 +215,8 @@ fn generate_ir_stmt(c: *Compiler, stmt: *Ast.Stmt) void {
                     while (true) {
                         switch (case.*) {
                             .Case => |Case| {
-                                const src = generate_ir_rvalue(c, null, Case.value);
-                                generate_ir_instr(c, .{ .Jmpc = .{
+                                const src = generate_irc_rvalue(c, null, Case.value);
+                                generate_irc_instr(c, .{ .Jmpc = .{
                                     .src0 = condition,
                                     .src1 = src,
                                     .label = label,
@@ -235,10 +235,10 @@ fn generate_ir_stmt(c: *Compiler, stmt: *Ast.Stmt) void {
             }
 
             if (Switch.default_case) |else_stmt| {
-                generate_ir_stmt(c, else_stmt);
+                generate_irc_stmt(c, else_stmt);
             }
 
-            generate_ir_instr(c, .{ .Jmp = end_label });
+            generate_irc_instr(c, .{ .Jmp = end_label });
 
             {
                 var label = first_label;
@@ -249,9 +249,9 @@ fn generate_ir_stmt(c: *Compiler, stmt: *Ast.Stmt) void {
                         switch (case.*) {
                             .Case => |Case| case = Case.subcase,
                             .Stmt => |substmt| {
-                                generate_ir_instr(c, .{ .Label = label });
-                                generate_ir_stmt(c, substmt);
-                                generate_ir_instr(c, .{ .Jmp = end_label });
+                                generate_irc_instr(c, .{ .Label = label });
+                                generate_irc_stmt(c, substmt);
+                                generate_irc_instr(c, .{ .Jmp = end_label });
                                 break;
                             },
                         }
@@ -262,7 +262,7 @@ fn generate_ir_stmt(c: *Compiler, stmt: *Ast.Stmt) void {
                 }
             }
 
-            generate_ir_instr(c, .{ .Label = end_label });
+            generate_irc_instr(c, .{ .Label = end_label });
         },
         .Return => |has_expr| {
             if (has_expr) |expr| {
@@ -276,44 +276,44 @@ fn generate_ir_stmt(c: *Compiler, stmt: *Ast.Stmt) void {
                         .size = expr.typ.data.byte_size,
                     },
                 };
-                const src = generate_ir_rvalue(c, null, expr); // Can't move directly to 'dst', because of pointer aliasing. Example: src = foo(&src) may not generate correct code.
-                generate_ir_instr(c, .{ .Ret1 = .{
+                const src = generate_irc_rvalue(c, null, expr); // Can't move directly to 'dst', because of pointer aliasing. Example: src = foo(&src) may not generate correct code.
+                generate_irc_instr(c, .{ .Ret1 = .{
                     .dst = dst,
                     .src = src,
                     .label = c.ircgen.return_label.?,
                 } });
             } else {
-                generate_ir_instr(c, .{ .Ret0 = c.ircgen.return_label.? });
+                generate_irc_instr(c, .{ .Ret0 = c.ircgen.return_label.? });
             }
         },
         .Symbol => |symbol| {
-            generate_ir_local_symbol(c, symbol);
+            generate_irc_local_symbol(c, symbol);
         },
         .Assign => |Assign| {
-            const dst = generate_ir_rvalue(c, null, Assign.lhs);
-            _ = generate_ir_rvalue(c, dst.Lvalue, Assign.rhs);
+            const dst = generate_irc_rvalue(c, null, Assign.lhs);
+            _ = generate_irc_rvalue(c, dst.Lvalue, Assign.rhs);
         },
         .Expr => |expr| {
-            _ = generate_ir_rvalue(c, null, expr);
+            _ = generate_irc_rvalue(c, null, expr);
         },
     }
 }
 
-fn generate_ir_stmt_list(c: *Compiler, list: Ast.StmtList) void {
+fn generate_irc_stmt_list(c: *Compiler, list: Ast.StmtList) void {
     var it = list.first;
     while (it) |node| {
-        generate_ir_stmt(c, node.data);
+        generate_irc_stmt(c, node.data);
         it = node.next;
     }
 }
 
-fn generate_ir_rvalue(c: *Compiler, has_dst: ?IRC.Lvalue, expr: *Ast.Expr) IRC.Rvalue {
+fn generate_irc_rvalue(c: *Compiler, has_dst: ?IRC.Lvalue, expr: *Ast.Expr) IRC.Rvalue {
     var move_src = false;
     const src: IRC.Rvalue = src: {
         switch (expr.as) {
             .Binary_Op => |Binary_Op| {
-                const src0 = generate_ir_rvalue(c, null, Binary_Op.lhs);
-                const src1 = generate_ir_rvalue(c, null, Binary_Op.rhs);
+                const src0 = generate_irc_rvalue(c, null, Binary_Op.lhs);
+                const src1 = generate_irc_rvalue(c, null, Binary_Op.rhs);
 
                 const dst = maybe_grab_local_from_type(c, has_dst, expr.typ.data);
 
@@ -334,7 +334,7 @@ fn generate_ir_rvalue(c: *Compiler, has_dst: ?IRC.Lvalue, expr: *Ast.Expr) IRC.R
 
                 const is_signed = Binary_Op.lhs.typ.is_signed();
                 std.debug.assert(!is_signed or Binary_Op.rhs.typ.is_signed());
-                generate_ir_instr(c, .{ .Binary_Op = .{
+                generate_irc_instr(c, .{ .Binary_Op = .{
                     .dst = dst,
                     .src0 = src0,
                     .src1 = src1,
@@ -345,7 +345,7 @@ fn generate_ir_rvalue(c: *Compiler, has_dst: ?IRC.Lvalue, expr: *Ast.Expr) IRC.R
                 break :src dst.as_rvalue();
             },
             .Unary_Op => |Unary_Op| {
-                const src = generate_ir_rvalue(c, null, Unary_Op.subexpr);
+                const src = generate_irc_rvalue(c, null, Unary_Op.subexpr);
                 const is_signed = Unary_Op.subexpr.typ.is_signed();
 
                 switch (Unary_Op.tag) {
@@ -355,7 +355,7 @@ fn generate_ir_rvalue(c: *Compiler, has_dst: ?IRC.Lvalue, expr: *Ast.Expr) IRC.R
                     },
                     .Neg => {
                         const dst = maybe_grab_local_from_type(c, has_dst, expr.typ.data);
-                        generate_ir_instr(c, .{ .Unary_Op = .{
+                        generate_irc_instr(c, .{ .Unary_Op = .{
                             .dst = dst,
                             .src = src,
                             .tag = .Neg,
@@ -365,7 +365,7 @@ fn generate_ir_rvalue(c: *Compiler, has_dst: ?IRC.Lvalue, expr: *Ast.Expr) IRC.R
                     },
                     .Not => {
                         const dst = maybe_grab_local_from_type(c, has_dst, expr.typ.data);
-                        generate_ir_instr(c, .{ .Unary_Op = .{
+                        generate_irc_instr(c, .{ .Unary_Op = .{
                             .dst = dst,
                             .src = src,
                             .tag = .Not,
@@ -377,12 +377,12 @@ fn generate_ir_rvalue(c: *Compiler, has_dst: ?IRC.Lvalue, expr: *Ast.Expr) IRC.R
             },
             .Ref => |subexpr| {
                 move_src = true;
-                const src = generate_ir_rvalue(c, null, subexpr).Lvalue;
+                const src = generate_irc_rvalue(c, null, subexpr).Lvalue;
                 break :src .{ .Addr = src };
             },
             .Deref => |subexpr| {
                 move_src = true;
-                const src = generate_ir_rvalue(c, null, subexpr);
+                const src = generate_irc_rvalue(c, null, subexpr);
                 const new_src = deref_rvalue(c, src, 0, expr.typ.data.byte_size);
                 break :src new_src.as_rvalue();
             },
@@ -390,14 +390,14 @@ fn generate_ir_rvalue(c: *Compiler, has_dst: ?IRC.Lvalue, expr: *Ast.Expr) IRC.R
                 const false_branch_label = grab_label(c);
                 const end_label = grab_label(c);
 
-                generate_ir_jmpc(c, If.condition, false_branch_label, false);
+                generate_irc_jmpc(c, If.condition, false_branch_label, false);
                 const dst = maybe_grab_local_from_type(c, has_dst, expr.typ.data);
 
-                _ = generate_ir_rvalue(c, dst, If.true_branch);
-                generate_ir_instr(c, .{ .Jmp = end_label });
-                generate_ir_instr(c, .{ .Label = false_branch_label });
-                _ = generate_ir_rvalue(c, dst, If.false_branch);
-                generate_ir_instr(c, .{ .Label = end_label });
+                _ = generate_irc_rvalue(c, dst, If.true_branch);
+                generate_irc_instr(c, .{ .Jmp = end_label });
+                generate_irc_instr(c, .{ .Label = false_branch_label });
+                _ = generate_irc_rvalue(c, dst, If.false_branch);
+                generate_irc_instr(c, .{ .Label = end_label });
 
                 break :src dst.as_rvalue();
             },
@@ -408,7 +408,7 @@ fn generate_ir_rvalue(c: *Compiler, has_dst: ?IRC.Lvalue, expr: *Ast.Expr) IRC.R
                     .Struct_Field, .Union_Field => |Struct_Field| Struct_Field.offset,
                     else => unreachable,
                 };
-                const src = generate_ir_rvalue(c, null, Field.subexpr);
+                const src = generate_irc_rvalue(c, null, Field.subexpr);
 
                 if (Field.subexpr.typ.data.as != .Pointer) {
                     break :src bump_lvalue(src.Lvalue, offset, expr.typ.data.byte_size).as_rvalue();
@@ -424,20 +424,20 @@ fn generate_ir_rvalue(c: *Compiler, has_dst: ?IRC.Lvalue, expr: *Ast.Expr) IRC.R
                 var it = Call.args.last;
                 while (it) |node| {
                     const arg = node.data.Expr;
-                    const src = generate_ir_rvalue(c, null, arg);
-                    generate_ir_instr(c, .{ .Push = src });
+                    const src = generate_irc_rvalue(c, null, arg);
+                    generate_irc_instr(c, .{ .Push = src });
                     bytes_pushed += utils.align_u64(arg.typ.data.byte_size, .QWORD);
 
                     it = node.prev;
                 }
 
-                const src = generate_ir_rvalue(c, null, Call.subexpr);
-                generate_ir_instr(c, .{ .Call = .{
+                const src = generate_irc_rvalue(c, null, Call.subexpr);
+                generate_irc_instr(c, .{ .Call = .{
                     .dst = dst,
                     .src = src,
                 } });
                 if (bytes_pushed > 0) {
-                    generate_ir_instr(c, .{ .Pop = bytes_pushed });
+                    generate_irc_instr(c, .{ .Pop = bytes_pushed });
                 }
 
                 c.ircgen.next_local = old_next_local;
@@ -463,7 +463,7 @@ fn generate_ir_rvalue(c: *Compiler, has_dst: ?IRC.Lvalue, expr: *Ast.Expr) IRC.R
                             }
 
                             const new_dst = bump_lvalue(dst, offset, size);
-                            _ = generate_ir_rvalue(c, new_dst, Designator.rhs);
+                            _ = generate_irc_rvalue(c, new_dst, Designator.rhs);
 
                             it = node.next;
                         }
@@ -480,7 +480,7 @@ fn generate_ir_rvalue(c: *Compiler, has_dst: ?IRC.Lvalue, expr: *Ast.Expr) IRC.R
                             const arg = node.data.Expr;
 
                             const new_dst = bump_lvalue(dst, offset, size);
-                            _ = generate_ir_rvalue(c, new_dst, arg);
+                            _ = generate_irc_rvalue(c, new_dst, arg);
 
                             offset += size;
                             offset = utils.align_u64(offset, Array.subtype.data.alignment);
@@ -496,7 +496,7 @@ fn generate_ir_rvalue(c: *Compiler, has_dst: ?IRC.Lvalue, expr: *Ast.Expr) IRC.R
                     .Bool,
                     => {
                         const arg = Constructor.args.first.?.data.Expr;
-                        break :src generate_ir_rvalue(c, null, arg);
+                        break :src generate_irc_rvalue(c, null, arg);
                     },
                     .Void, .Identifier, .Type_Of => unreachable,
                 }
@@ -504,12 +504,12 @@ fn generate_ir_rvalue(c: *Compiler, has_dst: ?IRC.Lvalue, expr: *Ast.Expr) IRC.R
             .Subscript => |Subscript| {
                 move_src = true;
 
-                const subexpr = generate_ir_rvalue(c, null, Subscript.subexpr);
-                const index = generate_ir_rvalue(c, null, Subscript.index);
+                const subexpr = generate_irc_rvalue(c, null, Subscript.subexpr);
+                const index = generate_irc_rvalue(c, null, Subscript.index);
                 const dst = grab_local(c, 8, .QWORD);
 
                 const offset = utils.align_u64(expr.typ.data.byte_size, expr.typ.data.alignment);
-                generate_ir_instr(c, .{
+                generate_irc_instr(c, .{
                     .Binary_Op = .{
                         .dst = dst.as_lvalue(),
                         .src0 = index,
@@ -522,7 +522,7 @@ fn generate_ir_rvalue(c: *Compiler, has_dst: ?IRC.Lvalue, expr: *Ast.Expr) IRC.R
                 if (Subscript.subexpr.typ.data.as != .Pointer) {
                     switch (subexpr.Lvalue) {
                         .Tmp => {
-                            generate_ir_instr(c, .{ .Binary_Op = .{
+                            generate_irc_instr(c, .{ .Binary_Op = .{
                                 .dst = dst.as_lvalue(),
                                 .src0 = dst.as_rvalue(),
                                 .src1 = .{ .Addr = subexpr.Lvalue },
@@ -540,7 +540,7 @@ fn generate_ir_rvalue(c: *Compiler, has_dst: ?IRC.Lvalue, expr: *Ast.Expr) IRC.R
                         },
                         .Mem => |mem| {
                             if (mem.base) |src0| {
-                                generate_ir_instr(c, .{ .Binary_Op = .{
+                                generate_irc_instr(c, .{ .Binary_Op = .{
                                     .dst = dst.as_lvalue(),
                                     .src0 = dst.as_rvalue(),
                                     .src1 = src0.as_rvalue(),
@@ -559,7 +559,7 @@ fn generate_ir_rvalue(c: *Compiler, has_dst: ?IRC.Lvalue, expr: *Ast.Expr) IRC.R
                         },
                     }
                 } else {
-                    generate_ir_instr(c, .{ .Binary_Op = .{
+                    generate_irc_instr(c, .{ .Binary_Op = .{
                         .dst = dst.as_lvalue(),
                         .src0 = dst.as_rvalue(),
                         .src1 = subexpr,
@@ -590,17 +590,17 @@ fn generate_ir_rvalue(c: *Compiler, has_dst: ?IRC.Lvalue, expr: *Ast.Expr) IRC.R
                     .Pointer,
                     => {
                         move_src = true;
-                        break :src generate_ir_rvalue(c, null, Cast.expr);
+                        break :src generate_irc_rvalue(c, null, Cast.expr);
                     },
                     .Enum => unreachable,
                     .Integer => |dInteger| {
-                        const src = generate_ir_rvalue(c, null, Cast.expr);
+                        const src = generate_irc_rvalue(c, null, Cast.expr);
 
                         switch (Cast.expr.typ.data.as) {
                             .Integer => |sInteger| {
                                 if (dInteger.bits > sInteger.bits and dInteger.is_signed and sInteger.is_signed) {
                                     const dst = maybe_grab_local_from_type(c, has_dst, expr.typ.data);
-                                    generate_ir_instr(c, .{ .Movsx = .{
+                                    generate_irc_instr(c, .{ .Movsx = .{
                                         .dst = dst,
                                         .src = src,
                                         .src_bits = sInteger.bits,
@@ -616,8 +616,8 @@ fn generate_ir_rvalue(c: *Compiler, has_dst: ?IRC.Lvalue, expr: *Ast.Expr) IRC.R
                     },
                     .Bool => {
                         const dst = maybe_grab_local_from_type(c, has_dst, expr.typ.data);
-                        const src = generate_ir_rvalue(c, null, Cast.expr);
-                        generate_ir_instr(c, .{ .Setnz = .{
+                        const src = generate_irc_rvalue(c, null, Cast.expr);
+                        generate_irc_instr(c, .{ .Setnz = .{
                             .dst = dst,
                             .src = src,
                         } });
@@ -666,7 +666,7 @@ fn generate_ir_rvalue(c: *Compiler, has_dst: ?IRC.Lvalue, expr: *Ast.Expr) IRC.R
 
     if (has_dst) |dst| { // TODO: Do I need to sign extend if 'expr.typ' is signed integer?
         if (move_src) {
-            generate_ir_instr(c, .{ .Mov = .{
+            generate_irc_instr(c, .{ .Mov = .{
                 .dst = dst,
                 .src = src,
             } });
@@ -677,7 +677,7 @@ fn generate_ir_rvalue(c: *Compiler, has_dst: ?IRC.Lvalue, expr: *Ast.Expr) IRC.R
     return src;
 }
 
-fn generate_ir_jmpc(c: *Compiler, expr: *Ast.Expr, label: IRC.Label, jump_if_true: bool) void {
+fn generate_irc_jmpc(c: *Compiler, expr: *Ast.Expr, label: IRC.Label, jump_if_true: bool) void {
     var src0: IRC.Rvalue = undefined;
     var src1: IRC.Rvalue = .{ .Imm = 0 };
     var tag: IRC.Instr.Jmpc.Tag = .Neq;
@@ -688,8 +688,8 @@ fn generate_ir_jmpc(c: *Compiler, expr: *Ast.Expr, label: IRC.Label, jump_if_tru
             .Binary_Op => |Binary_Op| {
                 switch (Binary_Op.tag) {
                     .Eq, .Neq, .Lt, .Leq, .Gt, .Geq => {
-                        src0 = generate_ir_rvalue(c, null, Binary_Op.lhs);
-                        src1 = generate_ir_rvalue(c, null, Binary_Op.rhs);
+                        src0 = generate_irc_rvalue(c, null, Binary_Op.lhs);
+                        src1 = generate_irc_rvalue(c, null, Binary_Op.rhs);
 
                         tag = switch (Binary_Op.tag) {
                             .Eq => .Eq,
@@ -711,7 +711,7 @@ fn generate_ir_jmpc(c: *Compiler, expr: *Ast.Expr, label: IRC.Label, jump_if_tru
             .Unary_Op => |Unary_Op| {
                 switch (Unary_Op.tag) {
                     .Not => {
-                        generate_ir_jmpc(c, Unary_Op.subexpr, label, !jump_if_true);
+                        generate_irc_jmpc(c, Unary_Op.subexpr, label, !jump_if_true);
                         return;
                     },
                     else => {},
@@ -720,7 +720,7 @@ fn generate_ir_jmpc(c: *Compiler, expr: *Ast.Expr, label: IRC.Label, jump_if_tru
             else => {},
         }
 
-        src0 = generate_ir_rvalue(c, null, expr);
+        src0 = generate_irc_rvalue(c, null, expr);
     };
 
     if (!jump_if_true) {
@@ -734,7 +734,7 @@ fn generate_ir_jmpc(c: *Compiler, expr: *Ast.Expr, label: IRC.Label, jump_if_tru
         };
     }
 
-    generate_ir_instr(c, .{ .Jmpc = .{
+    generate_irc_instr(c, .{ .Jmpc = .{
         .src0 = src0,
         .src1 = src1,
         .label = label,
@@ -743,7 +743,7 @@ fn generate_ir_jmpc(c: *Compiler, expr: *Ast.Expr, label: IRC.Label, jump_if_tru
     } });
 }
 
-fn generate_ir_instr(c: *Compiler, instr: IRC.Instr) void {
+fn generate_irc_instr(c: *Compiler, instr: IRC.Instr) void {
     c.irc.instrs.append(instr) catch {
         Compiler.exit(1);
     };
@@ -782,7 +782,7 @@ fn deref_lvalue(c: *Compiler, src: IRC.Lvalue, offset: u64, size: u64) IRC.Lvalu
         },
         .Mem => |mem| {
             const dst = grab_local(c, mem.size, .QWORD);
-            generate_ir_instr(c, .{ .Mov = .{
+            generate_irc_instr(c, .{ .Mov = .{
                 .dst = dst.as_lvalue(),
                 .src = src.as_rvalue(),
             } });
@@ -803,7 +803,7 @@ fn deref_rvalue(c: *Compiler, src: IRC.Rvalue, offset: u64, size: u64) IRC.Lvalu
         .Addr => {
             const dst = grab_local(c, 8, .QWORD);
             // TODO: Should make 'Addr' a valid memory operand?
-            generate_ir_instr(c, .{ .Mov = .{
+            generate_irc_instr(c, .{ .Mov = .{
                 .dst = dst.as_lvalue(),
                 .src = src,
             } });
