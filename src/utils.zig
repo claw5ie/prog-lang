@@ -2,6 +2,9 @@ const std = @import("std");
 
 const Allocator = std.mem.Allocator;
 
+pub const stdout = std.io.getStdOut().writer();
+pub const stderr = std.io.getStdErr().writer();
+
 pub const Alignment = enum(u2) {
     BYTE = 0,
     WORD = 1,
@@ -18,6 +21,22 @@ pub const Order = enum(u2) {
     Greater = 1,
     Equal = 2,
 };
+
+pub fn oprint(comptime format: []const u8, args: anytype) void {
+    stdout.print(format, args) catch {
+        exit(1);
+    };
+}
+
+pub fn eprint(comptime format: []const u8, args: anytype) void {
+    stderr.print(format, args) catch {
+        exit(1);
+    };
+}
+
+pub fn exit(code: u8) noreturn {
+    std.posix.exit(code);
+}
 
 pub fn compare(lhs: anytype, rhs: @TypeOf(lhs)) Order {
     return if (lhs < rhs) .Less else if (lhs > rhs) .Greater else .Equal;
@@ -108,6 +127,38 @@ pub fn read_entire_file(allocator: Allocator, filepath: []const u8) ![:0]u8 {
     std.posix.close(fd);
 
     return text[0..size :0];
+}
+
+pub fn read_from_file_v(fd: std.posix.fd_t, buffer: []u8) void {
+    const count = std.posix.read(fd, buffer) catch {
+        eprint("error: failed to read {} bytes\n", .{buffer.len});
+        exit(1);
+    };
+    std.debug.assert(count == buffer.len);
+}
+
+pub fn read_from_file_u64(fd: std.posix.fd_t) u64 {
+    var value: u64 = 0;
+    var buffer: []u8 = undefined;
+    buffer.ptr = @ptrCast(&value);
+    buffer.len = 8;
+    read_from_file_v(fd, buffer);
+    return value;
+}
+
+pub fn write_to_file_v(fd: std.posix.fd_t, bytes: []const u8) void {
+    const count = std.posix.write(fd, bytes) catch {
+        eprint("error: failed to write {} bytes\n", .{bytes.len});
+        exit(1);
+    };
+    std.debug.assert(count == bytes.len);
+}
+
+pub fn write_to_file_u64(fd: std.posix.fd_t, value: u64) void {
+    var view: []const u8 = undefined;
+    view.ptr = @ptrCast(&value);
+    view.len = 8;
+    write_to_file_v(fd, view);
 }
 
 pub fn is_prefix(prefix: []const u8, rest: []const u8) bool {

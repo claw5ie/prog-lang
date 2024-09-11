@@ -20,12 +20,29 @@ const utils = @import("utils.zig");
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const Alignment = utils.Alignment;
+pub const oprint = utils.oprint;
+pub const eprint = utils.eprint;
+pub const exit = utils.exit;
+
+const magic_number_string: []const u8 = "PROGLANG";
+const magic_number_value: u64 = magic_number_value: {
+    const ptr: *const u64 = @alignCast(@ptrCast(magic_number_string.ptr));
+    break :magic_number_value ptr.*;
+};
 
 pub var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
 pub var gpa = general_purpose_allocator.allocator();
 
-pub const stdout = std.io.getStdOut().writer();
-pub const stderr = std.io.getStdErr().writer();
+const Options = struct {
+    has_filepath: ?[:0]const u8 = null,
+    mode: Mode = .Build,
+
+    const Mode = enum {
+        Build,
+        Run,
+        Print,
+    };
+};
 
 pub var global_scope: Ast.Scope = .{
     .parent = null,
@@ -1000,6 +1017,8 @@ pub const IRC = struct {
     pub fn print(irc: *IRC) void {
         const IDENT = "    ";
 
+        Compiler.oprint("label count:   {}\nglobals count: {}\n\n", .{ irc.label_count, irc.globals_count });
+
         for (irc.instrs.items, 0..) |instr, ip| {
             Compiler.oprint("{:>4}: ", .{ip});
 
@@ -1213,7 +1232,7 @@ pub const Stage = enum {
     Done,
 };
 
-pub fn init() Compiler {
+fn init() Compiler {
     const state = struct {
         pub var void_pointer_type_data = Ast.Type.SharedData{
             .as = .{ .Pointer = &void_type },
@@ -1251,9 +1270,20 @@ pub fn init() Compiler {
         };
 
         pub var empty_filepath = [0:0]u8{};
-        pub var empty_source_code = [0:0]u8{};
-        pub var empty_stack = [0]u8{};
-        pub var empty_labels = [0]u64{};
+    };
+
+    const empty_source_code = empty_source_code: {
+        const data = gpa.alloc(u8, 1) catch {
+            exit(1);
+        };
+        data[0] = 0;
+        break :empty_source_code data[0..0 :0];
+    };
+    const empty_stack = gpa.alloc(u8, 0) catch {
+        exit(1);
+    };
+    const empty_labels = gpa.alloc(u64, 0) catch {
+        exit(1);
     };
 
     Ast.void_pointer_type = &state.void_pointer_type;
@@ -1290,39 +1320,20 @@ pub fn init() Compiler {
             .return_label = null,
         },
         .interp = .{
-            .stack = &state.empty_stack,
-            .labels = &state.empty_labels,
+            .stack = empty_stack,
+            .labels = empty_labels,
             .rsp = 0,
             .rbp = 0,
         },
         .symbol_table = SymbolTable.init(gpa),
         .string_pool = StringPool.init(gpa),
         .filepath = &state.empty_filepath,
-        .source_code = &state.empty_source_code,
+        .source_code = empty_source_code,
         .had_error = false,
     };
 }
 
-pub fn compile(c: *Compiler) void {
-    const parse = @import("parser.zig").parse;
-    const typecheck = @import("typechecker.zig").typecheck;
-    const generate_ir = @import("irc-generator.zig").generate_irc;
-    const interpret = @import("interpreter.zig").interpret;
-
-    var args = std.process.args();
-    var filepath: [:0]const u8 = "examples/debug";
-
-    _ = args.next().?;
-    if (args.next()) |arg| {
-        filepath = arg;
-    }
-
-    parse(c, filepath);
-    typecheck(c);
-    generate_ir(c);
-    c.irc.print();
-    interpret(c);
-
+fn deinit(c: *Compiler) void {
     c.ast.arena.deinit();
     for (Ast.integer_types) |has_type| {
         if (has_type) |typ| {
@@ -1336,6 +1347,157 @@ pub fn compile(c: *Compiler) void {
     c.symbol_table.deinit();
     c.string_pool.deinit();
     gpa.free(c.source_code);
+}
+
+pub fn compile() void {
+    const parse = @import("parser.zig").parse;
+    const typecheck = @import("typechecker.zig").typecheck;
+    const generate_irc = @import("irc-generator.zig").generate_irc;
+    const interpret = @import("interpreter.zig").interpret;
+
+    var c = Compiler.init();
+
+    const options = parse_cmd_options();
+    switch (options.mode) {
+        .Build => {
+            parse(&c, options.has_filepath.?);
+            typecheck(&c);
+            generate_irc(&c);
+            write_irc(&c, options.has_filepath.?);
+        },
+        .Run => {
+            c.irc = read_irc(options.has_filepath.?);
+            interpret(&c);
+        },
+        .Print => {
+            c.irc = read_irc(options.has_filepath.?);
+            c.irc.print();
+        },
+    }
+
+    c.deinit();
+}
+
+fn write_irc(c: *Compiler, filepath: [:0]const u8) void {
+    var filepath_buffer: [1024]u8 = undefined;
+
+    // TODO: Abolish magic numbers!
+    std.debug.assert(filepath.len < filepath_buffer.len);
+    @memcpy(filepath_buffer[0..filepath.len], filepath);
+    @memcpy(filepath_buffer[filepath.len .. filepath.len + 5], ".irc\x00");
+
+    const fd = std.posix.open(
+        filepath_buffer[0 .. filepath.len + 4 :0],
+        .{
+            .ACCMODE = .WRONLY,
+            .CREAT = true,
+            .TRUNC = true,
+        },
+        0o644,
+    ) catch {
+        eprint("error: couldn't open a file '{s}'\n", .{filepath});
+        exit(1);
+    };
+
+    utils.write_to_file_v(fd, magic_number_string);
+    utils.write_to_file_u64(fd, c.irc.label_count);
+    utils.write_to_file_u64(fd, c.irc.globals_count);
+
+    var instrs: []const u8 = undefined;
+    instrs.ptr = @ptrCast(c.irc.instrs.items.ptr);
+    instrs.len = c.irc.instrs.items.len * @sizeOf(IRC.Instr);
+    utils.write_to_file_v(fd, instrs);
+}
+
+fn read_irc(filepath: [:0]const u8) IRC {
+    const fd = std.posix.open(filepath, .{}, 0) catch {
+        eprint("error: couldn't open a file '{s}'\n", .{filepath});
+        exit(1);
+    };
+    const size: usize = size: {
+        const stats = std.posix.fstat(fd) catch {
+            exit(1);
+        };
+        break :size @intCast(stats.size);
+    };
+
+    const magic_number = utils.read_from_file_u64(fd);
+    std.debug.assert(magic_number == magic_number_value);
+    const label_count = utils.read_from_file_u64(fd);
+    const globals_count = utils.read_from_file_u64(fd);
+    const instrs = gpa.alloc(u8, size - 8 * 3) catch {
+        exit(1);
+    };
+    utils.read_from_file_v(fd, instrs);
+
+    var items: []IRC.Instr = undefined;
+    items.ptr = @alignCast(@ptrCast(instrs.ptr));
+    items.len = @divExact(instrs.len, @sizeOf(IRC.Instr));
+
+    return .{
+        .instrs = .{
+            .items = items,
+            .capacity = items.len,
+            .allocator = gpa,
+        },
+        .label_count = label_count,
+        .globals_count = globals_count,
+    };
+}
+
+fn parse_cmd_options() Options {
+    var options = Options{};
+    var activated_modes_count: u32 = 0;
+    var had_error = false;
+    var args = std.process.args();
+
+    _ = args.next().?;
+    while (args.next()) |arg| {
+        if (arg[0] == '-') {
+            if (arg.len > 2) {
+                had_error = true;
+                eprint("error: unrecognized option '{s}'\n", .{arg});
+            } else {
+                switch (arg[1]) {
+                    'r' => {
+                        activated_modes_count += 1;
+                        options.mode = .Run;
+                    },
+                    'p' => {
+                        activated_modes_count += 1;
+                        options.mode = .Print;
+                    },
+                    else => {
+                        had_error = true;
+                        eprint("error: unrecognized option '{s}'\n", .{arg});
+                    },
+                }
+            }
+        } else {
+            if (options.has_filepath) |filepath| {
+                had_error = true;
+                eprint("error: filepath was already given ('{s}')\n", .{filepath});
+            } else {
+                options.has_filepath = arg;
+            }
+        }
+    }
+
+    if (activated_modes_count > 1) {
+        had_error = true;
+        eprint("error: only one options needs to be enabled\n", .{});
+    }
+
+    if (options.has_filepath == null) {
+        had_error = true;
+        eprint("error: no file supplied\n", .{});
+    }
+
+    if (had_error) {
+        exit(1);
+    }
+
+    return options;
 }
 
 pub fn find_symbol_in_scope(c: *Compiler, key: Ast.Symbol.Key, offset: usize) ?*Ast.Symbol {
@@ -1382,20 +1544,4 @@ pub fn report_error(c: *Compiler, line_info: LineInfo, comptime format: []const 
 
 pub fn report_note(c: *Compiler, line_info: LineInfo, comptime format: []const u8, args: anytype) void {
     eprint("{s}:{}:{}: note: " ++ format ++ "\n", .{ c.filepath, line_info.line, line_info.column } ++ args);
-}
-
-pub fn oprint(comptime format: []const u8, args: anytype) void {
-    stdout.print(format, args) catch {
-        exit(1);
-    };
-}
-
-pub fn eprint(comptime format: []const u8, args: anytype) void {
-    stderr.print(format, args) catch {
-        exit(1);
-    };
-}
-
-pub fn exit(code: u8) noreturn {
-    std.posix.exit(code);
 }
