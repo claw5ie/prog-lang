@@ -2,8 +2,10 @@ const std = @import("std");
 const utils = @import("utils.zig");
 const Compiler = @import("compiler.zig");
 const IRCGen = @import("irc-generator.zig");
+const Interpreter = @import("interpreter.zig");
 
 const Ast = Compiler.Ast;
+const IRC = Compiler.IRC;
 const Alignment = utils.Alignment;
 
 const TypecheckExprResult = struct {
@@ -30,7 +32,7 @@ pub fn typecheck(c: *Compiler) void {
 fn typecheck_top_level(c: *Compiler) void {
     var it = c.ast.globals.first;
     while (it) |node| {
-        typecheck_symbol(c, node.data);
+        typecheck_global_symbol(c, node.data);
         it = node.next;
     }
 
@@ -63,12 +65,42 @@ fn typecheck_top_level(c: *Compiler) void {
     }
 }
 
-fn compute_const_expr(c: *Compiler, expr: *Ast.Expr) u64 {
-    if (expr.as != .Integer) {
-        c.report_error(expr.line_info, "TODO: evaluate expression in compile-time", .{});
+// Expression is not struct/union/array.
+fn compute_simple_expr(c: *Compiler, expr: *Ast.Expr) u64 {
+    if (!expr.flags.is_const) {
+        c.report_error(expr.line_info, "expression is not constant", .{});
         Compiler.exit(1);
     }
-    return expr.as.Integer;
+
+    const old_ircgen = c.ircgen;
+
+    const src = IRCGen.generate_irc_rvalue(c, null, expr);
+    c.irc.label_count = c.ircgen.next_label;
+    c.irc.globals_count = c.ircgen.next_global;
+    Interpreter.interpret(c);
+    const value = Interpreter.grab_value_from_rvalue(c, src, expr.typ.is_signed());
+
+    c.ircgen = old_ircgen;
+    c.irc.instrs.clearRetainingCapacity();
+
+    return value;
+}
+
+fn compute_global_expr(c: *Compiler, dst: IRC.Lvalue, expr: *Ast.Expr) void {
+    if (!expr.flags.is_const) {
+        c.report_error(expr.line_info, "expression is not constant", .{});
+        Compiler.exit(1);
+    }
+
+    const old_ircgen = c.ircgen;
+
+    _ = IRCGen.generate_irc_rvalue(c, dst, expr);
+    c.irc.label_count = c.ircgen.next_label;
+    c.irc.globals_count = c.ircgen.next_global;
+    Interpreter.interpret(c);
+
+    c.ircgen = old_ircgen;
+    c.irc.instrs.clearRetainingCapacity();
 }
 
 fn typecheck_symbol_type(c: *Compiler, symbol: *Ast.Symbol) void {
@@ -110,6 +142,27 @@ fn typecheck_symbol_type(c: *Compiler, symbol: *Ast.Symbol) void {
         .Type => |typ| {
             typ.symbol = symbol;
         },
+    }
+}
+
+fn typecheck_global_symbol(c: *Compiler, symbol: *Ast.Symbol) void {
+    typecheck_symbol(c, symbol);
+    switch (symbol.as) {
+        .Variable => |*Variable| {
+            const dst = IRCGen.grab_global_from_type(c, Variable.typ.?.data).as_lvalue();
+            Variable.storage = dst;
+
+            if (Variable.value) |value| {
+                compute_global_expr(c, dst, value);
+            }
+        },
+        .Parameter,
+        .Procedure,
+        .Struct_Field,
+        .Union_Field,
+        .Enum_Field,
+        .Type,
+        => {},
     }
 }
 
@@ -400,14 +453,14 @@ fn typecheck_type(c: *Compiler, typ: *Ast.Type) void {
                         },
                         else => unreachable,
                     }
-                    next_value = compute_const_expr(c, value);
+                    next_value = compute_simple_expr(c, value);
                     enum_field.computed_value = next_value;
                 } else {
                     enum_field.computed_value = next_value;
                 }
 
                 max_value = @max(max_value, next_value);
-                next_value += 1;
+                next_value +%= 1; // TODO: does this work for signed integers? Maybe not if they are not in twos complement.
 
                 it = node.next;
             }
@@ -447,7 +500,7 @@ fn typecheck_type(c: *Compiler, typ: *Ast.Type) void {
                 Compiler.exit(1);
             }
 
-            const count = compute_const_expr(c, Array.size);
+            const count = compute_simple_expr(c, Array.size);
             Array.computed_size = count;
             data.byte_size = count * Array.subtype.data.byte_size;
             data.alignment = Array.subtype.data.alignment;
@@ -558,15 +611,17 @@ fn typecheck_stmt(c: *Compiler, stmt: *Ast.Stmt) void {
                         .Case => |case| {
                             const value_type = typecheck_expr_only(c, case.value);
 
-                            if (!case.value.flags.is_const) {
-                                c.report_error(case.value.line_info, "expression is not constant", .{});
-                                Compiler.exit(1);
-                            } else if (!safe_cast(c, case.value, value_type, condition_type)) {
+                            if (!safe_cast(c, case.value, value_type, condition_type)) {
                                 c.report_error(case.value.line_info, "mismatched types: '{}' and '{}'", .{ condition_type, value_type });
                                 c.report_note(case.value.line_info, "switch case is here", .{});
                                 c.report_note(Switch.condition.line_info, "switch condition is here", .{});
                                 Compiler.exit(1);
                             }
+
+                            const value = compute_simple_expr(c, case.value);
+                            case.value.as = .{
+                                .Integer = value,
+                            };
 
                             Case = case.subcase;
                         },
@@ -839,7 +894,7 @@ fn typecheck_expr(c: *Compiler, expr: *Ast.Expr) TypecheckExprResult {
                     .symbol = null,
                 };
 
-                expr.flags.is_const = subexpr.flags.is_const;
+                expr.flags.is_const = subexpr.flags.is_const or subexpr.flags.is_static;
 
                 break :result .{ .typ = typ, .tag = .Value };
             },
@@ -874,7 +929,7 @@ fn typecheck_expr(c: *Compiler, expr: *Ast.Expr) TypecheckExprResult {
                     }
 
                     expr.flags.is_lvalue = true;
-                    expr.flags.is_const = false;
+                    expr.flags.is_const = subexpr.flags.is_static;
 
                     break :result .{ .typ = subexpr_type.data.as.Pointer, .tag = .Value };
                 }
@@ -935,8 +990,8 @@ fn typecheck_expr(c: *Compiler, expr: *Ast.Expr) TypecheckExprResult {
                                             },
                                         }
                                     },
-                                    .Expr => {
-                                        c.report_error(expr.line_info, "unexpected expression", .{});
+                                    .Expr => |subexpr| {
+                                        c.report_error(subexpr.line_info, "unexpected expression", .{});
                                         Compiler.exit(1);
                                     },
                                 }
@@ -1030,8 +1085,6 @@ fn typecheck_expr(c: *Compiler, expr: *Ast.Expr) TypecheckExprResult {
                         Compiler.exit(1);
                     }
 
-                    var is_const = true;
-
                     var pit = Proc.params.first;
                     var ait = Call.args.first;
                     while (pit != null) {
@@ -1053,16 +1106,12 @@ fn typecheck_expr(c: *Compiler, expr: *Ast.Expr) TypecheckExprResult {
                                     c.report_error(arg.line_info, "expected '{}', but got '{}'", .{ param_type, arg_type });
                                     Compiler.exit(1);
                                 }
-
-                                is_const = is_const and arg.flags.is_const;
                             },
                         }
 
                         pit = pnode.next;
                         ait = anode.next;
                     }
-
-                    expr.flags.is_const = is_const;
 
                     break :result .{ .typ = Proc.return_type, .tag = .Value };
                 }
@@ -1104,6 +1153,7 @@ fn typecheck_expr(c: *Compiler, expr: *Ast.Expr) TypecheckExprResult {
 
                     expr.flags.is_lvalue = Subscript.subexpr.flags.is_lvalue;
                     expr.flags.is_const = Subscript.subexpr.flags.is_const and Subscript.index.flags.is_const;
+                    expr.flags.is_static = Subscript.subexpr.flags.is_static;
 
                     switch (subexpr_type.data.as) {
                         .Array => |Array| {
@@ -1165,6 +1215,7 @@ fn typecheck_expr(c: *Compiler, expr: *Ast.Expr) TypecheckExprResult {
                 } else {
                     expr.flags.is_lvalue = Field.subexpr.flags.is_lvalue;
                     expr.flags.is_const = Field.subexpr.flags.is_const;
+                    expr.flags.is_static = Field.subexpr.flags.is_static;
 
                     const scope: *Ast.Scope = switch (subexpr_result.typ.data.as) {
                         .Struct, .Union => |Struct| Struct.scope,
@@ -1268,6 +1319,8 @@ fn typecheck_expr(c: *Compiler, expr: *Ast.Expr) TypecheckExprResult {
                             typecheck_symbol(c, symbol); // TODO: allow cyclic references when using #type_of/#alignment_of, etc.
 
                             expr.flags.is_lvalue = true;
+                            expr.flags.is_const = symbol.attributes.is_const;
+                            expr.flags.is_static = symbol.attributes.is_static;
 
                             break :result .{ .typ = Variable.typ.?, .tag = .Value };
                         },

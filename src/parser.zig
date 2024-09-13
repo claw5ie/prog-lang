@@ -526,12 +526,16 @@ fn insert_symbol(c: *Compiler, result: ParseSymbolResult, how_to_parse: HowToPar
                     Compiler.exit(1);
                 }
 
+                const is_global = key.scope == &Compiler.global_scope;
                 const symbol = c.ast.create(Ast.Symbol);
                 symbol.* = .{
                     .line_info = result.pattern.line_info,
                     .as = undefined,
                     .key = key,
                     .typechecking = .None,
+                    .attributes = .{
+                        .is_static = is_global, // TODO: don't set this for types.
+                    },
                 };
                 insert_result.value_ptr.* = symbol;
 

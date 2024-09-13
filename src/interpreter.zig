@@ -272,7 +272,7 @@ fn grab_value_from_tmp(c: *Compiler, tmp: IRC.Tmp, is_signed: bool) u64 {
     return stack_read(c, pointer, tmp.size, is_signed);
 }
 
-fn grab_value_from_rvalue(c: *Compiler, rvalue: IRC.Rvalue, is_signed: bool) u64 {
+pub fn grab_value_from_rvalue(c: *Compiler, rvalue: IRC.Rvalue, is_signed: bool) u64 {
     switch (rvalue) {
         .Lvalue => |lvalue| {
             const pointer = grab_pointer_from_lvalue(c, lvalue);
@@ -284,11 +284,11 @@ fn grab_value_from_rvalue(c: *Compiler, rvalue: IRC.Rvalue, is_signed: bool) u64
     }
 }
 
-inline fn grab_u64_from_rvalue(c: *Compiler, rvalue: IRC.Rvalue) u64 {
+pub inline fn grab_u64_from_rvalue(c: *Compiler, rvalue: IRC.Rvalue) u64 {
     return grab_value_from_rvalue(c, rvalue, false);
 }
 
-inline fn grab_i64_from_rvalue(c: *Compiler, rvalue: IRC.Rvalue) i64 {
+pub inline fn grab_i64_from_rvalue(c: *Compiler, rvalue: IRC.Rvalue) i64 {
     return @bitCast(grab_value_from_rvalue(c, rvalue, true));
 }
 

@@ -55,8 +55,8 @@ pub const LineInfo = struct {
 };
 
 pub const Attributes = packed struct {
-    is_static: bool = false,
     is_const: bool = false,
+    is_static: bool = false,
 
     pub fn is_empty(attr: Attributes) bool {
         return attr.is_static == false and attr.is_const == false;
@@ -64,8 +64,8 @@ pub const Attributes = packed struct {
 
     pub fn combine(self: Attributes, other: Attributes) Attributes {
         return .{
-            .is_static = self.is_static or other.is_static,
             .is_const = self.is_const or other.is_const,
+            .is_static = self.is_static or other.is_static,
         };
     }
 };
@@ -612,6 +612,7 @@ pub const Ast = struct {
         pub const Flags = packed struct {
             is_lvalue: bool = false,
             is_const: bool = false,
+            is_static: bool = false,
         };
     };
 
@@ -684,6 +685,7 @@ pub const Ast = struct {
         as: As,
         key: Key,
         typechecking: Stage,
+        attributes: Attributes,
 
         pub const As = union(enum) {
             Variable: Symbol.Variable,
@@ -1365,11 +1367,11 @@ pub fn compile() void {
             write_irc(&c, options.has_filepath.?);
         },
         .Run => {
-            c.irc = read_irc(options.has_filepath.?);
+            read_irc(&c, options.has_filepath.?);
             interpret(&c);
         },
         .Print => {
-            c.irc = read_irc(options.has_filepath.?);
+            read_irc(&c, options.has_filepath.?);
             c.irc.print();
         },
     }
@@ -1398,17 +1400,18 @@ fn write_irc(c: *Compiler, filepath: [:0]const u8) void {
         exit(1);
     };
 
-    utils.write_to_file_v(fd, magic_number_string);
-    utils.write_to_file_u64(fd, c.irc.label_count);
-    utils.write_to_file_u64(fd, c.irc.globals_count);
-
     var instrs: []const u8 = undefined;
     instrs.ptr = @ptrCast(c.irc.instrs.items.ptr);
     instrs.len = c.irc.instrs.items.len * @sizeOf(IRC.Instr);
+
+    utils.write_to_file_v(fd, magic_number_string);
+    utils.write_to_file_u64(fd, c.irc.label_count);
+    utils.write_to_file_u64(fd, c.irc.globals_count);
+    utils.write_to_file_v(fd, c.interp.stack[0..c.irc.globals_count]);
     utils.write_to_file_v(fd, instrs);
 }
 
-fn read_irc(filepath: [:0]const u8) IRC {
+fn read_irc(c: *Compiler, filepath: [:0]const u8) void {
     const fd = std.posix.open(filepath, .{}, 0) catch {
         eprint("error: couldn't open a file '{s}'\n", .{filepath});
         exit(1);
@@ -1424,7 +1427,8 @@ fn read_irc(filepath: [:0]const u8) IRC {
     std.debug.assert(magic_number == magic_number_value);
     const label_count = utils.read_from_file_u64(fd);
     const globals_count = utils.read_from_file_u64(fd);
-    const instrs = gpa.alloc(u8, size - 8 * 3) catch {
+    utils.read_from_file_v(fd, c.interp.stack[0..globals_count]);
+    const instrs = gpa.allocWithOptions(u8, size - 8 * 3 - globals_count, 8, null) catch {
         exit(1);
     };
     utils.read_from_file_v(fd, instrs);
@@ -1433,7 +1437,7 @@ fn read_irc(filepath: [:0]const u8) IRC {
     items.ptr = @alignCast(@ptrCast(instrs.ptr));
     items.len = @divExact(instrs.len, @sizeOf(IRC.Instr));
 
-    return .{
+    c.irc = .{
         .instrs = .{
             .items = items,
             .capacity = items.len,

@@ -33,17 +33,7 @@ fn generate_irc_top_level(c: *Compiler) void {
 
 fn generate_irc_global_symbol(c: *Compiler, symbol: *Ast.Symbol) void {
     switch (symbol.as) {
-        .Variable => {
-            std.debug.print("{s}:{}:{}: ewwow: oopsie doopsie, cawn't cweate gwobaw vawiabwes fow now, UwU\n", .{ c.filepath, symbol.line_info.line, symbol.line_info.column });
-            Compiler.exit(69);
-
-            // const dst = grab_global_from_type(c, Variable.typ.?.data).as_lvalue();
-            // Variable.storage = dst;
-
-            // if (Variable.value) |value| {
-            //     _ = generate_irc_rvalue(c, dst, value);
-            // }
-        },
+        .Variable => {},
         .Procedure => |*Procedure| {
             const Proc = &Procedure.typ.data.as.Proc;
 
@@ -307,7 +297,7 @@ fn generate_irc_stmt_list(c: *Compiler, list: Ast.StmtList) void {
     }
 }
 
-fn generate_irc_rvalue(c: *Compiler, has_dst: ?IRC.Lvalue, expr: *Ast.Expr) IRC.Rvalue {
+pub fn generate_irc_rvalue(c: *Compiler, has_dst: ?IRC.Lvalue, expr: *Ast.Expr) IRC.Rvalue {
     var move_src = false;
     const src: IRC.Rvalue = src: {
         switch (expr.as) {
@@ -848,7 +838,7 @@ fn maybe_grab_local_from_type(c: *Compiler, has_dst: ?IRC.Lvalue, data: *Ast.Typ
     return if (has_dst) |dst| dst else grab_local_from_type(c, data).as_lvalue();
 }
 
-fn grab_global(c: *Compiler, byte_size: u64, alignment: Alignment) IRC.Tmp {
+pub fn grab_global(c: *Compiler, byte_size: u64, alignment: Alignment) IRC.Tmp {
     const offset = utils.align_u64(c.ircgen.next_global, alignment);
     c.ircgen.next_global = offset + byte_size;
     return .{
@@ -857,7 +847,7 @@ fn grab_global(c: *Compiler, byte_size: u64, alignment: Alignment) IRC.Tmp {
     };
 }
 
-fn grab_global_from_type(c: *Compiler, data: *Ast.Type.SharedData) IRC.Tmp {
+pub fn grab_global_from_type(c: *Compiler, data: *Ast.Type.SharedData) IRC.Tmp {
     return grab_global(c, data.byte_size, data.alignment);
 }
 
