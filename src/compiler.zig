@@ -459,12 +459,14 @@ pub const Ast = struct {
         };
 
         pub const Struct = struct {
-            fields: SymbolList,
+            fields: *SymbolList,
+            rest: *SymbolList,
             scope: *Scope,
         };
 
         pub const Enum = struct {
-            fields: SymbolList,
+            fields: *SymbolList,
+            rest: *SymbolList,
             integer_type: *Type,
             scope: *Scope,
         };
@@ -687,7 +689,17 @@ pub const Ast = struct {
         typechecking: Stage,
         attributes: Attributes,
 
-        pub const As = union(enum) {
+        pub const Tag = enum {
+            Variable,
+            Parameter,
+            Procedure,
+            Struct_Field,
+            Union_Field,
+            Enum_Field,
+            Type,
+        };
+
+        pub const As = union(Tag) {
             Variable: Symbol.Variable,
             Parameter: Symbol.Parameter,
             Procedure: Symbol.Procedure,
@@ -1509,7 +1521,7 @@ pub fn find_symbol_in_scope(c: *Compiler, key: Ast.Symbol.Key, offset: usize) ?*
     if (has_symbol) |symbol| {
         switch (symbol.as) {
             .Variable, .Parameter => {
-                if (symbol.line_info.offset < offset) {
+                if (symbol.attributes.is_const or symbol.attributes.is_static or symbol.line_info.offset < offset) {
                     return symbol;
                 }
             },

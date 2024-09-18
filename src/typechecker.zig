@@ -190,12 +190,16 @@ fn typecheck_symbol(c: *Compiler, symbol: *Ast.Symbol) void {
                         c.report_note(value.line_info, "expression is here", .{});
                         Compiler.exit(1);
                     }
+
+                    // TODO[precompute-globals]: need to precompute all variables that are outside of functions.
                 }
             } else if (Variable.value) |value| {
                 const value_type = typecheck_expr_only(c, value);
                 reject_void_type(c, value_type);
 
                 Variable.typ = value_type;
+
+                // TODO[precompute-globals].
             } else {
                 unreachable;
             }
@@ -404,6 +408,12 @@ fn typecheck_type(c: *Compiler, typ: *Ast.Type) void {
 
             data.byte_size = size;
             data.alignment = alignment;
+
+            it = Struct.rest.first;
+            while (it) |node| {
+                typecheck_symbol(c, node.data);
+                it = node.next;
+            }
         },
         .Union => |Union| {
             var size: u64 = 0;
@@ -425,6 +435,12 @@ fn typecheck_type(c: *Compiler, typ: *Ast.Type) void {
 
             data.byte_size = size;
             data.alignment = alignment;
+
+            it = Union.rest.first;
+            while (it) |node| {
+                typecheck_symbol(c, node.data);
+                it = node.next;
+            }
         },
         .Enum => |*Enum| {
             const old_enum_type = c.typechecker.enum_type;
@@ -477,6 +493,12 @@ fn typecheck_type(c: *Compiler, typ: *Ast.Type) void {
             data.alignment = integer_type.data.alignment;
 
             c.typechecker.enum_type = old_enum_type;
+
+            it = Enum.rest.first;
+            while (it) |node| {
+                typecheck_symbol(c, node.data);
+                it = node.next;
+            }
         },
         .Proc => |Proc| {
             std.debug.assert(data.byte_size == Ast.pointer_byte_size and
@@ -1196,8 +1218,23 @@ fn typecheck_expr(c: *Compiler, expr: *Ast.Expr) TypecheckExprResult {
 
                     const symbol = resolve_identifier(c, Field.field, scope);
 
+                    // TODO[duplicated-resolve-symbol].
+                    expr.flags.is_const = symbol.attributes.is_const;
+                    expr.flags.is_static = symbol.attributes.is_static;
+
                     switch (symbol.as) {
-                        .Variable, .Parameter, .Procedure => unreachable,
+                        .Variable => |Variable| {
+                            expr.as = .{ .Symbol = symbol };
+                            break :result .{ .typ = Variable.typ.?, .tag = .Value };
+                        },
+                        .Parameter => |Parameter| {
+                            expr.as = .{ .Symbol = symbol };
+                            break :result .{ .typ = Parameter.typ, .tag = .Value };
+                        },
+                        .Procedure => |Procedure| {
+                            expr.as = .{ .Symbol = symbol };
+                            break :result .{ .typ = Procedure.typ, .tag = .Value };
+                        },
                         .Struct_Field, .Union_Field => |Struct_Field| {
                             expr.as = .{ .Symbol = symbol };
                             break :result .{ .typ = Struct_Field.typ, .tag = .Non_Value };
@@ -1314,13 +1351,15 @@ fn typecheck_expr(c: *Compiler, expr: *Ast.Expr) TypecheckExprResult {
 
                     typecheck_symbol_type(c, symbol);
 
+                    // TODO[duplicated-resolve-symbol]: duplicated
+                    expr.flags.is_const = symbol.attributes.is_const;
+                    expr.flags.is_static = symbol.attributes.is_static;
+
                     switch (symbol.as) {
                         .Variable => |*Variable| {
                             typecheck_symbol(c, symbol); // TODO: allow cyclic references when using #type_of/#alignment_of, etc.
 
                             expr.flags.is_lvalue = true;
-                            expr.flags.is_const = symbol.attributes.is_const;
-                            expr.flags.is_static = symbol.attributes.is_static;
 
                             break :result .{ .typ = Variable.typ.?, .tag = .Value };
                         },
