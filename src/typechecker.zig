@@ -62,6 +62,9 @@ fn typecheck_top_level(c: *Compiler) void {
                 Compiler.exit(1);
             },
         }
+    } else {
+        c.report_error(.{ .line = 1, .column = 1, .offset = 0 }, "'main' isn't defined", .{});
+        Compiler.exit(1);
     }
 }
 
