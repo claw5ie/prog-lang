@@ -1031,7 +1031,257 @@ fn parse_expr_prec(c: *Compiler, min_prec: i32) *Ast.Expr {
 }
 
 fn parse_expr_highest_prec(c: *Compiler) *Ast.Expr {
-    var base = parse_expr_base(c);
+    var base: *Ast.Expr = base: {
+        const tok = Lexer.grab(c);
+        Lexer.advance(c);
+
+        switch (tok.as) {
+            .And => {
+                const subsubexpr = parse_expr_highest_prec(c);
+                const subexpr = c.ast.create(Ast.Expr);
+                subexpr.* = .{
+                    .line_info = tok.line_info,
+                    .as = .{ .Ref = subsubexpr },
+                    .typ = Ast.void_type,
+                    .flags = .{},
+                    .typechecking = .None,
+                };
+                subexpr.line_info.column += 1;
+                subexpr.line_info.offset += 1;
+                const expr = c.ast.create(Ast.Expr);
+                expr.* = .{
+                    .line_info = tok.line_info,
+                    .as = .{ .Ref = subexpr },
+                    .typ = Ast.void_type,
+                    .flags = .{},
+                    .typechecking = .None,
+                };
+                break :base expr;
+            },
+            .Add, .Sub, .Not => {
+                const subexpr = parse_expr_highest_prec(c);
+                const expr = c.ast.create(Ast.Expr);
+                expr.* = .{
+                    .line_info = subexpr.line_info,
+                    .as = .{ .Unary_Op = .{
+                        .subexpr = subexpr,
+                        .tag = token_tag_to_unary_op_tag(tok.as),
+                    } },
+                    .typ = Ast.void_type,
+                    .flags = .{},
+                    .typechecking = .None,
+                };
+                break :base expr;
+            },
+            .Ref => {
+                const subexpr = parse_expr_highest_prec(c);
+                const expr = c.ast.create(Ast.Expr);
+                expr.* = .{
+                    .line_info = subexpr.line_info,
+                    .as = .{ .Ref = subexpr },
+                    .typ = Ast.void_type,
+                    .flags = .{},
+                    .typechecking = .None,
+                };
+                break :base expr;
+            },
+            .Open_Paren => {
+                const expr = parse_expr(c);
+                expr.line_info = tok.line_info;
+                Lexer.expect(c, .Close_Paren);
+                break :base expr;
+            },
+            .If => {
+                const condition = parse_expr(c);
+                if (Lexer.peek(c) == .Then) {
+                    Lexer.advance(c);
+                }
+                const true_branch = parse_expr(c);
+                Lexer.expect(c, .Else);
+                const false_branch = parse_expr(c);
+
+                const expr = c.ast.create(Ast.Expr);
+                expr.* = .{
+                    .line_info = tok.line_info,
+                    .as = .{ .If = .{
+                        .condition = condition,
+                        .true_branch = true_branch,
+                        .false_branch = false_branch,
+                    } },
+                    .typ = Ast.void_type,
+                    .flags = .{},
+                    .typechecking = .None,
+                };
+
+                break :base expr;
+            },
+            .Boolean => |value| {
+                const expr = c.ast.create(Ast.Expr);
+                expr.* = .{
+                    .line_info = tok.line_info,
+                    .as = .{ .Boolean = value },
+                    .typ = Ast.bool_type,
+                    .flags = .{},
+                    .typechecking = .None,
+                };
+                break :base expr;
+            },
+            .Null => {
+                const expr = c.ast.create(Ast.Expr);
+                expr.* = .{
+                    .line_info = tok.line_info,
+                    .as = .Null,
+                    .typ = Ast.void_pointer_type,
+                    .flags = .{},
+                    .typechecking = .None,
+                };
+                break :base expr;
+            },
+            .Identifier => |name| {
+                const expr = c.ast.create(Ast.Expr);
+                expr.* = .{
+                    .line_info = tok.line_info,
+                    .as = .{ .Identifier = .{
+                        .name = name,
+                        .scope = c.parser.current_scope,
+                    } },
+                    .typ = Ast.void_type,
+                    .flags = .{},
+                    .typechecking = .None,
+                };
+                break :base expr;
+            },
+            .Integer => |value| {
+                const typ = Ast.integer_type_from_u64(value);
+                const expr = c.ast.create(Ast.Expr);
+                expr.* = .{
+                    .line_info = tok.line_info,
+                    .as = .{ .Integer = value },
+                    .typ = typ,
+                    .flags = .{},
+                    .typechecking = .None,
+                };
+                break :base expr;
+            },
+            .Byte_Size_Of => {
+                var exprs: [1]*Ast.Expr = undefined;
+                const count = parse_fixed_size_expr_list(c, &exprs);
+
+                switch (count) {
+                    1 => {
+                        const expr = c.ast.create(Ast.Expr);
+                        expr.* = .{
+                            .line_info = tok.line_info,
+                            .as = .{ .Byte_Size_Of = exprs[0] },
+                            .typ = Ast.void_type,
+                            .flags = .{},
+                            .typechecking = .None,
+                        };
+                        break :base expr;
+                    },
+                    else => {
+                        c.report_error(tok.line_info, "expected 1 argument, but got {}", .{count});
+                        Compiler.exit(1);
+                    },
+                }
+            },
+            .Alignment_Of => {
+                var exprs: [1]*Ast.Expr = undefined;
+                const count = parse_fixed_size_expr_list(c, &exprs);
+
+                switch (count) {
+                    1 => {
+                        const expr = c.ast.create(Ast.Expr);
+                        expr.* = .{
+                            .line_info = tok.line_info,
+                            .as = .{ .Alignment_Of = exprs[0] },
+                            .typ = Ast.void_type,
+                            .flags = .{},
+                            .typechecking = .None,
+                        };
+                        break :base expr;
+                    },
+                    else => {
+                        c.report_error(tok.line_info, "expected 1 argument, but got {}", .{count});
+                        Compiler.exit(1);
+                    },
+                }
+            },
+            .As => {
+                var exprs: [2]*Ast.Expr = undefined;
+                const count = parse_fixed_size_expr_list(c, &exprs);
+
+                switch (count) {
+                    2 => {
+                        const typ = expr_to_type(c, exprs[0]);
+                        const expr = c.ast.create(Ast.Expr);
+                        expr.* = .{
+                            .line_info = tok.line_info,
+                            .as = .{ .As = .{
+                                .typ = typ,
+                                .expr = exprs[1],
+                            } },
+                            .typ = typ,
+                            .flags = .{},
+                            .typechecking = .None,
+                        };
+                        break :base expr;
+                    },
+                    else => {
+                        c.report_error(tok.line_info, "expected 2 arguments, but got {}", .{count});
+                        Compiler.exit(1);
+                    },
+                }
+            },
+            .Cast => {
+                var exprs: [2]*Ast.Expr = undefined;
+                const count = parse_fixed_size_expr_list(c, &exprs);
+
+                switch (count) {
+                    2 => {
+                        const typ = expr_to_type(c, exprs[0]);
+                        const expr = c.ast.create(Ast.Expr);
+                        expr.* = .{
+                            .line_info = tok.line_info,
+                            .as = .{ .Cast = .{
+                                .typ = typ,
+                                .expr = exprs[1],
+                            } },
+                            .typ = typ,
+                            .flags = .{},
+                            .typechecking = .None,
+                        };
+                        break :base expr;
+                    },
+                    else => {
+                        c.report_error(tok.line_info, "expected 2 arguments, but got {}", .{count});
+                        Compiler.exit(1);
+                    },
+                }
+            },
+            else => {
+                Lexer.putback(c, tok);
+
+                var typ: Ast.Type = undefined;
+                if (!try_parse_type_by_value(c, &typ)) {
+                    c.report_error(tok.line_info, "token doesn't start an expression.", .{});
+                    Compiler.exit(1);
+                }
+
+                const expr = c.ast.create(Ast.Expr);
+                expr.* = .{
+                    .line_info = tok.line_info,
+                    .as = .{ .Type = typ },
+                    .typ = Ast.void_type,
+                    .flags = .{},
+                    .typechecking = .None,
+                };
+                expr.typ = &expr.as.Type;
+
+                break :base expr;
+            },
+        }
+    };
 
     while (true) {
         switch (Lexer.peek(c)) {
@@ -1085,7 +1335,20 @@ fn parse_expr_highest_prec(c: *Compiler) *Ast.Expr {
             .Dot => {
                 Lexer.advance(c);
 
-                const field = parse_expr_base(c);
+                const id = Lexer.grab(c);
+                Lexer.expect(c, .Identifier);
+
+                const field = c.ast.create(Ast.Expr);
+                field.* = .{
+                    .line_info = id.line_info,
+                    .as = .{ .Identifier = .{
+                        .name = id.as.Identifier,
+                        .scope = c.parser.current_scope,
+                    } },
+                    .typ = Ast.void_type,
+                    .flags = .{},
+                    .typechecking = .None,
+                };
                 const new_base = c.ast.create(Ast.Expr);
                 new_base.* = .{
                     .line_info = base.line_info,
@@ -1104,258 +1367,6 @@ fn parse_expr_highest_prec(c: *Compiler) *Ast.Expr {
     }
 
     return base;
-}
-
-fn parse_expr_base(c: *Compiler) *Ast.Expr {
-    const tok = Lexer.grab(c);
-    Lexer.advance(c);
-
-    switch (tok.as) {
-        .And => {
-            const subsubexpr = parse_expr_base(c);
-            const subexpr = c.ast.create(Ast.Expr);
-            subexpr.* = .{
-                .line_info = tok.line_info,
-                .as = .{ .Ref = subsubexpr },
-                .typ = Ast.void_type,
-                .flags = .{},
-                .typechecking = .None,
-            };
-            subexpr.line_info.column += 1;
-            subexpr.line_info.offset += 1;
-            const expr = c.ast.create(Ast.Expr);
-            expr.* = .{
-                .line_info = tok.line_info,
-                .as = .{ .Ref = subexpr },
-                .typ = Ast.void_type,
-                .flags = .{},
-                .typechecking = .None,
-            };
-            return expr;
-        },
-        .Add, .Sub, .Not => {
-            const subexpr = parse_expr_base(c);
-            const expr = c.ast.create(Ast.Expr);
-            expr.* = .{
-                .line_info = subexpr.line_info,
-                .as = .{ .Unary_Op = .{
-                    .subexpr = subexpr,
-                    .tag = token_tag_to_unary_op_tag(tok.as),
-                } },
-                .typ = Ast.void_type,
-                .flags = .{},
-                .typechecking = .None,
-            };
-            return expr;
-        },
-        .Ref => {
-            const subexpr = parse_expr_base(c);
-            const expr = c.ast.create(Ast.Expr);
-            expr.* = .{
-                .line_info = subexpr.line_info,
-                .as = .{ .Ref = subexpr },
-                .typ = Ast.void_type,
-                .flags = .{},
-                .typechecking = .None,
-            };
-            return expr;
-        },
-        .Open_Paren => {
-            const expr = parse_expr(c);
-            expr.line_info = tok.line_info;
-            Lexer.expect(c, .Close_Paren);
-            return expr;
-        },
-        .If => {
-            const condition = parse_expr(c);
-            if (Lexer.peek(c) == .Then) {
-                Lexer.advance(c);
-            }
-            const true_branch = parse_expr(c);
-            Lexer.expect(c, .Else);
-            const false_branch = parse_expr(c);
-
-            const expr = c.ast.create(Ast.Expr);
-            expr.* = .{
-                .line_info = tok.line_info,
-                .as = .{ .If = .{
-                    .condition = condition,
-                    .true_branch = true_branch,
-                    .false_branch = false_branch,
-                } },
-                .typ = Ast.void_type,
-                .flags = .{},
-                .typechecking = .None,
-            };
-
-            return expr;
-        },
-        .Boolean => |value| {
-            const expr = c.ast.create(Ast.Expr);
-            expr.* = .{
-                .line_info = tok.line_info,
-                .as = .{ .Boolean = value },
-                .typ = Ast.bool_type,
-                .flags = .{},
-                .typechecking = .None,
-            };
-            return expr;
-        },
-        .Null => {
-            const expr = c.ast.create(Ast.Expr);
-            expr.* = .{
-                .line_info = tok.line_info,
-                .as = .Null,
-                .typ = Ast.void_pointer_type,
-                .flags = .{},
-                .typechecking = .None,
-            };
-            return expr;
-        },
-        .Identifier => |name| {
-            const expr = c.ast.create(Ast.Expr);
-            expr.* = .{
-                .line_info = tok.line_info,
-                .as = .{ .Identifier = .{
-                    .name = name,
-                    .scope = c.parser.current_scope,
-                } },
-                .typ = Ast.void_type,
-                .flags = .{},
-                .typechecking = .None,
-            };
-            return expr;
-        },
-        .Integer => |value| {
-            const typ = Ast.integer_type_from_u64(value);
-            const expr = c.ast.create(Ast.Expr);
-            expr.* = .{
-                .line_info = tok.line_info,
-                .as = .{ .Integer = value },
-                .typ = typ,
-                .flags = .{},
-                .typechecking = .None,
-            };
-            return expr;
-        },
-        .Byte_Size_Of => {
-            var exprs: [1]*Ast.Expr = undefined;
-            const count = parse_fixed_size_expr_list(c, &exprs);
-
-            switch (count) {
-                1 => {
-                    const expr = c.ast.create(Ast.Expr);
-                    expr.* = .{
-                        .line_info = tok.line_info,
-                        .as = .{ .Byte_Size_Of = exprs[0] },
-                        .typ = Ast.void_type,
-                        .flags = .{},
-                        .typechecking = .None,
-                    };
-                    return expr;
-                },
-                else => {
-                    c.report_error(tok.line_info, "expected 1 argument, but got {}", .{count});
-                    Compiler.exit(1);
-                },
-            }
-        },
-        .Alignment_Of => {
-            var exprs: [1]*Ast.Expr = undefined;
-            const count = parse_fixed_size_expr_list(c, &exprs);
-
-            switch (count) {
-                1 => {
-                    const expr = c.ast.create(Ast.Expr);
-                    expr.* = .{
-                        .line_info = tok.line_info,
-                        .as = .{ .Alignment_Of = exprs[0] },
-                        .typ = Ast.void_type,
-                        .flags = .{},
-                        .typechecking = .None,
-                    };
-                    return expr;
-                },
-                else => {
-                    c.report_error(tok.line_info, "expected 1 argument, but got {}", .{count});
-                    Compiler.exit(1);
-                },
-            }
-        },
-        .As => {
-            var exprs: [2]*Ast.Expr = undefined;
-            const count = parse_fixed_size_expr_list(c, &exprs);
-
-            switch (count) {
-                2 => {
-                    const typ = expr_to_type(c, exprs[0]);
-                    const expr = c.ast.create(Ast.Expr);
-                    expr.* = .{
-                        .line_info = tok.line_info,
-                        .as = .{ .As = .{
-                            .typ = typ,
-                            .expr = exprs[1],
-                        } },
-                        .typ = typ,
-                        .flags = .{},
-                        .typechecking = .None,
-                    };
-                    return expr;
-                },
-                else => {
-                    c.report_error(tok.line_info, "expected 2 arguments, but got {}", .{count});
-                    Compiler.exit(1);
-                },
-            }
-        },
-        .Cast => {
-            var exprs: [2]*Ast.Expr = undefined;
-            const count = parse_fixed_size_expr_list(c, &exprs);
-
-            switch (count) {
-                2 => {
-                    const typ = expr_to_type(c, exprs[0]);
-                    const expr = c.ast.create(Ast.Expr);
-                    expr.* = .{
-                        .line_info = tok.line_info,
-                        .as = .{ .Cast = .{
-                            .typ = typ,
-                            .expr = exprs[1],
-                        } },
-                        .typ = typ,
-                        .flags = .{},
-                        .typechecking = .None,
-                    };
-                    return expr;
-                },
-                else => {
-                    c.report_error(tok.line_info, "expected 2 arguments, but got {}", .{count});
-                    Compiler.exit(1);
-                },
-            }
-        },
-        else => {
-            Lexer.putback(c, tok);
-
-            var typ: Ast.Type = undefined;
-            if (!try_parse_type_by_value(c, &typ)) {
-                c.report_error(tok.line_info, "token doesn't start an expression.", .{});
-                Compiler.exit(1);
-            }
-
-            const expr = c.ast.create(Ast.Expr);
-            expr.* = .{
-                .line_info = tok.line_info,
-                .as = .{ .Type = typ },
-                .typ = Ast.void_type,
-                .flags = .{},
-                .typechecking = .None,
-            };
-            expr.typ = &expr.as.Type;
-
-            return expr;
-        },
-    }
 }
 
 fn parse_fixed_size_expr_list(c: *Compiler, dst: []*Ast.Expr) usize {

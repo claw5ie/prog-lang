@@ -20,7 +20,6 @@ alias BazBaz: struct
   y: enum { X := 42},
 };
 
-// TODO: allow to assign constants to enumerators, e.g. "A = 2 + 2".
 alias Baz: enum
 {
   A,
@@ -83,10 +82,9 @@ bar: proc(aa: struct { x: i64 }) void
   ff := #cast(bool, 2);
   fff: proc() void = null;
 
-  // Fix precedence
-  g := (&a)[0];      // &[3]int
+  g := (&a)[0];
   h: i32[3]^ = &g;
-  i := &a;         // &[2][3]int
+  i := &a;
 
   if false then {} else {}
 
