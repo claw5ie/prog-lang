@@ -1244,7 +1244,11 @@ fn typecheck_expr(c: *Compiler, expr: *Ast.Expr) TypecheckExprResult {
                             break :result .{ .typ = subexpr_result.typ, .tag = .Value };
                         },
                         .Type => |Type| {
-                            expr.as = .{ .Type = Type.* };
+                            expr.as = .{ .Type = .{
+                                .line_info = expr.line_info,
+                                .data = Type.data,
+                                .symbol = Type.symbol,
+                            } };
                             expr.flags.is_const = true;
                             break :result .{ .typ = &expr.as.Type, .tag = .Type };
                         },
@@ -1418,6 +1422,7 @@ fn resolve_identifier(c: *Compiler, expr: *Ast.Expr, scope: *Ast.Scope) *Ast.Sym
     }
 }
 
+// TODO: line info is not properly reported.
 fn reject_void_type(c: *Compiler, typ: *Ast.Type) void {
     if (typ.equal(Ast.void_type)) {
         c.report_error(typ.line_info, "unexpected 'void' type", .{});
