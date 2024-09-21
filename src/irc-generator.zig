@@ -81,11 +81,12 @@ fn generate_irc_global_symbol(c: *Compiler, symbol: *Ast.Symbol) void {
 fn generate_irc_local_symbol(c: *Compiler, symbol: *Ast.Symbol) void {
     switch (symbol.as) {
         .Variable => |*Variable| {
-            const dst = grab_local_from_type(c, Variable.typ.?.data).as_lvalue();
-            Variable.storage = dst;
+            if (!(symbol.attributes.is_static or symbol.attributes.is_const)) {
+                Variable.storage = grab_local_from_type(c, Variable.typ.?.data).as_lvalue();
+            }
 
             if (Variable.value) |value| {
-                _ = generate_irc_rvalue(c, dst, value);
+                _ = generate_irc_rvalue(c, Variable.storage, value);
             }
         },
         .Type => |typ| {
