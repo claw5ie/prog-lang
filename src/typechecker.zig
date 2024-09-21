@@ -32,7 +32,7 @@ pub fn typecheck(c: *Compiler) void {
 fn typecheck_top_level(c: *Compiler) void {
     var it = c.ast.globals.first;
     while (it) |node| {
-        typecheck_global_symbol(c, node.data);
+        typecheck_symbol(c, node.data);
         it = node.next;
     }
 
@@ -148,27 +148,6 @@ fn typecheck_symbol_type(c: *Compiler, symbol: *Ast.Symbol) void {
     }
 }
 
-fn typecheck_global_symbol(c: *Compiler, symbol: *Ast.Symbol) void {
-    typecheck_symbol(c, symbol);
-    switch (symbol.as) {
-        .Variable => |*Variable| {
-            const dst = IRCGen.grab_global_from_type(c, Variable.typ.?.data).as_lvalue();
-            Variable.storage = dst;
-
-            if (Variable.value) |value| {
-                compute_global_expr(c, dst, value);
-            }
-        },
-        .Parameter,
-        .Procedure,
-        .Struct_Field,
-        .Union_Field,
-        .Enum_Field,
-        .Type,
-        => {},
-    }
-}
-
 fn typecheck_symbol(c: *Compiler, symbol: *Ast.Symbol) void {
     switch (symbol.typechecking) {
         .None => symbol.typechecking = .Going,
@@ -185,8 +164,13 @@ fn typecheck_symbol(c: *Compiler, symbol: *Ast.Symbol) void {
     switch (symbol.as) {
         .Variable => |*Variable| {
             if (Variable.typ) |typ| {
+                if (symbol.attributes.is_static or symbol.attributes.is_const) {
+                    Variable.storage = IRCGen.grab_global_from_type(c, typ.data).as_lvalue();
+                }
+
                 if (Variable.value) |value| {
                     const value_type = typecheck_expr_only(c, value);
+
                     if (!safe_cast(c, value, value_type, typ)) {
                         c.report_error(value.line_info, "expected '{}', but got '{}'", .{ typ, value_type });
                         c.report_note(typ.line_info, "expected type is here", .{});
@@ -194,20 +178,37 @@ fn typecheck_symbol(c: *Compiler, symbol: *Ast.Symbol) void {
                         Compiler.exit(1);
                     }
 
-                    // TODO[precompute-globals]: need to precompute all variables that are outside of functions.
+                    if (symbol.attributes.is_global or symbol.attributes.is_const) {
+                        if (value.flags.is_const) {
+                            compute_global_expr(c, Variable.storage, value);
+                        } else {
+                            c.report_error(value.line_info, "expression is not a constant", .{});
+                            Compiler.exit(1);
+                        }
+                    }
                 }
             } else if (Variable.value) |value| {
                 const value_type = typecheck_expr_only(c, value);
                 reject_void_type(c, value_type);
 
                 Variable.typ = value_type;
+                if (symbol.attributes.is_static or symbol.attributes.is_const) {
+                    Variable.storage = IRCGen.grab_global_from_type(c, value_type.data).as_lvalue();
+                }
 
-                // TODO[precompute-globals].
+                if (symbol.attributes.is_global or symbol.attributes.is_const) {
+                    if (value.flags.is_const) {
+                        compute_global_expr(c, Variable.storage, value);
+                    } else {
+                        c.report_error(value.line_info, "expression is not a constant", .{});
+                        Compiler.exit(1);
+                    }
+                }
             } else {
                 unreachable;
             }
         },
-        .Procedure => |*Procedure| {
+        .Procedure => |Procedure| {
             const old_return_type = c.typechecker.return_type;
             c.typechecker.return_type = Procedure.typ.data.as.Proc.return_type;
 
@@ -218,10 +219,6 @@ fn typecheck_symbol(c: *Compiler, symbol: *Ast.Symbol) void {
             }
 
             c.typechecker.return_type = old_return_type;
-
-            std.debug.assert(Procedure.start_label == null);
-            Procedure.start_label = IRCGen.grab_label(c);
-            Procedure.end_label = IRCGen.grab_label(c);
         },
         .Type => |typ| {
             typecheck_type(c, typ);

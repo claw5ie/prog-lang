@@ -19,7 +19,7 @@ fn generate_irc_top_level(c: *Compiler) void {
         const dst = grab_global(c, 8, .QWORD).as_lvalue();
         generate_irc_instr(c, .{ .Call = .{
             .dst = dst,
-            .src = .{ .Label = Procedure.start_label.? },
+            .src = .{ .Label = Procedure.start_label },
         } });
         generate_irc_instr(c, .Exit);
     }
@@ -52,21 +52,18 @@ fn generate_irc_global_symbol(c: *Compiler, symbol: *Ast.Symbol) void {
                 it = node.next;
             }
 
-            const start_label = Procedure.start_label.?;
-            const end_label = Procedure.end_label.?;
-
             const old_return_label = c.ircgen.return_label;
-            c.ircgen.return_label = end_label;
+            c.ircgen.return_label = Procedure.end_label;
 
             const index = c.irc.instrs.items.len;
             generate_irc_instr(c, undefined);
             generate_irc_stmt_list(c, Procedure.block);
             generate_irc_instr(c, .{ .GFE = .{
-                .label = end_label,
+                .label = Procedure.end_label,
                 .stack_space_used = @intCast(c.ircgen.biggest_next_local),
             } });
             c.irc.instrs.items[index] = .{ .GFB = .{
-                .label = start_label,
+                .label = Procedure.start_label,
                 .stack_space_used = @intCast(c.ircgen.biggest_next_local),
             } };
             c.ircgen.next_local = 0; // Global function, so there the previous value should have been 0 as well.
@@ -75,7 +72,9 @@ fn generate_irc_global_symbol(c: *Compiler, symbol: *Ast.Symbol) void {
             c.ircgen.return_label = old_return_label;
         },
         .Parameter, .Struct_Field, .Union_Field, .Enum_Field => unreachable,
-        .Type => {},
+        .Type => |typ| {
+            generate_irc_type(c, typ);
+        },
     }
 }
 
@@ -89,8 +88,52 @@ fn generate_irc_local_symbol(c: *Compiler, symbol: *Ast.Symbol) void {
                 _ = generate_irc_rvalue(c, dst, value);
             }
         },
-        .Procedure, .Parameter, .Struct_Field, .Union_Field, .Enum_Field => unreachable,
-        .Type => {},
+        .Type => |typ| {
+            generate_irc_type(c, typ);
+        },
+        .Procedure,
+        .Parameter,
+        .Struct_Field,
+        .Union_Field,
+        .Enum_Field,
+        => unreachable,
+    }
+}
+
+fn generate_irc_type(c: *Compiler, typ: *Ast.Type) void {
+    const data = typ.data;
+    switch (data.stages.irc_generation) {
+        .None => data.stages.irc_generation = .Going,
+        .Going => unreachable,
+        .Done => return,
+    }
+
+    defer data.stages.irc_generation = .Done;
+
+    switch (data.as) {
+        .Struct, .Union => |Struct| {
+            var it = Struct.rest.first;
+            while (it) |node| {
+                generate_irc_global_symbol(c, node.data);
+                it = node.next;
+            }
+        },
+        .Enum => |Enum| {
+            var it = Enum.rest.first;
+            while (it) |node| {
+                generate_irc_global_symbol(c, node.data);
+                it = node.next;
+            }
+        },
+        .Proc,
+        .Array,
+        .Pointer,
+        .Integer,
+        .Bool,
+        .Void,
+        .Identifier,
+        .Type_Of,
+        => {},
     }
 }
 
@@ -640,7 +683,7 @@ pub fn generate_irc_rvalue(c: *Compiler, has_dst: ?IRC.Lvalue, expr: *Ast.Expr) 
                     },
                     .Procedure => |*Procedure| {
                         move_src = true;
-                        break :src .{ .Label = Procedure.start_label.? };
+                        break :src .{ .Label = Procedure.start_label };
                     },
                     .Struct_Field, .Union_Field => unreachable,
                     .Enum_Field => |Enum_Field| {

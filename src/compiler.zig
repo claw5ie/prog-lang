@@ -57,6 +57,7 @@ pub const LineInfo = struct {
 pub const Attributes = packed struct {
     is_const: bool = false,
     is_static: bool = false,
+    is_global: bool = false,
 
     pub fn is_empty(attr: Attributes) bool {
         return attr.is_static == false and attr.is_const == false;
@@ -247,6 +248,7 @@ pub const Ast = struct {
         .shallow_check = .None,
         .void_array_check = .None,
         .full_check = .None,
+        .irc_generation = .None,
     };
 
     pub const default_stages_done = Ast.Type.Stages{
@@ -254,6 +256,7 @@ pub const Ast = struct {
         .shallow_check = .Done,
         .void_array_check = .Done,
         .full_check = .Done,
+        .irc_generation = .None,
     };
 
     pub const Scope = struct {
@@ -509,6 +512,7 @@ pub const Ast = struct {
             shallow_check: Stage,
             void_array_check: Stage,
             full_check: Stage,
+            irc_generation: Stage,
         };
     };
 
@@ -724,8 +728,8 @@ pub const Ast = struct {
         pub const Procedure = struct {
             typ: *Type,
             block: StmtList,
-            start_label: ?IRC.Label,
-            end_label: ?IRC.Label,
+            start_label: IRC.Label,
+            end_label: IRC.Label,
         };
 
         pub const StructField = struct {

@@ -2,6 +2,7 @@ const std = @import("std");
 const utils = @import("utils.zig");
 const Compiler = @import("compiler.zig");
 const Lexer = @import("lexer.zig");
+const IRCGen = @import("irc-generator.zig");
 
 const Token = Compiler.Lexer.Token;
 const Ast = Compiler.Ast;
@@ -370,12 +371,18 @@ fn parse_stmt_list(c: *Compiler) Ast.StmtList {
 }
 
 fn try_parse_symbol(c: *Compiler) ParseSymbolResult {
+    const line_info = Lexer.grab_line_info(c);
     var attributes = Compiler.Attributes{};
 
     while (Lexer.peek(c) == .Attribute) {
         const attribute = Lexer.grab(c).as.Attribute;
         attributes = attributes.combine(attribute);
         Lexer.advance(c);
+    }
+
+    if (attributes.is_const and attributes.is_static) {
+        c.report_error(line_info, "'#const' and '#static' are mutually exclusive", .{});
+        Compiler.exit(1);
     }
 
     var is_type = false;
@@ -636,44 +643,67 @@ fn insert_symbol(c: *Compiler, result: ParseSymbolResult, how_to_parse: HowToPar
         }
     };
 
-    if (!result.attributes.is_empty() and symbol_tag != .Variable) {
-        c.report_error(result.pattern.line_info, "unexpected attributes", .{});
-        Compiler.exit(1);
-    }
-
     symbol.as = as: {
         switch (symbol_tag) {
             .Variable => {
                 Lexer.expect(c, .Semicolon);
 
-                symbol.attributes.is_static = symbol.key.scope == &Compiler.global_scope;
+                const is_global = symbol.key.scope == &Compiler.global_scope or how_to_parse == .Parsing_Container;
+                const is_static = is_global and !symbol.attributes.is_const;
+
+                symbol.attributes.is_static = symbol.attributes.is_static or is_static;
+                symbol.attributes.is_global = is_global;
                 break :as .{ .Variable = .{
                     .typ = result.typ,
                     .value = result.value,
                     .storage = undefined,
                 } };
             },
-            .Parameter => break :as .{ .Parameter = .{
-                .typ = result.typ.?,
-                .value = result.value,
-                .storage = undefined,
-            } },
-            .Procedure => break :as .{ .Procedure = .{
-                .typ = result.typ.?,
-                .block = result.block,
-                .start_label = null,
-                .end_label = null,
-            } },
-            .Struct_Field => break :as .{ .Struct_Field = .{
-                .typ = result.typ.?,
-                .value = result.value,
-                .offset = 0,
-            } },
-            .Union_Field => break :as .{ .Union_Field = .{
-                .typ = result.typ.?,
-                .value = result.value,
-                .offset = 0,
-            } },
+            .Parameter => {
+                if (!symbol.attributes.is_empty()) {
+                    c.report_error(result.pattern.line_info, "unexpected attributes for parameter", .{});
+                    Compiler.exit(1);
+                }
+
+                break :as .{ .Parameter = .{
+                    .typ = result.typ.?,
+                    .value = result.value,
+                    .storage = undefined,
+                } };
+            },
+            .Procedure => {
+                if (symbol.attributes.is_static) {
+                    c.report_error(result.pattern.line_info, "procedures can't be static", .{});
+                    Compiler.exit(1);
+                }
+
+                const start_label = IRCGen.grab_label(c);
+                const end_label = IRCGen.grab_label(c);
+
+                symbol.attributes.is_const = true;
+                break :as .{ .Procedure = .{
+                    .typ = result.typ.?,
+                    .block = result.block,
+                    .start_label = start_label,
+                    .end_label = end_label,
+                } };
+            },
+            .Struct_Field => {
+                std.debug.assert(symbol.attributes.is_empty());
+                break :as .{ .Struct_Field = .{
+                    .typ = result.typ.?,
+                    .value = result.value,
+                    .offset = 0,
+                } };
+            },
+            .Union_Field => {
+                std.debug.assert(symbol.attributes.is_empty());
+                break :as .{ .Union_Field = .{
+                    .typ = result.typ.?,
+                    .value = result.value,
+                    .offset = 0,
+                } };
+            },
             .Enum_Field => {
                 symbol.attributes.is_const = true;
                 break :as .{ .Enum_Field = .{
@@ -683,15 +713,16 @@ fn insert_symbol(c: *Compiler, result: ParseSymbolResult, how_to_parse: HowToPar
             },
             .Type => {
                 Lexer.expect(c, .Semicolon);
+
+                if (!symbol.attributes.is_empty()) {
+                    c.report_error(result.pattern.line_info, "unexpected attributes for a type", .{});
+                    Compiler.exit(1);
+                }
+
                 break :as .{ .Type = result.typ.? };
             },
         }
     };
-
-    if (!result.attributes.is_empty()) {
-        c.report_error(result.pattern.line_info, "unexpected attributes", .{});
-        Compiler.exit(1);
-    }
 
     return symbol;
 }
