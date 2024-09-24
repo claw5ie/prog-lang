@@ -1321,7 +1321,7 @@ fn typecheck_expr(c: *Compiler, expr: *Ast.Expr) TypecheckExprResult {
                 typecheck_type(c, Cast.typ);
                 const expr_type = typecheck_expr_only(c, Cast.expr);
                 if (!can_unsafe_cast(c, Cast.expr, expr_type, Cast.typ)) {
-                    c.report_error(Cast.expr.line_info, "can't cast '{}' to '{}'", .{ Cast.typ, expr_type });
+                    c.report_error(Cast.expr.line_info, "can't cast '{}' to '{}'", .{ expr_type, Cast.typ });
                     Compiler.exit(1);
                 }
                 expr.flags.is_const = Cast.expr.flags.is_const;
