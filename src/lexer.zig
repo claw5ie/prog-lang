@@ -1,383 +1,309 @@
-tokens: [LOOKAHEAD]Token = undefined,
-token_start: u8 = 0,
-token_count: u8 = 0,
-line_info: LineInfo = .{
-    .line = 1,
-    .column = 1,
-    .offset = 0,
-},
-filepath: [:0]const u8 = "<no file>",
-source_code: [:0]const u8 = "",
-allocator: Allocator,
-
 const std = @import("std");
 const utils = @import("utils.zig");
+const Compiler = @import("compiler.zig");
+
+const LineInfo = Compiler.LineInfo;
+const Token = Compiler.Lexer.Token;
+const LOOKAHEAD = Compiler.Lexer.LOOKAHEAD;
 
 const is_space = std.ascii.isWhitespace;
 const is_digit = std.ascii.isDigit;
 const is_alpha = std.ascii.isAlphabetic;
 const is_alnum = std.ascii.isAlphanumeric;
-const Allocator = std.mem.Allocator;
-const Lexer = @This();
+const is_print = std.ascii.isPrint;
 
-pub const LOOKAHEAD = 2;
-
-pub const LineInfo = struct {
-    line: u8,
-    column: u8,
-    offset: usize,
-};
-
-pub const Token = struct {
-    line_info: LineInfo,
-    as: Data,
-
-    pub const Tag = enum {
-        Or,
-        And,
-        Eq,
-        Neq,
-        Lt,
-        Leq,
-        Gt,
-        Geq,
-        Add,
-        Sub,
-        Mul,
-        Div,
-        Mod,
-
-        Not,
-        Open_Paren,
-        Close_Paren,
-        Semicolon,
-        Comma,
-
-        Bit_Size_Of,
-        Byte_Size_Of,
-        Type_Of,
-        As,
-        Cast,
-        Bool_Type,
-        Integer_Type,
-
-        Print,
-
-        Bool,
-        Integer,
-        Identifier,
-
-        End_Of_File,
-    };
-
-    pub const Data = union(Token.Tag) {
-        Or: void,
-        And: void,
-        Eq: void,
-        Neq: void,
-        Lt: void,
-        Leq: void,
-        Gt: void,
-        Geq: void,
-        Add: void,
-        Sub: void,
-        Mul: void,
-        Div: void,
-        Mod: void,
-        Not: void,
-        Open_Paren: void,
-        Close_Paren: void,
-        Semicolon: void,
-        Comma: void,
-        Bit_Size_Of: void,
-        Byte_Size_Of: void,
-        Type_Of: void,
-        As: void,
-        Cast: void,
-        Bool_Type: void,
-        Integer_Type: Integer,
-        Print: void,
-        Bool: bool,
-        Integer: u64,
-        Identifier: void,
-        End_Of_File: void,
-    };
-
-    pub const Integer = struct {
-        bits: u16,
-        is_signed: bool,
-    };
-};
-
-pub fn init(allocator: Allocator, filepath: [:0]const u8) Lexer {
-    const source_code = utils.read_entire_file(allocator, filepath) catch {
-        utils.eprint("error: couldn't open file '{s}'\n", .{filepath});
-        std.posix.exit(1);
-    };
-    return .{
-        .filepath = filepath,
-        .source_code = source_code,
-        .allocator = allocator,
-    };
+pub fn putback(c: *Compiler, tok: Token) void {
+    std.debug.assert(c.lexer.token_count < LOOKAHEAD);
+    c.lexer.token_start -%= 1;
+    c.lexer.token_start %= LOOKAHEAD;
+    c.lexer.token_count += 1;
+    c.lexer.buffer[c.lexer.token_start] = tok;
 }
 
-fn advance_line_info(lexer: *Lexer) void {
-    lexer.line_info.offset += 1;
-    lexer.line_info.column += 1;
-    if (lexer.source_code[lexer.line_info.offset - 1] == '\n') {
-        lexer.line_info.line += 1;
-        lexer.line_info.column = 1;
+pub fn grab(c: *Compiler) Token {
+    return grab_by_ptr(c, 0).*;
+}
+
+pub fn grab_line_info(c: *Compiler) LineInfo {
+    return grab_by_ptr(c, 0).line_info;
+}
+
+pub fn peek_ahead(c: *Compiler, index: u8) Token.Tag {
+    return grab_by_ptr(c, index).as;
+}
+
+pub fn peek(c: *Compiler) Token.Tag {
+    return peek_ahead(c, 0);
+}
+
+pub fn advance_many(c: *Compiler, count: u8) void {
+    c.lexer.token_start += count;
+    c.lexer.token_start %= LOOKAHEAD;
+    c.lexer.token_count -= count;
+}
+
+pub fn advance(c: *Compiler) void {
+    advance_many(c, 1);
+}
+
+pub fn expect(c: *Compiler, expected: Token.Tag) void {
+    if (peek(c) != expected) {
+        const tok = grab(c);
+        c.report_error(tok.line_info, "expected {s}", .{token_tag_to_text(expected)});
+        Compiler.exit(1);
+    }
+    advance(c);
+}
+
+fn grab_by_ptr(c: *Compiler, index: u8) *Token {
+    std.debug.assert(index < LOOKAHEAD);
+    while (index >= c.lexer.token_count) {
+        buffer_token(c);
+    }
+    return &c.lexer.buffer[(c.lexer.token_start + index) % LOOKAHEAD];
+}
+
+fn advance_line_info(c: *Compiler) void {
+    c.lexer.line_info.column += 1;
+    c.lexer.line_info.offset += 1;
+    if (c.source_code[c.lexer.line_info.offset - 1] == '\n') {
+        c.lexer.line_info.line += 1;
+        c.lexer.line_info.column = 1;
     }
 }
 
-fn buffer_token(lexer: *Lexer) void {
-    const text = lexer.source_code;
-    var i = lexer.line_info.offset;
+fn buffer_token(c: *Compiler) void {
+    var src = c.source_code[c.lexer.line_info.offset..];
+    var at: usize = 0;
+    var ch = src[at];
 
-    while (true) {
-        while (is_space(text[i])) : (i += 1) {
-            advance_line_info(lexer);
+    while (ch != 0) {
+        while (is_space(ch)) {
+            at += 1;
+            ch = src[at];
+            advance_line_info(c);
         }
 
-        if (text[i] == '/' and text[i + 1] == '/') {
-            while (text[i] != 0 and text[i] != '\n') : (i += 1) {
-                advance_line_info(lexer);
+        if (ch == '/' and src[at + 1] == '/') {
+            while (ch != 0 and ch != '\n') {
+                at += 1;
+                ch = src[at];
+                advance_line_info(c);
             }
         } else {
             break;
         }
     }
 
-    const old_i = i;
-    var token: Token = .{
-        .line_info = lexer.line_info,
+    src = src[at..];
+    at = 0;
+
+    var tok = Token{
+        .line_info = c.lexer.line_info,
         .as = .End_Of_File,
     };
 
-    if (text[i] == 0) {
-        // break;
-    } else if (is_digit(text[i])) {
+    if (ch == 0) {
+        // leave.
+    } else if (is_digit(ch)) {
         while (true) {
-            advance_line_info(lexer);
-            i += 1;
-
-            if (!is_digit(text[i])) {
-                break;
-            }
+            at += 1;
+            ch = src[at];
+            advance_line_info(c);
+            if (!is_digit(ch)) break;
         }
 
-        const string = text[old_i..i];
-        const value = std.fmt.parseInt(u64, string, 10) catch {
-            report_error(lexer, token.line_info, "value '{s}' can't fit in 64 bits", .{string});
-            std.posix.exit(1);
+        const text = src[0..at];
+        const value = std.fmt.parseInt(u64, text, 10) catch {
+            c.report_error(tok.line_info, "integer literal '{s}' is too big (> 64 bits).", .{text});
+            Compiler.exit(1);
         };
 
-        token.as = .{ .Integer = value };
-    } else if (is_alpha(text[i]) or text[i] == '_') {
+        tok.as = .{ .Integer = value };
+    } else if (is_alpha(ch) or ch == '_') {
         while (true) {
-            advance_line_info(lexer);
-            i += 1;
-
-            if (!is_alnum(text[i]) and text[i] != '_') {
-                break;
-            }
+            at += 1;
+            ch = src[at];
+            advance_line_info(c);
+            if (!is_alnum(ch) and ch != '_') break;
         }
 
         const Keyword = struct {
             text: []const u8,
-            as: Token.Data,
+            as: Token.As,
         };
 
-        const keywords = [_]Keyword{
-            .{ .text = "print", .as = .Print },
-            .{ .text = "false", .as = .{ .Bool = false } },
-            .{ .text = "true", .as = .{ .Bool = true } },
-            .{ .text = "bool", .as = .Bool_Type },
+        const state = struct {
+            pub const keywords = [_]Keyword{
+                .{ .text = "continue", .as = .Continue },
+                .{ .text = "switch", .as = .Switch },
+                .{ .text = "return", .as = .Return },
+                .{ .text = "struct", .as = .Struct },
+                .{ .text = "union", .as = .Union },
+                .{ .text = "while", .as = .While },
+                .{ .text = "break", .as = .Break },
+                .{ .text = "false", .as = .{ .Boolean = false } },
+                .{ .text = "alias", .as = .Alias },
+                .{ .text = "enum", .as = .Enum },
+                .{ .text = "proc", .as = .Proc },
+                .{ .text = "void", .as = .Void_Type },
+                .{ .text = "bool", .as = .Bool_Type },
+                .{ .text = "true", .as = .{ .Boolean = true } },
+                .{ .text = "null", .as = .Null },
+                .{ .text = "then", .as = .Then },
+                .{ .text = "else", .as = .Else },
+                .{ .text = "case", .as = .Case },
+                .{ .text = "if", .as = .If },
+                .{ .text = "do", .as = .Do },
+            };
         };
 
-        token.as = as: {
-            const string = text[old_i..i];
+        tok.as = as: {
+            const text = src[0..at];
 
-            if (string[0] == 'i' or string[0] == 'u') {
-                switch (string.len) {
+            if (text[0] == 'i' or text[0] == 'u') {
+                switch (text.len) {
                     2 => {
-                        if (string[1] != '0' and is_digit(string[1])) {
+                        if (is_digit(text[1])) {
                             break :as .{ .Integer_Type = .{
-                                .bits = string[1] - '0',
-                                .is_signed = string[0] == 'i',
+                                .bits = text[1] - '0',
+                                .is_signed = text[0] == 'i',
                             } };
                         }
                     },
                     3 => {
-                        if (string[1] != '0' and is_digit(string[1]) and is_digit(string[2])) {
-                            break :as .{ .Integer_Type = .{
-                                .bits = 10 * (string[1] - '0') + (string[2] - '0'),
-                                .is_signed = string[0] == 'i',
-                            } };
+                        if (is_digit(text[1]) and is_digit(text[2]) and text[1] != '0') {
+                            const bits = 10 * (text[1] - '0') + (text[2] - '0');
+                            if (bits <= 64) {
+                                break :as .{ .Integer_Type = .{
+                                    .bits = bits,
+                                    .is_signed = text[0] == 'i',
+                                } };
+                            }
                         }
                     },
                     else => {},
                 }
             }
 
-            for (keywords) |keyword| {
-                if (std.mem.eql(u8, keyword.text, string)) {
+            for (state.keywords) |keyword| {
+                if (std.mem.eql(u8, text, keyword.text)) {
                     break :as keyword.as;
                 }
             }
 
-            break :as .Identifier;
+            const new_text = c.string_pool.insert(text);
+
+            break :as .{ .Identifier = new_text };
         };
-    } else if (text.len >= 2 and text[i] == '#' and (is_alpha(text[i + 1]) or text[i + 1] == '_')) {
-        i += 1;
-        advance_line_info(lexer);
-
+    } else if (ch == '#' and (is_alpha(src[at + 1]) or src[at + 1] == '_')) {
         while (true) {
-            advance_line_info(lexer);
-            i += 1;
+            at += 1;
+            ch = src[at];
+            advance_line_info(c);
 
-            if (!is_alnum(text[i]) and text[i] != '_') {
-                break;
-            }
+            if (!is_alnum(ch) and ch != '_') break;
         }
 
-        const Keyword = struct {
+        const SpicyKeyword = struct {
             text: []const u8,
-            as: Token.Data,
+            as: Token.As,
         };
 
-        const keywords = [_]Keyword{
-            .{ .text = "byte_size_of", .as = .Byte_Size_Of },
-            .{ .text = "bit_size_of", .as = .Bit_Size_Of },
-            .{ .text = "type_of", .as = .Type_Of },
-            .{ .text = "cast", .as = .Cast },
-            .{ .text = "as", .as = .As },
+        const state = struct {
+            pub const keywords = [_]SpicyKeyword{
+                .{ .text = "#byte_size_of", .as = .Byte_Size_Of },
+                .{ .text = "#alignment_of", .as = .Alignment_Of },
+                .{ .text = "#type_of", .as = .Type_Of },
+                .{ .text = "#static", .as = .{ .Attribute = .{
+                    .is_static = true,
+                } } },
+                .{ .text = "#const", .as = .{ .Attribute = .{
+                    .is_const = true,
+                } } },
+                .{ .text = "#print", .as = .Print },
+                .{ .text = "#cast", .as = .Cast },
+                .{ .text = "#as", .as = .As },
+            };
         };
 
-        token.as = as: {
-            const string = text[old_i + 1 .. i];
+        const text = src[0..at];
 
-            for (keywords) |keyword| {
-                if (std.mem.eql(u8, keyword.text, string)) {
+        tok.as = as: {
+            for (state.keywords) |keyword| {
+                if (std.mem.eql(u8, text, keyword.text)) {
                     break :as keyword.as;
                 }
             }
 
-            report_error(lexer, token.line_info, "unrecognized directive '#{s}'", .{string});
-            std.posix.exit(1);
+            c.report_error(tok.line_info, "invalid keyword '{s}'\n", .{text});
+            Compiler.exit(1);
         };
+    } else if (!is_print(ch)) {
+        c.report_error(tok.line_info, "non-printable character with code '{}'\n", .{ch});
+        Compiler.exit(1);
     } else {
         const Symbol = struct {
             text: []const u8,
-            as: Token.Data,
+            as: Token.As,
         };
 
-        const symbols = [_]Symbol{
-            .{ .text = "||", .as = .Or },
-            .{ .text = "&&", .as = .And },
-            .{ .text = "==", .as = .Eq },
-            .{ .text = "!=", .as = .Neq },
-            .{ .text = "<=", .as = .Leq },
-            .{ .text = ">=", .as = .Geq },
-            .{ .text = "<", .as = .Lt },
-            .{ .text = ">", .as = .Gt },
-            .{ .text = "+", .as = .Add },
-            .{ .text = "-", .as = .Sub },
-            .{ .text = "*", .as = .Mul },
-            .{ .text = "/", .as = .Div },
-            .{ .text = "%", .as = .Mod },
-            .{ .text = "!", .as = .Not },
-            .{ .text = "(", .as = .Open_Paren },
-            .{ .text = ")", .as = .Close_Paren },
-            .{ .text = ";", .as = .Semicolon },
-            .{ .text = ",", .as = .Comma },
+        const state = struct {
+            pub const symbols = [_]Symbol{
+                .{ .text = "||", .as = .Or },
+                .{ .text = "&&", .as = .And },
+                .{ .text = "==", .as = .Eq },
+                .{ .text = "!=", .as = .Neq },
+                .{ .text = "<=", .as = .Leq },
+                .{ .text = ">=", .as = .Geq },
+                .{ .text = ":=", .as = .Colon_Equal },
+                .{ .text = "<", .as = .Lt },
+                .{ .text = ">", .as = .Gt },
+                .{ .text = "+", .as = .Add },
+                .{ .text = "-", .as = .Sub },
+                .{ .text = "*", .as = .Mul },
+                .{ .text = "/", .as = .Div },
+                .{ .text = "%", .as = .Mod },
+                .{ .text = "&", .as = .Ref },
+                .{ .text = "^", .as = .Deref },
+                .{ .text = "!", .as = .Not },
+                .{ .text = "(", .as = .Open_Paren },
+                .{ .text = ")", .as = .Close_Paren },
+                .{ .text = "{", .as = .Open_Curly },
+                .{ .text = "}", .as = .Close_Curly },
+                .{ .text = "[", .as = .Open_Bracket },
+                .{ .text = "]", .as = .Close_Bracket },
+                .{ .text = ":", .as = .Colon },
+                .{ .text = ";", .as = .Semicolon },
+                .{ .text = "=", .as = .Equal },
+                .{ .text = ".", .as = .Dot },
+                .{ .text = ",", .as = .Comma },
+            };
         };
 
-        const string = text[old_i..];
-        var found = false;
-
-        for (symbols) |symbol| {
-            if (utils.is_prefix(symbol.text, string)) {
-                const count: u8 = @intCast(symbol.text.len);
-                i += count;
-                lexer.line_info.offset += count;
-                lexer.line_info.column += count;
-
-                token.as = symbol.as;
-                found = true;
-                break;
+        tok.as = as: {
+            for (state.symbols) |symbol| {
+                if (utils.is_prefix(symbol.text, src)) {
+                    const count: u32 = @intCast(symbol.text.len);
+                    at += count;
+                    c.lexer.line_info.column += count;
+                    c.lexer.line_info.offset += count;
+                    break :as symbol.as;
+                }
             }
-        }
 
-        if (!found) {
-            report_error(lexer, token.line_info, "unexpected character '{c}'", .{text[i]});
-            std.posix.exit(1);
-        }
+            c.report_error(tok.line_info, "unrecognized character '{c}'\n", .{src[at]});
+            Compiler.exit(1);
+        };
     }
 
-    std.debug.assert(lexer.token_count < LOOKAHEAD);
-    const index = (lexer.token_start + lexer.token_count) % LOOKAHEAD;
-    lexer.tokens[index] = token;
-    lexer.token_count += 1;
+    std.debug.assert(c.lexer.token_count < LOOKAHEAD);
+    const index = (c.lexer.token_start + c.lexer.token_count) % LOOKAHEAD;
+    c.lexer.buffer[index] = tok;
+    c.lexer.token_count += 1;
 }
 
-fn take_by_ptr(lexer: *Lexer, index: u8) *Token {
-    std.debug.assert(index < LOOKAHEAD);
-
-    while (index >= lexer.token_count) {
-        buffer_token(lexer);
-    }
-
-    return &lexer.tokens[(lexer.token_start + index) % LOOKAHEAD];
-}
-
-pub fn take_ahead(lexer: *Lexer, index: u8) Token {
-    const ptr = take_by_ptr(lexer, index);
-    advance_many(lexer, index + 1);
-    return ptr.*;
-}
-
-pub fn take(lexer: *Lexer) Token {
-    return take_ahead(lexer, 0);
-}
-
-pub fn putback(lexer: *Lexer, token: Token) void {
-    std.debug.assert(lexer.token_count < LOOKAHEAD);
-    lexer.token_start -%= 1;
-    lexer.token_start %= LOOKAHEAD;
-    lexer.token_count += 1;
-    lexer.tokens[lexer.token_start] = token;
-}
-
-pub fn peek_ahead(lexer: *Lexer, index: u8) Token.Tag {
-    const ptr = take_by_ptr(lexer, index);
-    return ptr.as;
-}
-
-pub fn peek(lexer: *Lexer) Token.Tag {
-    return peek_ahead(lexer, 0);
-}
-
-pub fn advance_many(lexer: *Lexer, count: u8) void {
-    std.debug.assert(count <= LOOKAHEAD);
-    lexer.token_start += count;
-    lexer.token_start %= LOOKAHEAD;
-    lexer.token_count -= count;
-}
-
-pub fn advance(lexer: *Lexer) void {
-    advance_many(lexer, 1);
-}
-
-pub fn expect(lexer: *Lexer, tag: Token.Tag) void {
-    const token = take(lexer);
-    if (token.as != tag) {
-        report_error(lexer, token.line_info, "expected {s}", .{to_token_tag_name(tag)});
-        std.posix.exit(1);
-    }
-}
-
-fn to_token_tag_name(tag: Token.Tag) []const u8 {
+fn token_tag_to_text(tag: Token.Tag) []const u8 {
     return switch (tag) {
         .Or => "'||'",
         .And => "'&&'",
@@ -392,26 +318,55 @@ fn to_token_tag_name(tag: Token.Tag) []const u8 {
         .Mul => "'*'",
         .Div => "'/'",
         .Mod => "'%'",
+
+        .Ref => "'&'",
+        .Deref => "'^'",
         .Not => "'!'",
         .Open_Paren => "'('",
         .Close_Paren => "')'",
+        .Open_Curly => "'{'",
+        .Close_Curly => "'}'",
+        .Open_Bracket => "'['",
+        .Close_Bracket => "']'",
+        .Colon_Equal => "':='",
+        .Colon => "':'",
         .Semicolon => "';'",
+        .Dot => "'.'",
         .Comma => "','",
-        .Bit_Size_Of => "'#bit_size_of'",
-        .Byte_Size_Of => "'#byte_size_of'",
-        .Type_Of => "'#type_of'",
-        .As => "'#as'",
+        .Equal => "'='",
+
+        .Byte_Size_Of => "#byte_size_of",
+        .Alignment_Of => "#alignment_of",
+        .As => "#as",
         .Cast => "'#cast'",
-        .Bool_Type => "'bool'",
-        .Integer_Type => "integer type",
-        .Print => "'print'",
-        .Bool => "boolean literal",
+        .Boolean => "boolean literal",
         .Integer => "integer literal",
         .Identifier => "identifier",
+        .Null => "'null'",
+
+        .Struct => "'struct'",
+        .Union => "'union'",
+        .Enum => "'enum'",
+        .Proc => "'proc'",
+        .Integer_Type => "integer type",
+        .Bool_Type => "'bool'",
+        .Void_Type => "'void'",
+        .Type_Of => "#type_of",
+
+        .Attribute => "attribute",
+        .Print => "'#print'",
+        .If => "'if'",
+        .Then => "'then'",
+        .Else => "'else'",
+        .While => "'while'",
+        .Do => "'do'",
+        .Break => "'break'",
+        .Continue => "'continue'",
+        .Switch => "'switch'",
+        .Return => "'return'",
+        .Alias => "'alias'",
+        .Case => "'case'",
+
         .End_Of_File => "EOF",
     };
-}
-
-fn report_error(lexer: *Lexer, line_info: LineInfo, comptime format: []const u8, args: anytype) void {
-    utils.eprint("{s}:{}:{}: error: " ++ format ++ "\n", .{ lexer.filepath, line_info.line, line_info.column } ++ args);
 }
