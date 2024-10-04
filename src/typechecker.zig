@@ -66,6 +66,10 @@ fn typecheck_top_level(c: *Compiler) void {
         c.report_error(.{ .line = 1, .column = 1, .offset = 0 }, "'main' isn't defined", .{});
         Compiler.exit(1);
     }
+
+    if (c.had_error) {
+        Compiler.exit(1);
+    }
 }
 
 // Expression is not struct/union/array.
@@ -749,7 +753,7 @@ fn typecheck_expr(c: *Compiler, expr: *Ast.Expr) TypecheckExprResult {
                             !safe_cast(c, Binary_Op.rhs, rhs_type, Ast.bool_type))
                         {
                             c.report_error(Binary_Op.line_info, "mismatched types: '{}' and '{}'", .{ lhs_type, rhs_type });
-                            Compiler.exit(1);
+                            break :result .{ .typ = Ast.bool_type, .tag = .Value };
                         }
 
                         switch (Binary_Op.tag) {
@@ -795,10 +799,8 @@ fn typecheck_expr(c: *Compiler, expr: *Ast.Expr) TypecheckExprResult {
                     .Eq, .Neq => {
                         if (!lhs_flags.is_comparable or !rhs_flags.is_comparable) { // TODO: only one side needs to be comparable?
                             c.report_error(Binary_Op.line_info, "errror messages suuuuuuuuuuuuuuuuuck. One of the {}/{} is not comparable", .{ lhs_type, rhs_type });
-                            Compiler.exit(1);
                         } else if (!symetric_safe_cast(c, Binary_Op.lhs, lhs_type, Binary_Op.rhs, rhs_type)) {
                             c.report_error(Binary_Op.line_info, "mismatched types: '{}' and '{}'", .{ lhs_type, rhs_type });
-                            Compiler.exit(1);
                         }
 
                         break :result .{ .typ = Ast.bool_type, .tag = .Value };
@@ -806,10 +808,8 @@ fn typecheck_expr(c: *Compiler, expr: *Ast.Expr) TypecheckExprResult {
                     .Lt, .Leq, .Gt, .Geq => {
                         if (!lhs_flags.is_ordered or !rhs_flags.is_ordered) {
                             c.report_error(Binary_Op.line_info, "expression of type '{}' is not comparable", .{lhs_type});
-                            Compiler.exit(1);
                         } else if (!symetric_safe_cast(c, Binary_Op.lhs, lhs_type, Binary_Op.rhs, rhs_type)) {
                             c.report_error(Binary_Op.line_info, "mismatched types: '{}' and '{}'", .{ lhs_type, rhs_type });
-                            Compiler.exit(1);
                         }
 
                         break :result .{ .typ = Ast.bool_type, .tag = .Value };
@@ -884,7 +884,6 @@ fn typecheck_expr(c: *Compiler, expr: *Ast.Expr) TypecheckExprResult {
                     .Not => {
                         if (!safe_cast(c, Unary_Op.subexpr, subexpr_type, Ast.bool_type)) {
                             c.report_error(Unary_Op.subexpr.line_info, "expected 'bool', but got '{}'", .{subexpr_type});
-                            Compiler.exit(1);
                         }
 
                         break :result .{ .typ = Ast.bool_type, .tag = .Value };

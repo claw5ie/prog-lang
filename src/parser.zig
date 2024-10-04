@@ -1264,7 +1264,7 @@ fn parse_expr_highest_prec(c: *Compiler) *Ast.Expr {
 
                 var typ: Ast.Type = undefined;
                 if (!try_parse_type_by_value(c, &typ)) {
-                    c.report_error(tok.line_info, "token doesn't start an expression.", .{});
+                    c.report_error(tok.line_info, "token doesn't start an expression", .{});
                     Compiler.exit(1);
                 }
 
