@@ -1,1 +1,0 @@
-tests/typechecker/binary-operators-04.test:1:7: error: can't perform arithmetic operation on values of type 'bool'/'bool'

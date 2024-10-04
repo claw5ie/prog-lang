@@ -1,9 +1,9 @@
-1 || false;
-true && 42;
-42 || 69;
-42 == false;
-false != 42;
-42 < false;
-false >= 42;
-42 > false;
-false <= 42;
+main: proc() void
+{
+  true && 42;
+  42 || 69;
+  42 < false;
+  false >= 42;
+  42 > false;
+  false <= 42;
+}

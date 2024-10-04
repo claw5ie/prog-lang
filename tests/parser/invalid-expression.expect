@@ -1,1 +1,1 @@
-tests/parser/invalid-expression.test:1:1: error: token doesn't start an expression
+tests/parser/invalid-expression.prog:3:3: error: token doesn't start an expression

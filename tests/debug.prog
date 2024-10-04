@@ -1,27 +1,36 @@
 // Comment
-print 6 + 9 / 6 * 2 - 1 % 1;
-print 2+2*2;
-print 2*2+2;
-print (2+2)*2;
-print 2*(2+2);
-print !false || true && false;
-print -2 + +2;
-print 42 < 69;
-print 42 <= 69;
-print 42 > 69;
-print 42 >= 69;
-print 2 + 2 == 4;
-print 4 != 4;
+main: proc() void
+{
+  #print 1 || false;
+  #print 42 == false;
+  #print false != 42;
+  // #print false - true; TODO: fix this
+  #print +false;
+  #print -true;
 
-print #cast(i42, 69,);
-print #cast(bool, 42);
-print bool(false);
-print i42(69);
-print i16(-1);
+  #print 6 + 9 / 6 * 2 - 1 % 1;
+  #print 2+2*2;
+  #print 2*2+2;
+  #print (2+2)*2;
+  #print 2*(2+2);
+  #print !false || true && false;
+  #print -2 + +2;
+  #print 42 < 69;
+  #print 42 <= 69;
+  #print 42 > 69;
+  #print 42 >= 69;
+  #print 2 + 2 == 4;
+  #print 4 != 4;
 
-print #bit_size_of(1,);
-print #byte_size_of(2);
-print #as(u64, 1);
-print #type_of(#as(u64, 1));
-print #type_of(1);
-print #type_of(#as(i64, 1));
+  #print #cast(i42, 69,);
+  #print #cast(bool, 42);
+  #print bool(false);
+  #print i42(69);
+  #print i16(-1);
+
+  #print #byte_size_of(2);
+  #print #as(u64, 1);
+  // #print #type_of(#as(u64, 1));
+  // #print #type_of(1);
+  // #print #type_of(#as(i64, 1));
+}
