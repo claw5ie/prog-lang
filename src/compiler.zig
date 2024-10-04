@@ -34,7 +34,8 @@ pub var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
 pub var gpa = general_purpose_allocator.allocator();
 
 const Options = struct {
-    has_filepath: ?[:0]const u8 = null,
+    has_input_filepath: ?[:0]const u8 = null,
+    has_output_filepath: ?[:0]const u8 = null,
     mode: Mode = .Build,
 
     const Mode = enum {
@@ -1377,17 +1378,32 @@ pub fn compile() void {
     const options = parse_cmd_options();
     switch (options.mode) {
         .Build => {
-            parse(&c, options.has_filepath.?);
+            var buffer = [1]u8{0} ** (std.posix.PATH_MAX);
+            const input_filepath = options.has_input_filepath.?;
+            const output_filepath: [:0]const u8 = output_filepath: {
+                if (options.has_output_filepath) |path| {
+                    @memcpy(buffer[0..path.len], path);
+                    buffer[path.len] = 0;
+                    break :output_filepath buffer[0..path.len :0];
+                } else {
+                    const extension: []const u8 = ".irc\x00";
+                    @memcpy(buffer[0..input_filepath.len], input_filepath);
+                    @memcpy(buffer[input_filepath.len .. input_filepath.len + extension.len], extension);
+                    break :output_filepath buffer[0 .. input_filepath.len + extension.len - 1 :0];
+                }
+            };
+
+            parse(&c, input_filepath);
             typecheck(&c);
             generate_irc(&c);
-            write_irc(&c, options.has_filepath.?);
+            write_irc(&c, output_filepath);
         },
         .Run => {
-            read_irc(&c, options.has_filepath.?);
+            read_irc(&c, options.has_input_filepath.?);
             interpret(&c);
         },
         .Print => {
-            read_irc(&c, options.has_filepath.?);
+            read_irc(&c, options.has_input_filepath.?);
             c.irc.print();
         },
     }
@@ -1396,15 +1412,8 @@ pub fn compile() void {
 }
 
 fn write_irc(c: *Compiler, filepath: [:0]const u8) void {
-    var filepath_buffer: [1024]u8 = undefined;
-
-    // TODO: Abolish magic numbers!
-    std.debug.assert(filepath.len < filepath_buffer.len);
-    @memcpy(filepath_buffer[0..filepath.len], filepath);
-    @memcpy(filepath_buffer[filepath.len .. filepath.len + 5], ".irc\x00");
-
     const fd = std.posix.open(
-        filepath_buffer[0 .. filepath.len + 4 :0],
+        filepath,
         .{
             .ACCMODE = .WRONLY,
             .CREAT = true,
@@ -1486,6 +1495,17 @@ fn parse_cmd_options() Options {
                         activated_modes_count += 1;
                         options.mode = .Print;
                     },
+                    'o' => {
+                        if (options.has_output_filepath) |path| {
+                            had_error = true;
+                            eprint("error: output filepath was already provided ('{s}')\n", .{path});
+                        } else if (args.next()) |path| {
+                            options.has_output_filepath = path;
+                        } else {
+                            had_error = true;
+                            eprint("error: expected argument for '-o' option\n", .{});
+                        }
+                    },
                     else => {
                         had_error = true;
                         eprint("error: unrecognized option '{s}'\n", .{arg});
@@ -1493,11 +1513,11 @@ fn parse_cmd_options() Options {
                 }
             }
         } else {
-            if (options.has_filepath) |filepath| {
+            if (options.has_input_filepath) |filepath| {
                 had_error = true;
                 eprint("error: filepath was already given ('{s}')\n", .{filepath});
             } else {
-                options.has_filepath = arg;
+                options.has_input_filepath = arg;
             }
         }
     }
@@ -1507,7 +1527,7 @@ fn parse_cmd_options() Options {
         eprint("error: only one options needs to be enabled\n", .{});
     }
 
-    if (options.has_filepath == null) {
+    if (options.has_input_filepath == null) {
         had_error = true;
         eprint("error: no file supplied\n", .{});
     }
