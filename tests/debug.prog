@@ -4,7 +4,7 @@ main: proc() void
   #print 1 || false;
   #print 42 == false;
   #print false != 42;
-  // #print false - true; TODO: fix this
+  #print true - false;
   #print +false;
   #print -true;
 

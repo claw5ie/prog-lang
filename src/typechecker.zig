@@ -1437,10 +1437,6 @@ fn reject_symbol(c: *Compiler, stmt: *Ast.Stmt) void {
 }
 
 fn safe_cast_two_integers(c: *Compiler, lhs: *Ast.Expr, lhs_type: *Ast.Type, rhs: *Ast.Expr, rhs_type: *Ast.Type) ?*Ast.Type {
-    if (lhs_type.equal(rhs_type)) {
-        return lhs_type;
-    }
-
     const casted_lhs = safe_cast_to_integer(c, lhs, lhs_type, .Both);
     const casted_rhs = safe_cast_to_integer(c, rhs, rhs_type, .Both);
 
@@ -1450,6 +1446,11 @@ fn safe_cast_two_integers(c: *Compiler, lhs: *Ast.Expr, lhs_type: *Ast.Type, rhs
 
     const new_lhs_type = casted_lhs.?;
     const new_rhs_type = casted_rhs.?;
+
+    if (new_lhs_type.equal(new_rhs_type)) {
+        return new_lhs_type;
+    }
+
     const lInteger = &new_lhs_type.data.as.Integer;
     const rInteger = &new_rhs_type.data.as.Integer;
 
