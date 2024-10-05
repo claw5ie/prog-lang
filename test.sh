@@ -84,6 +84,10 @@ test_all()
             echo -e "${red}missing expected output${reset}"
         fi
     done
+
+    if [ -e ${output_filepath} ]; then
+        rm ${output_filepath}
+    fi
 }
 
 test_all "$parser_tests" test_error
