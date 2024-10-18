@@ -1,11 +1,12 @@
 const std = @import("std");
 const utils = @import("utils.zig");
 const Compiler = @import("compiler.zig");
-const IRCGen = @import("irc-generator.zig");
+const IRGen = @import("irc-generator.zig");
 const Interpreter = @import("interpreter.zig");
 
 const Ast = Compiler.Ast;
-const IRC = Compiler.IRC;
+const IR = Compiler.IR;
+const IRE = IR.Encoded;
 const Alignment = utils.Alignment;
 
 const TypecheckExprResult = struct {
@@ -72,44 +73,6 @@ fn typecheck_top_level(c: *Compiler) void {
     }
 }
 
-// Expression is not struct/union/array.
-fn compute_simple_expr(c: *Compiler, expr: *Ast.Expr) u64 {
-    if (!expr.flags.is_const) {
-        c.report_error(expr.line_info, "expression is not constant", .{});
-        Compiler.exit(1);
-    }
-
-    const old_ircgen = c.ircgen;
-
-    const src = IRCGen.generate_irc_rvalue(c, null, expr);
-    c.irc.label_count = c.ircgen.next_label;
-    c.irc.globals_count = c.ircgen.next_global;
-    Interpreter.interpret(c);
-    const value = Interpreter.grab_value_from_rvalue(c, src, expr.typ.is_signed());
-
-    c.ircgen = old_ircgen;
-    c.irc.instrs.clearRetainingCapacity();
-
-    return value;
-}
-
-fn compute_global_expr(c: *Compiler, dst: IRC.Lvalue, expr: *Ast.Expr) void {
-    if (!expr.flags.is_const) {
-        c.report_error(expr.line_info, "expression is not constant", .{});
-        Compiler.exit(1);
-    }
-
-    const old_ircgen = c.ircgen;
-
-    _ = IRCGen.generate_irc_rvalue(c, dst, expr);
-    c.irc.label_count = c.ircgen.next_label;
-    c.irc.globals_count = c.ircgen.next_global;
-    Interpreter.interpret(c);
-
-    c.ircgen = old_ircgen;
-    c.irc.instrs.clearRetainingCapacity();
-}
-
 fn typecheck_symbol_type(c: *Compiler, symbol: *Ast.Symbol) void {
     switch (symbol.as) {
         .Variable => |Variable| {
@@ -169,7 +132,7 @@ fn typecheck_symbol(c: *Compiler, symbol: *Ast.Symbol) void {
         .Variable => |*Variable| {
             if (Variable.typ) |typ| {
                 if (symbol.attributes.is_static or symbol.attributes.is_const) {
-                    Variable.storage = IRCGen.grab_global_from_type(c, typ.data).as_lvalue();
+                    Variable.storage = IRGen.grab_global_from_type(c, typ.data);
                 }
 
                 if (Variable.value) |value| {
@@ -184,7 +147,7 @@ fn typecheck_symbol(c: *Compiler, symbol: *Ast.Symbol) void {
 
                     if (symbol.attributes.is_global or symbol.attributes.is_const) {
                         if (value.flags.is_const) {
-                            compute_global_expr(c, Variable.storage, value);
+                            Interpreter.compute_expr_to_operand(c, Variable.storage, value);
                         } else {
                             c.report_error(value.line_info, "expression is not a constant", .{});
                             Compiler.exit(1);
@@ -197,12 +160,12 @@ fn typecheck_symbol(c: *Compiler, symbol: *Ast.Symbol) void {
 
                 Variable.typ = value_type;
                 if (symbol.attributes.is_static or symbol.attributes.is_const) {
-                    Variable.storage = IRCGen.grab_global_from_type(c, value_type.data).as_lvalue();
+                    Variable.storage = IRGen.grab_global_from_type(c, value_type.data);
                 }
 
                 if (symbol.attributes.is_global or symbol.attributes.is_const) {
                     if (value.flags.is_const) {
-                        compute_global_expr(c, Variable.storage, value);
+                        Interpreter.compute_expr_to_operand(c, Variable.storage, value);
                     } else {
                         c.report_error(value.line_info, "expression is not a constant", .{});
                         Compiler.exit(1);
@@ -473,7 +436,7 @@ fn typecheck_type(c: *Compiler, typ: *Ast.Type) void {
                         },
                         else => unreachable,
                     }
-                    next_value = compute_simple_expr(c, value);
+                    next_value = Interpreter.compute_simple_expr(c, value);
                     enum_field.computed_value = next_value;
                 } else {
                     enum_field.computed_value = next_value;
@@ -526,7 +489,7 @@ fn typecheck_type(c: *Compiler, typ: *Ast.Type) void {
                 Compiler.exit(1);
             }
 
-            const count = compute_simple_expr(c, Array.size);
+            const count = Interpreter.compute_simple_expr(c, Array.size);
             Array.computed_size = count;
             data.byte_size = count * Array.subtype.data.byte_size;
             data.alignment = Array.subtype.data.alignment;
@@ -644,7 +607,7 @@ fn typecheck_stmt(c: *Compiler, stmt: *Ast.Stmt) void {
                                 Compiler.exit(1);
                             }
 
-                            const value = compute_simple_expr(c, case.value);
+                            const value = Interpreter.compute_simple_expr(c, case.value);
                             case.value.as = .{
                                 .Integer = value,
                             };

@@ -2,8 +2,8 @@ lexer: Lexer,
 parser: Parser,
 ast: Ast,
 typechecker: Typechecker,
-ircgen: IRCGenerator,
-irc: IRC,
+irgen: IRGenerator,
+ir: IR,
 interp: Interpreter,
 
 symbol_table: SymbolTable,
@@ -20,6 +20,7 @@ const utils = @import("utils.zig");
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const Alignment = utils.Alignment;
+pub const ByteList = std.ArrayList(u8);
 pub const oprint = utils.oprint;
 pub const eprint = utils.eprint;
 pub const exit = utils.exit;
@@ -259,7 +260,7 @@ pub const Ast = struct {
         .shallow_check = .None,
         .void_array_check = .None,
         .full_check = .None,
-        .irc_generation = .None,
+        .ir_generation = .None,
     };
 
     pub const default_stages_done = Ast.Type.Stages{
@@ -267,7 +268,7 @@ pub const Ast = struct {
         .shallow_check = .Done,
         .void_array_check = .Done,
         .full_check = .Done,
-        .irc_generation = .None,
+        .ir_generation = .None,
     };
 
     pub const Scope = struct {
@@ -453,7 +454,7 @@ pub const Ast = struct {
 
         pub const SharedData = struct {
             as: As,
-            byte_size: u64,
+            byte_size: u64, // TODO: create alias for this type.
             alignment: Alignment,
             stages: Stages,
         };
@@ -523,7 +524,7 @@ pub const Ast = struct {
             shallow_check: Stage,
             void_array_check: Stage,
             full_check: Stage,
-            irc_generation: Stage,
+            ir_generation: Stage,
         };
     };
 
@@ -727,20 +728,20 @@ pub const Ast = struct {
         pub const Variable = struct {
             typ: ?*Type,
             value: ?*Expr,
-            storage: IRC.Lvalue,
+            storage: IR.Encoded.Operand,
         };
 
         pub const Parameter = struct {
             typ: *Type,
             value: ?*Expr,
-            storage: IRC.Lvalue,
+            storage: IR.Encoded.Operand,
         };
 
         pub const Procedure = struct {
             typ: *Type,
             block: StmtList,
-            start_label: IRC.Label,
-            end_label: IRC.Label,
+            start_label: IR.Encoded.Label,
+            end_label: IR.Encoded.Label,
         };
 
         pub const StructField = struct {
@@ -819,347 +820,709 @@ pub const Typechecker = struct {
     is_in_loop: bool,
 };
 
-pub const IRC = struct {
-    instrs: InstrList,
-    label_count: u64,
-    globals_count: u64,
+pub const IR = struct {
+    instrs: ByteList,
+    globals: ByteList,
 
-    // Size of return pointer + IP + rbp
-    pub const FIRST_PARAM_OFFSET = 8 + 8 + 8;
+    // Stuff needed to generate IR instructions.
+    pub const Encoded = struct {
+        // Size of return pointer + IP + rbp
+        pub const FIRST_PARAM_OFFSET = 8 + 8 + 8;
 
-    pub const Instr = union(enum) {
-        Print: Instr.Print,
-        Binary_Op: Instr.BinaryOp,
-        Unary_Op: Instr.UnaryOp,
-        Jmp: Label,
-        Jmpc: Instr.Jmpc,
-        Setnz: Instr.Setnz,
-        Mov: Instr.Mov,
-        Movsx: Instr.Movsx,
-        Call: Instr.Call,
-        Push: Rvalue,
-        Pop: u64,
-        Ret0: Label,
-        Ret1: Instr.Ret1,
-        GFB: Instr.GF,
-        GFE: Instr.GF,
-        Label: Label,
-        Exit: void,
+        pub const Label = u64;
 
-        pub const Print = union(enum) {
-            Pointer: Rvalue,
-            Integer: struct {
-                src: Rvalue,
-                is_signed: bool,
+        pub const Tmp = Decoded.Tmp;
+
+        pub const Operand = union(enum) {
+            Tmp: packed struct {
+                offset: Tmp.OffsetType,
+                pad: SizeType = 0,
+                tag: Tmp.Tag,
+                size: u64,
             },
-            Boolean: Rvalue,
+            Mem: packed struct {
+                base: Tmp,
+                offset: u64,
+                size: u64,
+            },
+            Addr_T: packed struct {
+                offset: Tmp.OffsetType,
+                pad: SizeType = 0,
+                tag: Tmp.Tag,
+            },
+            Addr_M: packed struct {
+                base: Tmp,
+                offset: u64,
+            },
+            Imm: u64,
+            Label: Label,
+
+            pub const SizeType = Decoded.Operand.SizeType;
+
+            pub fn grab_size(op: Operand) u64 {
+                return switch (op) {
+                    .Tmp => |tmp| tmp.size,
+                    .Mem => |mem| mem.size,
+                    .Addr_T,
+                    .Addr_M,
+                    .Imm,
+                    .Label,
+                    => unreachable,
+                };
+            }
+
+            pub fn grab_size_no_fail(op: Operand) u64 {
+                return switch (op) {
+                    .Tmp => |tmp| tmp.size,
+                    .Mem => |mem| mem.size,
+                    .Addr_T,
+                    .Addr_M,
+                    .Imm,
+                    .Label,
+                    => 8,
+                };
+            }
+
+            pub fn is_lvalue(op: Operand) bool {
+                return switch (op) {
+                    .Tmp,
+                    .Mem,
+                    => true,
+                    .Addr_T,
+                    .Addr_M,
+                    .Imm,
+                    .Label,
+                    => false,
+                };
+            }
+
+            pub fn bump(op: Operand, offset: u64, size: u64) Operand {
+                var r = op;
+
+                switch (r) {
+                    .Tmp => |*tmp| {
+                        tmp.offset += @intCast(offset);
+                        tmp.size = size;
+                    },
+                    .Mem => |*mem| {
+                        mem.offset += offset;
+                        mem.size = size;
+                    },
+                    .Addr_T,
+                    .Addr_M,
+                    .Imm,
+                    .Label,
+                    => unreachable,
+                }
+
+                return r;
+            }
+
+            pub fn addr_of(op: Operand) Operand {
+                switch (op) {
+                    .Tmp => |tmp| {
+                        return .{ .Addr_T = .{
+                            .offset = tmp.offset,
+                            .tag = tmp.tag,
+                        } };
+                    },
+                    .Mem => |mem| {
+                        return .{ .Addr_M = .{
+                            .base = mem.base,
+                            .offset = mem.offset,
+                        } };
+                    },
+                    .Addr_T,
+                    .Addr_M,
+                    .Imm,
+                    .Label,
+                    => unreachable,
+                }
+            }
+
+            pub fn mem_from_tmp(op: Operand, offset: u64, size: u64) Operand {
+                const tmp = &op.Tmp;
+                return .{ .Mem = .{
+                    .base = .{
+                        .offset = tmp.offset,
+                        .size_minus_one = @intCast(tmp.size - 1),
+                        .tag = tmp.tag,
+                    },
+                    .offset = offset,
+                    .size = size,
+                } };
+            }
+
+            pub fn decode(op: Operand) Decoded.Operand {
+                return switch (op) {
+                    .Tmp => |tmp| .{ .Tmp = .{
+                        .offset = tmp.offset,
+                        .size_minus_one = @intCast(tmp.size - 1),
+                        .tag = tmp.tag,
+                    } },
+                    .Mem => |mem| if (mem.offset != 0)
+                        .{ .Mem_BO = .{
+                            .base = mem.base,
+                            .offset = mem.offset,
+                            .size_minus_one = @intCast(mem.size - 1),
+                        } }
+                    else
+                        .{ .Mem_B = .{
+                            .base = mem.base,
+                            .size_minus_one = @intCast(mem.size - 1),
+                        } },
+                    .Addr_T => |tmp| .{ .Addr_T = .{
+                        .offset = tmp.offset,
+                        .tag = tmp.tag,
+                    } }, // Could memcpy/reinterpet as u64?
+                    .Addr_M => |mem| if (mem.offset != 0)
+                        .{ .Addr_BO = .{
+                            .base = mem.base,
+                            .offset = mem.offset,
+                        } }
+                    else
+                        .{ .Tmp = mem.base },
+                    .Imm => |imm| .{ .Imm = imm },
+                    .Label => |label| .{ .Label = label },
+                };
+            }
         };
 
-        pub const BinaryOp = struct {
-            dst: Lvalue,
-            src0: Rvalue,
-            src1: Rvalue,
+        pub const Opcode = Decoded.Opcode;
+
+        pub const Instr = struct {
+            opcode: Opcode,
+            ops: [3]Operand,
+            ops_count: u8,
+        };
+    };
+
+    // Stuff needed to decode IR instructions.
+    pub const Decoded = struct {
+        pub const Tmp = packed struct {
+            offset: OffsetType,
+            size_minus_one: Operand.SizeType,
             tag: Tag,
-            is_signed: bool,
 
-            pub const Tag = enum {
-                Eq,
-                Neq,
-                Lt,
-                Leq,
-                Gt,
-                Geq,
-                Add,
-                Sub,
-                Mul,
-                Div,
-                Mod,
+            pub const Tag = enum(u2) {
+                Relative = 0,
+                Global = 1,
+                Absolute = 2,
             };
-        };
 
-        pub const UnaryOp = struct {
-            dst: Lvalue,
-            src: Rvalue,
-            tag: Tag,
-            is_signed: bool,
+            pub const OffsetType = i59;
 
-            pub const Tag = enum {
-                Neg,
-                Not,
-            };
-        };
-
-        pub const Jmpc = struct {
-            src0: Rvalue,
-            src1: Rvalue,
-            label: Label,
-            tag: Tag,
-            is_signed: bool,
-
-            pub const Tag = enum {
-                Eq,
-                Neq,
-                Lt,
-                Leq,
-                Gt,
-                Geq,
-            };
-        };
-
-        pub const Setnz = struct {
-            dst: Lvalue,
-            src: Rvalue,
-        };
-
-        pub const Mov = struct {
-            dst: Lvalue,
-            src: Rvalue,
-        };
-
-        pub const Movsx = struct {
-            dst: Lvalue,
-            src: Rvalue,
-            src_bits: u8,
-        };
-
-        pub const Call = struct {
-            dst: Lvalue,
-            src: Rvalue,
-        };
-
-        pub const Ret1 = struct {
-            dst: Lvalue,
-            src: Rvalue,
-            label: Label,
-        };
-
-        pub const GF = struct {
-            label: Label,
-            stack_space_used: u64,
-        };
-    };
-
-    pub const Label = u64;
-
-    pub const Offset = union(enum) {
-        Local: i64,
-        Global: u64,
-    };
-
-    pub const Tmp = struct {
-        offset: Offset,
-        size: u64,
-
-        pub fn format(tmp: Tmp, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-            switch (tmp.offset) {
-                .Local => |offset| {
-                    try writer.print("%({}B,{})", .{ tmp.size, offset });
-                },
-                .Global => |offset| {
-                    try writer.print("$({}B,{})", .{ tmp.size, offset });
-                },
+            pub fn format(tmp: Tmp, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+                try writer.print("{c}({}, {})", .{
+                    @as(u8, switch (tmp.tag) {
+                        .Relative => 'r',
+                        .Global => 'g',
+                        .Absolute => 'a',
+                    }),
+                    @as(u64, tmp.size_minus_one) + 1,
+                    tmp.offset,
+                });
             }
-        }
+        };
 
-        pub fn as_lvalue(tmp: Tmp) Lvalue {
-            return .{ .Tmp = tmp };
-        }
+        pub const Operand = union(Operand.Tag) {
+            Tmp: Tmp,
+            Mem_B: packed struct {
+                base: Tmp,
+                size_minus_one: SizeType,
+            },
+            Mem_BO: packed struct {
+                base: Tmp,
+                offset: u64,
+                size_minus_one: SizeType,
+            },
+            Addr_T: packed struct {
+                offset: Tmp.OffsetType,
+                pad: SizeType = 0,
+                tag: Tmp.Tag,
+            },
+            Addr_BO: packed struct {
+                base: Tmp,
+                offset: u64,
+            },
+            Imm: u64,
+            Label: u64,
 
-        pub fn as_rvalue(tmp: Tmp) Rvalue {
-            return .{ .Lvalue = .{ .Tmp = tmp } };
-        }
-    };
+            pub const SizeType = u3;
 
-    pub const Mem = struct {
-        base: ?Tmp,
-        offset: u64,
-        size: u64,
-    };
+            pub const Tag = enum(u3) {
+                Tmp = 0,
+                Mem_B = 1,
+                Mem_BO = 2,
+                Addr_T = 3,
+                Addr_BO = 4,
+                Imm = 5,
+                Label = 6,
+            };
 
-    pub const Lvalue = union(enum) {
-        Tmp: Tmp,
-        Mem: Mem,
+            pub fn format(op: Operand, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+                switch (op) {
+                    .Tmp => |tmp| {
+                        try writer.print("{}", .{tmp});
+                    },
+                    .Mem_B => |mem| {
+                        try writer.print("{} [{}]", .{ @as(u64, mem.size_minus_one) + 1, mem.base });
+                    },
+                    .Mem_BO => |mem| {
+                        try writer.print("{} [{} + {}]", .{ @as(u64, mem.size_minus_one) + 1, mem.base, mem.offset });
+                    },
+                    .Addr_T => |tmp| {
+                        try writer.print(
+                            "addr [{c}{}]",
+                            .{
+                                @as(u8, switch (tmp.tag) {
+                                    .Relative => 'r',
+                                    .Global => 'g',
+                                    .Absolute => 'a',
+                                }),
+                                tmp.offset,
+                            },
+                        );
+                    },
+                    .Addr_BO => |mem| {
+                        try writer.print("addr [{} + {}]", .{ mem.base, mem.offset });
+                    },
+                    .Imm => |imm| {
+                        try writer.print("{}", .{imm});
+                    },
+                    .Label => |label| {
+                        try writer.print("l{}", .{label});
+                    },
+                }
+            }
 
-        pub fn format(lvalue: Lvalue, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-            switch (lvalue) {
-                .Tmp => |tmp| {
-                    try writer.print("{}", .{tmp});
-                },
-                .Mem => |mem| {
-                    try writer.print("{}B [", .{mem.size});
-                    if (mem.base) |base| {
-                        try writer.print("{}", .{base});
+            pub fn grab_size(op: Operand) u8 {
+                const size: u8 = switch (op) {
+                    .Tmp => |tmp| tmp.size_minus_one,
+                    .Mem_B => |mem| mem.size_minus_one,
+                    .Mem_BO => |mem| mem.size_minus_one,
+                    .Addr_T,
+                    .Addr_BO,
+                    .Imm,
+                    .Label,
+                    => unreachable,
+                };
+                return size + 1;
+            }
+        };
+
+        pub const Opcode = enum(u8) {
+            exit = 0,
+
+            printp,
+            printi,
+            printu,
+            printb,
+
+            ue,
+            une,
+            ul,
+            ule,
+            ug,
+            uge,
+            uadd,
+            usub,
+            umul,
+            udiv,
+            umod,
+
+            ie,
+            ine,
+            il,
+            ile,
+            ig,
+            ige,
+            iadd,
+            isub,
+            imul,
+            idiv,
+            imod,
+
+            neg,
+            not,
+
+            jmp,
+
+            uje,
+            ujne,
+            ujl,
+            ujle,
+            ujg,
+            ujge,
+
+            ije,
+            ijne,
+            ijl,
+            ijle,
+            ijg,
+            ijge,
+
+            setnz,
+
+            mov,
+            mov_big,
+            movsx,
+
+            call,
+            push,
+            push_big,
+            pop,
+
+            start_proc,
+            end_proc,
+
+            pub fn to_signed(opcode: Opcode) Opcode {
+                return switch (opcode) {
+                    .ue => .ie,
+                    .une => .ine,
+                    .ul => .il,
+                    .ule => .ile,
+                    .ug => .ig,
+                    .uge => .ige,
+                    .uadd => .iadd,
+                    .usub => .isub,
+                    .umul => .imul,
+                    .udiv => .idiv,
+                    .umod => .imod,
+                    .uje => .ije,
+                    .ujne => .ijne,
+                    .ujl => .ijl,
+                    .ujle => .ijle,
+                    .ujg => .ijg,
+                    .ujge => .ijge,
+                    else => unreachable,
+                };
+            }
+
+            pub fn operand_count(opcode: Opcode) u8 {
+                return switch (opcode) {
+                    .exit => 0,
+                    .printp,
+                    .printi,
+                    .printu,
+                    .printb,
+                    .jmp,
+                    .call,
+                    .push,
+                    .pop,
+                    .start_proc,
+                    .end_proc,
+                    => 1,
+                    .neg,
+                    .not,
+                    .setnz,
+                    .mov,
+                    .push_big,
+                    => 2,
+                    .ue,
+                    .une,
+                    .ul,
+                    .ule,
+                    .ug,
+                    .uge,
+                    .uadd,
+                    .usub,
+                    .umul,
+                    .udiv,
+                    .umod,
+                    .ie,
+                    .ine,
+                    .il,
+                    .ile,
+                    .ig,
+                    .ige,
+                    .iadd,
+                    .isub,
+                    .imul,
+                    .idiv,
+                    .imod,
+                    .uje,
+                    .ujne,
+                    .ujl,
+                    .ujle,
+                    .ujg,
+                    .ujge,
+                    .ije,
+                    .ijne,
+                    .ijl,
+                    .ijle,
+                    .ijg,
+                    .ijge,
+                    .mov_big,
+                    .movsx,
+                    => 3,
+                };
+            }
+
+            pub fn to_string(opcode: Opcode) []const u8 {
+                return switch (opcode) {
+                    .exit => "exit",
+                    .printp => "printp",
+                    .printi => "printi",
+                    .printu => "printu",
+                    .printb => "printb",
+                    .ue => "ue",
+                    .une => "une",
+                    .ul => "ul",
+                    .ule => "ule",
+                    .ug => "ug",
+                    .uge => "uge",
+                    .uadd => "uadd",
+                    .usub => "usub",
+                    .umul => "umul",
+                    .udiv => "udiv",
+                    .umod => "umod",
+                    .ie => "ie",
+                    .ine => "ine",
+                    .il => "il",
+                    .ile => "ile",
+                    .ig => "ig",
+                    .ige => "ige",
+                    .iadd => "iadd",
+                    .isub => "isub",
+                    .imul => "imul",
+                    .idiv => "idiv",
+                    .imod => "imod",
+                    .neg => "neg",
+                    .not => "not",
+                    .jmp => "jmp",
+                    .uje => "uje",
+                    .ujne => "ujne",
+                    .ujl => "ujl",
+                    .ujle => "ujle",
+                    .ujg => "ujg",
+                    .ujge => "ujge",
+                    .ije => "ije",
+                    .ijne => "ijne",
+                    .ijl => "ijl",
+                    .ijle => "ijle",
+                    .ijg => "ijg",
+                    .ijge => "ijge",
+                    .setnz => "setnz",
+                    .mov => "mov",
+                    .mov_big => "mov_big",
+                    .movsx => "movsx",
+                    .call => "call",
+                    .push => "push",
+                    .push_big => "push_big",
+                    .pop => "pop",
+                    .start_proc => "start_proc",
+                    .end_proc => "end_proc",
+                };
+            }
+        };
+
+        pub const Instr = struct {
+            opcode: Opcode,
+            ops: [3]Operand,
+            ops_count: u8,
+
+            pub fn format(instr: Instr, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+                const pad_size = 12;
+                const op_name = instr.opcode.to_string();
+
+                try writer.print("{s} ", .{op_name});
+                {
+                    var i = pad_size - op_name.len;
+                    while (i > 0) {
+                        i -= 1;
+                        try writer.print(" ", .{});
                     }
-                    if (mem.offset != 0) {
-                        try writer.print("+{}", .{mem.offset});
+                }
+                for (instr.ops[0..instr.ops_count], 0..) |op, i| {
+                    try writer.print("{}", .{op});
+
+                    if (i + 1 < instr.ops_count) {
+                        try writer.print(", ", .{});
                     }
-                    try writer.print("]", .{});
-                },
+                }
             }
-        }
+        };
 
-        pub fn as_rvalue(lvalue: Lvalue) Rvalue {
-            return .{ .Lvalue = lvalue };
-        }
-
-        pub fn grab_size(lvalue: Lvalue) u64 {
-            return switch (lvalue) {
-                .Tmp => |tmp| tmp.size,
-                .Mem => |mem| mem.size,
+        pub fn decode_instr(data: []const u8) struct { Instr, usize } {
+            const State = struct {
+                data: []const u32,
+                opsinfo: u24,
+                at: u8,
             };
+
+            const fns = struct {
+                pub fn init_state(d: []const u8) State {
+                    var new_data: []const u32 = undefined;
+                    new_data.ptr = @alignCast(@ptrCast(d.ptr));
+                    new_data.len = @divExact(d.len, 4);
+                    return .{
+                        .data = new_data,
+                        .opsinfo = 0,
+                        .at = 0,
+                    };
+                }
+
+                pub fn decode_header(s: *State) Opcode {
+                    const header = s.data[s.at];
+                    s.at += 1;
+                    s.opsinfo = @intCast(header >> 8);
+                    return @enumFromInt(header & 0xFF);
+                }
+
+                pub fn decode_tmp(s: *State) Tmp {
+                    const tmp_as_u64 = decode_imm(s);
+                    return @as(*const Tmp, @ptrCast(&tmp_as_u64)).*;
+                }
+
+                pub fn decode_imm(s: *State) u64 {
+                    const imm = @as(u64, s.data[s.at]) | (@as(u64, s.data[s.at + 1]) << 32);
+                    s.at += 2;
+                    return imm;
+                }
+
+                pub fn decode_operand(s: *State) Operand {
+                    const optag: Operand.Tag = @enumFromInt(s.opsinfo & 0b111);
+                    s.opsinfo >>= 3;
+
+                    switch (optag) {
+                        .Tmp => {
+                            const tmp = decode_tmp(s);
+                            return .{ .Tmp = tmp };
+                        },
+                        .Mem_B => {
+                            const size_minus_one = decode_operand_size(s);
+                            const tmp = decode_tmp(s);
+                            return .{ .Mem_B = .{
+                                .base = tmp,
+                                .size_minus_one = size_minus_one,
+                            } };
+                        },
+                        .Mem_BO => {
+                            const size_minus_one = decode_operand_size(s);
+                            const base = decode_tmp(s);
+                            const offset = decode_imm(s);
+                            return .{ .Mem_BO = .{
+                                .base = base,
+                                .offset = offset,
+                                .size_minus_one = size_minus_one,
+                            } };
+                        },
+                        .Addr_T => {
+                            const tmp = decode_tmp(s);
+                            return .{ .Addr_T = .{
+                                .offset = tmp.offset,
+                                .tag = tmp.tag,
+                            } };
+                        },
+                        .Addr_BO => {
+                            const base = decode_tmp(s);
+                            const offset = decode_imm(s);
+                            return .{ .Addr_BO = .{
+                                .base = base,
+                                .offset = offset,
+                            } };
+                        },
+                        .Imm => {
+                            const imm = decode_imm(s);
+                            return .{ .Imm = imm };
+                        },
+                        .Label => {
+                            const label = decode_imm(s);
+                            return .{ .Label = label };
+                        },
+                    }
+                }
+
+                fn decode_operand_size(s: *State) u3 {
+                    const size: u3 = @intCast(s.opsinfo & 0b111);
+                    s.opsinfo >>= 3;
+                    return size;
+                }
+            };
+
+            std.debug.assert(data.len >= 4);
+
+            var state = fns.init_state(data);
+            var instr: Instr = instr: {
+                const opcode = fns.decode_header(&state);
+                break :instr .{
+                    .opcode = opcode,
+                    .ops = undefined,
+                    .ops_count = opcode.operand_count(),
+                };
+            };
+
+            for (0..instr.ops_count) |i| {
+                instr.ops[i] = fns.decode_operand(&state);
+            }
+
+            return .{ instr, state.at * 4 };
         }
     };
 
-    pub const Rvalue = union(enum) {
-        Lvalue: Lvalue,
-        Addr: Lvalue,
-        Label: Label,
-        Imm: u64,
+    pub fn print(ir: *IR) void {
+        Compiler.oprint("globals byte count: {}\n" ++
+            "instruction byte count: {}\n" ++
+            "\n", .{
+            ir.globals.items.len,
+            ir.instrs.items.len,
+        });
 
-        pub fn format(rvalue: Rvalue, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-            switch (rvalue) {
-                .Lvalue => |lvalue| {
-                    try writer.print("{}", .{lvalue});
-                },
-                .Addr => |lvalue| {
-                    try writer.print("addr {}", .{lvalue});
-                },
-                .Label => |label| {
-                    try writer.print("l{}", .{label});
-                },
-                .Imm => |imm| {
-                    try writer.print("{}", .{imm});
-                },
-            }
-        }
-
-        pub fn grab_size(rvalue: Rvalue) u64 {
-            return switch (rvalue) {
-                .Lvalue => |lvalue| lvalue.grab_size(),
-                .Addr, .Label, .Imm => 8,
-            };
-        }
-    };
-
-    pub const InstrList = std.ArrayList(Instr);
-
-    pub fn print(irc: *IRC) void {
-        const IDENT = "    ";
-
-        Compiler.oprint("label count:   {}\nglobals count: {}\n\n", .{ irc.label_count, irc.globals_count });
-
-        for (irc.instrs.items, 0..) |instr, ip| {
-            Compiler.oprint("{:>4}: ", .{ip});
-
-            switch (instr) {
-                .Print => |Print| {
-                    switch (Print) {
-                        .Pointer => |src| {
-                            Compiler.oprint(IDENT ++ "printp   {}", .{src});
-                        },
-                        .Integer => |Integer| {
-                            Compiler.oprint(IDENT ++ "print{c}   {}", .{ @as(u8, if (Integer.is_signed) 'i' else 'u'), Integer.src });
-                        },
-                        .Boolean => |src| {
-                            Compiler.oprint(IDENT ++ "printb   {}", .{src});
-                        },
-                    }
-                },
-                .Binary_Op => |Binary_Op| {
-                    const op: []const u8 = switch (Binary_Op.tag) {
-                        .Eq => "eq ",
-                        .Neq => "neq",
-                        .Lt => "lt ",
-                        .Leq => "leq",
-                        .Gt => "gt ",
-                        .Geq => "geq",
-                        .Add => "add",
-                        .Sub => "sub",
-                        .Mul => "mul",
-                        .Div => "div",
-                        .Mod => "mod",
-                    };
-                    Compiler.oprint(IDENT ++ "{c}{s}     {}, {}, {}", .{ @as(u8, if (Binary_Op.is_signed) 'i' else 'u'), op, Binary_Op.dst, Binary_Op.src0, Binary_Op.src1 });
-                },
-                .Unary_Op => |Unary_Op| {
-                    const op: []const u8 = switch (Unary_Op.tag) {
-                        .Neg => "neg",
-                        .Not => "not",
-                    };
-                    Compiler.oprint(IDENT ++ "{c}{s}     {}, {}", .{ @as(u8, if (Unary_Op.is_signed) 'i' else 'u'), op, Unary_Op.dst, Unary_Op.src });
-                },
-                .Jmp => |label| {
-                    Compiler.oprint(IDENT ++ "jmp      l{}", .{label});
-                },
-                .Jmpc => |Jmpc| {
-                    const op = switch (Jmpc.tag) {
-                        .Eq => "je ",
-                        .Neq => "jne",
-                        .Lt => "jl ",
-                        .Leq => "jle",
-                        .Gt => "jg ",
-                        .Geq => "jge",
-                    };
-                    Compiler.oprint(IDENT ++ "{c}{s}     {}, {}, l{}", .{ @as(u8, if (Jmpc.is_signed) 'i' else 'u'), op, Jmpc.src0, Jmpc.src1, Jmpc.label });
-                },
-                .Setnz => |Setnz| {
-                    Compiler.oprint(IDENT ++ "setnz    {}, {}", .{ Setnz.dst, Setnz.src });
-                },
-                .Mov => |Mov| {
-                    Compiler.oprint(IDENT ++ "mov      {}, {}", .{ Mov.dst, Mov.src });
-                },
-                .Movsx => |Mov| {
-                    Compiler.oprint(IDENT ++ "movsx    {}, {}, {}", .{ Mov.dst, Mov.src, Mov.src_bits });
-                },
-                .Call => |Call| {
-                    Compiler.oprint(IDENT ++ "call     {}, {}", .{ Call.dst, Call.src });
-                },
-                .Push => |src| {
-                    Compiler.oprint(IDENT ++ "push     {}", .{src});
-                },
-                .Pop => |bytes| {
-                    Compiler.oprint(IDENT ++ "pop      {}", .{bytes});
-                },
-                .Ret0 => |label| {
-                    Compiler.oprint(IDENT ++ "ret      l{}", .{label});
-                },
-                .Ret1 => |Ret1| {
-                    Compiler.oprint(IDENT ++ "ret      {}, {}, l{}", .{ Ret1.dst, Ret1.src, Ret1.label });
-                },
-                .GFB => |GFB| {
-                    Compiler.oprint("GFB {}B, l{}:", .{ GFB.stack_space_used, GFB.label });
-                },
-                .GFE => |GFE| {
-                    Compiler.oprint("GFE {}B, l{}:", .{ GFE.stack_space_used, GFE.label });
-                },
-                .Label => |label| {
-                    Compiler.oprint("l{}:", .{label});
-                },
-                .Exit => {
-                    Compiler.oprint(IDENT ++ "exit", .{});
-                },
-            }
-
-            Compiler.oprint("\n", .{});
+        var instrs = ir.instrs.items;
+        var ip: usize = 0;
+        while (ip < instrs.len) {
+            const instr, const count = Decoded.decode_instr(instrs[ip..]);
+            Compiler.oprint("{:>4}  {}\n", .{ ip, instr });
+            ip += count;
         }
     }
 };
 
-pub const IRCGenerator = struct {
-    next_local: i64,
-    biggest_next_local: i64,
+pub const IRGenerator = struct {
+    labels: LabelMap,
+    next_local: u64,
+    biggest_next_local: u64,
     next_global: u64,
-    next_label: IRC.Label,
-    loop_condition_label: ?IRC.Label,
-    loop_end_label: ?IRC.Label,
-    return_label: ?IRC.Label,
+    next_label: IR.Encoded.Label,
+    loop_condition_label: ?IR.Encoded.Label,
+    loop_end_label: ?IR.Encoded.Label,
+    return_label: ?IR.Encoded.Label,
+
+    pub const LabelMap = std.ArrayList(u64);
 };
 
 pub const Interpreter = struct {
     stack: []u8,
-    labels: LabelList,
     rsp: u64,
     rbp: u64,
+    vtable: Vtable,
+
+    pub const STACK_SIZE = 4 * 1024 * 1024;
+
+    pub const UNUSED_SPACE_SIZE = 1024;
+
+    pub const Vtable = struct {
+        unused_space: u64 = 0,
+        start_instr: u64 = UNUSED_SPACE_SIZE,
+        start_global: u64,
+        start_stack: u64,
+        end: u64,
+
+        pub const SegmentTag = enum {
+            Instructions,
+            Globals,
+            Stack,
+
+            pub fn to_string(tag: SegmentTag) []const u8 {
+                return switch (tag) {
+                    .Instructions => "instruction",
+                    .Globals => "globals",
+                    .Stack => "stack",
+                };
+            }
+        };
+    };
 
     pub const LabelList = std.ArrayList(u64);
 };
@@ -1263,6 +1626,18 @@ pub const Stage = enum {
     Done,
 };
 
+pub fn init_vtable(c: *Compiler) void {
+    const start_global = c.interp.vtable.start_instr + utils.align_by_pow2(c.ir.instrs.items.len, 1024);
+    const start_stack = start_global + utils.align_by_pow2(c.ir.globals.items.len, 1024);
+    const end = start_stack + Compiler.Interpreter.STACK_SIZE;
+
+    c.interp.vtable = .{
+        .start_global = start_global,
+        .start_stack = start_stack,
+        .end = end,
+    };
+}
+
 fn init() Compiler {
     const state = struct {
         pub var void_pointer_type_data = Ast.Type.SharedData{
@@ -1303,6 +1678,10 @@ fn init() Compiler {
         pub var empty_filepath = [0:0]u8{};
     };
 
+    Ast.void_pointer_type = &state.void_pointer_type;
+    Ast.bool_type = &state.bool_type;
+    Ast.void_type = &state.void_type;
+
     const empty_source_code = empty_source_code: {
         const data = gpa.alloc(u8, 1) catch {
             exit(1);
@@ -1310,13 +1689,15 @@ fn init() Compiler {
         data[0] = 0;
         break :empty_source_code data[0..0 :0];
     };
+
     const stack = gpa.alloc(u8, 2 * 1024 * 1024) catch {
         exit(1);
     };
 
-    Ast.void_pointer_type = &state.void_pointer_type;
-    Ast.bool_type = &state.bool_type;
-    Ast.void_type = &state.void_type;
+    var labels = IRGenerator.LabelMap.init(gpa);
+    labels.resize(256) catch {
+        Compiler.exit(1);
+    };
 
     return .{
         .lexer = .{},
@@ -1333,12 +1714,16 @@ fn init() Compiler {
             .return_type = null,
             .is_in_loop = false,
         },
-        .irc = .{
-            .instrs = IRC.InstrList.init(gpa),
-            .label_count = 0,
-            .globals_count = 0,
+        .ir = .{
+            .instrs = ByteList.initCapacity(gpa, 4 * 1024) catch {
+                Compiler.exit(1);
+            },
+            .globals = ByteList.initCapacity(gpa, 4 * 1024) catch {
+                Compiler.exit(1);
+            },
         },
-        .ircgen = .{
+        .irgen = .{
+            .labels = labels,
             .next_local = 0,
             .biggest_next_local = 0,
             .next_global = 0,
@@ -1349,9 +1734,13 @@ fn init() Compiler {
         },
         .interp = .{
             .stack = stack,
-            .labels = Interpreter.LabelList.init(gpa),
             .rsp = 0,
             .rbp = 0,
+            .vtable = .{
+                .start_global = Interpreter.UNUSED_SPACE_SIZE,
+                .start_stack = Interpreter.UNUSED_SPACE_SIZE,
+                .end = Interpreter.UNUSED_SPACE_SIZE,
+            },
         },
         .symbol_table = SymbolTable.init(gpa),
         .string_pool = StringPool.init(gpa),
@@ -1369,9 +1758,10 @@ fn deinit(c: *Compiler) void {
             gpa.destroy(typ);
         }
     }
-    c.irc.instrs.deinit();
+    c.ir.instrs.deinit();
+    c.ir.globals.deinit();
     gpa.free(c.interp.stack);
-    c.interp.labels.deinit();
+    c.irgen.labels.deinit();
     c.symbol_table.deinit();
     c.string_pool.deinit();
     gpa.free(c.source_code);
@@ -1380,7 +1770,7 @@ fn deinit(c: *Compiler) void {
 pub fn compile() void {
     const parse = @import("parser.zig").parse;
     const typecheck = @import("typechecker.zig").typecheck;
-    const generate_irc = @import("irc-generator.zig").generate_irc;
+    const generate_ir = @import("irc-generator.zig").generate_ir;
     const interpret = @import("interpreter.zig").interpret;
 
     var c = Compiler.init();
@@ -1388,40 +1778,48 @@ pub fn compile() void {
     const options = parse_cmd_options();
     switch (options.mode) {
         .Build => {
-            var buffer = [1]u8{0} ** (std.posix.PATH_MAX);
+            var buffer = [1]u8{0} ** std.posix.PATH_MAX;
+
             const input_filepath = options.has_input_filepath.?;
             const output_filepath: [:0]const u8 = output_filepath: {
                 if (options.has_output_filepath) |path| {
                     @memcpy(buffer[0..path.len], path);
-                    buffer[path.len] = 0;
                     break :output_filepath buffer[0..path.len :0];
                 } else {
-                    const extension: []const u8 = ".irc\x00";
+                    const extension: []const u8 = ".ir";
                     @memcpy(buffer[0..input_filepath.len], input_filepath);
                     @memcpy(buffer[input_filepath.len .. input_filepath.len + extension.len], extension);
-                    break :output_filepath buffer[0 .. input_filepath.len + extension.len - 1 :0];
+                    break :output_filepath buffer[0 .. input_filepath.len + extension.len :0];
                 }
             };
 
             parse(&c, input_filepath);
             typecheck(&c);
-            generate_irc(&c);
-            write_irc(&c, output_filepath);
+            generate_ir(&c);
+            write_ir(&c, output_filepath);
         },
         .Run => {
-            read_irc(&c, options.has_input_filepath.?);
+            // TODO: ABOLISH THIS! BURN IT WITH FIRE!
+            c.ir.instrs.deinit();
+            c.ir.globals.deinit();
+
+            read_ir(&c, options.has_input_filepath.?);
             interpret(&c);
         },
         .Print => {
-            read_irc(&c, options.has_input_filepath.?);
-            c.irc.print();
+            // TODO: ABOLISH THIS AS WELL!!
+            c.ir.instrs.deinit();
+            c.ir.globals.deinit();
+
+            read_ir(&c, options.has_input_filepath.?);
+            c.ir.print();
         },
     }
 
     c.deinit();
 }
 
-fn write_irc(c: *Compiler, filepath: [:0]const u8) void {
+fn write_ir(c: *Compiler, filepath: [:0]const u8) void {
     const fd = std.posix.open(
         filepath,
         .{
@@ -1434,53 +1832,45 @@ fn write_irc(c: *Compiler, filepath: [:0]const u8) void {
         eprint("error: couldn't open a file '{s}'\n", .{filepath});
         exit(1);
     };
-
-    var instrs: []const u8 = undefined;
-    instrs.ptr = @ptrCast(c.irc.instrs.items.ptr);
-    instrs.len = c.irc.instrs.items.len * @sizeOf(IRC.Instr);
+    defer std.posix.close(fd);
 
     utils.write_to_file_v(fd, magic_number_string);
-    utils.write_to_file_u64(fd, c.irc.label_count);
-    utils.write_to_file_u64(fd, c.irc.globals_count);
-    utils.write_to_file_v(fd, c.interp.stack[0..c.irc.globals_count]);
-    utils.write_to_file_v(fd, instrs);
+    utils.write_to_file_u64(fd, c.ir.globals.items.len);
+    utils.write_to_file_u64(fd, c.ir.instrs.items.len);
+    utils.write_to_file_v(fd, c.ir.globals.items);
+    utils.write_to_file_v(fd, c.ir.instrs.items);
 }
 
-fn read_irc(c: *Compiler, filepath: [:0]const u8) void {
+fn read_ir(c: *Compiler, filepath: [:0]const u8) void {
     const fd = std.posix.open(filepath, .{}, 0) catch {
         eprint("error: couldn't open a file '{s}'\n", .{filepath});
         exit(1);
     };
-    const size: usize = size: {
-        const stats = std.posix.fstat(fd) catch {
-            exit(1);
-        };
-        break :size @intCast(stats.size);
-    };
+    defer std.posix.close(fd);
 
     const magic_number = utils.read_from_file_u64(fd);
     std.debug.assert(magic_number == magic_number_value);
-    const label_count = utils.read_from_file_u64(fd);
-    const globals_count = utils.read_from_file_u64(fd);
-    utils.read_from_file_v(fd, c.interp.stack[0..globals_count]);
-    const instrs = gpa.allocWithOptions(u8, size - 8 * 3 - globals_count, 8, null) catch {
-        exit(1);
-    };
-    utils.read_from_file_v(fd, instrs);
+    const globals_byte_count = utils.read_from_file_u64(fd);
+    const instrs_byte_count = utils.read_from_file_u64(fd);
+    var globals = ByteList.init(gpa);
+    var instrs = ByteList.init(gpa);
 
-    var items: []IRC.Instr = undefined;
-    items.ptr = @alignCast(@ptrCast(instrs.ptr));
-    items.len = @divExact(instrs.len, @sizeOf(IRC.Instr));
-
-    c.irc = .{
-        .instrs = .{
-            .items = items,
-            .capacity = items.len,
-            .allocator = gpa,
-        },
-        .label_count = label_count,
-        .globals_count = globals_count,
+    globals.resize(globals_byte_count) catch {
+        Compiler.exit(1);
     };
+    instrs.resize(instrs_byte_count) catch {
+        Compiler.exit(1);
+    };
+
+    utils.read_from_file_v(fd, globals.items);
+    utils.read_from_file_v(fd, instrs.items);
+
+    c.ir = .{
+        .instrs = instrs,
+        .globals = globals,
+    };
+
+    init_vtable(c);
 }
 
 fn parse_cmd_options() Options {

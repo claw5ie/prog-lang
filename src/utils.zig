@@ -2,8 +2,11 @@ const std = @import("std");
 
 const Allocator = std.mem.Allocator;
 
-pub const stdout = std.io.getStdOut().writer();
-pub const stderr = std.io.getStdErr().writer();
+pub var stdout_buffer = std.io.bufferedWriter(std.io.getStdOut().writer());
+pub var stderr_buffer = std.io.bufferedWriter(std.io.getStdErr().writer());
+
+pub var stdout = stdout_buffer.writer();
+pub var stderr = stderr_buffer.writer();
 
 pub const Alignment = enum(u2) {
     BYTE = 0,
@@ -22,6 +25,10 @@ pub const Order = enum(u2) {
     Equal = 2,
 };
 
+pub fn todo(comptime text: []const u8) noreturn {
+    @compileError(text);
+}
+
 pub fn oprint(comptime format: []const u8, args: anytype) void {
     stdout.print(format, args) catch {
         exit(1);
@@ -35,6 +42,12 @@ pub fn eprint(comptime format: []const u8, args: anytype) void {
 }
 
 pub fn exit(code: u8) noreturn {
+    stdout_buffer.flush() catch {
+        std.posix.exit(1);
+    };
+    stderr_buffer.flush() catch {
+        std.posix.exit(1);
+    };
     std.posix.exit(code);
 }
 
@@ -71,8 +84,24 @@ pub fn sign_extend(value: u64, bits: u8) u64 {
     return value;
 }
 
+pub fn max_enum_value(comptime EnumType: type) @typeInfo(EnumType).Enum.tag_type {
+    const info = @typeInfo(EnumType).Enum;
+
+    var max: info.tag_type = std.math.minInt(info.tag_type);
+    for (info.fields) |field| {
+        max = @max(max, field.value);
+    }
+
+    return max;
+}
+
 pub fn align_u64(value: u64, alignment: Alignment) u64 {
-    const pow2_minus_one: u64 = alignment.to_byte_size() - 1;
+    return align_by_pow2(value, alignment.to_byte_size());
+}
+
+pub fn align_by_pow2(value: u64, alignment: u64) u64 {
+    std.debug.assert(round_to_next_pow2(alignment) == alignment);
+    const pow2_minus_one: u64 = alignment - 1;
     var v = value;
     v += pow2_minus_one;
     v &= ~pow2_minus_one;

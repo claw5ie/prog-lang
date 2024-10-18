@@ -53,7 +53,7 @@ test_all()
 {
     files=$1
     test_fn=$2
-    output_filepath="output.tmp.irc"
+    output_filepath="output.tmp.ir"
 
     for file in $files
     do

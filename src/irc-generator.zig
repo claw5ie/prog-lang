@@ -3,41 +3,69 @@ const utils = @import("utils.zig");
 const Compiler = @import("compiler.zig");
 
 const Ast = Compiler.Ast;
-const IRC = Compiler.IRC;
+const IR = Compiler.IR;
+const IRE = IR.Encoded;
+const IRD = IR.Decoded;
 const Alignment = utils.Alignment;
 
-pub fn generate_irc(c: *Compiler) void {
-    generate_irc_top_level(c);
-
-    c.irc.label_count = c.ircgen.next_label;
-    c.irc.globals_count = c.ircgen.next_global;
+pub fn generate_ir(c: *Compiler) void {
+    generate_ir_top_level(c);
+    generate_ir_instr0(c, .exit);
+    remove_labels_and_set_vtable(c);
 }
 
-fn generate_irc_top_level(c: *Compiler) void {
+pub fn remove_labels_and_set_vtable(c: *Compiler) void {
+    c.init_vtable();
+
+    var instrs = &c.ir.instrs;
+    var at: usize = 0;
+    while (at < instrs.items.len) {
+        var instr, const count = IRD.decode_instr(instrs.items[at..]);
+
+        var update_instr = false;
+        for (instr.ops[0..instr.ops_count]) |*op| {
+            switch (op.*) {
+                .Label => |label| {
+                    op.* = .{ .Imm = c.interp.vtable.start_instr + c.irgen.labels.items[label] };
+                    update_instr = true;
+                },
+                else => {},
+            }
+        }
+        if (update_instr) {
+            write_instr_at(c, at, instr);
+        }
+
+        at += count;
+    }
+}
+
+fn generate_ir_top_level(c: *Compiler) void {
     {
         const Procedure = &c.ast.main.?.as.Procedure;
-        const dst = grab_global(c, 8, .QWORD).as_lvalue();
-        generate_irc_instr(c, .{ .Call = .{
-            .dst = dst,
-            .src = .{ .Label = Procedure.start_label },
-        } });
-        generate_irc_instr(c, .Exit);
+        generate_ir_instr1(c, .call, .{ .Label = Procedure.start_label });
+        generate_ir_instr0(c, .exit);
     }
 
     var it = c.ast.globals.first;
     while (it) |node| {
-        generate_irc_global_symbol(c, node.data);
+        generate_ir_global_symbol(c, node.data);
         it = node.next;
     }
 }
 
-fn generate_irc_global_symbol(c: *Compiler, symbol: *Ast.Symbol) void {
+fn generate_ir_global_symbol(c: *Compiler, symbol: *Ast.Symbol) void {
     switch (symbol.as) {
         .Variable => {},
         .Procedure => |*Procedure| {
             const Proc = &Procedure.typ.data.as.Proc;
 
-            var offset: i64 = -IRC.FIRST_PARAM_OFFSET;
+            var offset: IRE.Tmp.OffsetType = -IRE.FIRST_PARAM_OFFSET;
+
+            if (Proc.return_type.equal(Ast.void_type)) { // TODO: replace this condition with a flag.
+                offset += 8; // There is no return pointer.
+            }
+
             var it = Proc.params.first;
             while (it) |node| {
                 const Parameter = &node.data.as.Parameter;
@@ -45,52 +73,71 @@ fn generate_irc_global_symbol(c: *Compiler, symbol: *Ast.Symbol) void {
                 const size = utils.align_u64(Parameter.typ.data.byte_size, .QWORD);
                 offset -= @intCast(size);
                 Parameter.storage = .{ .Tmp = .{
-                    .offset = .{ .Local = offset },
+                    .offset = offset,
+                    .tag = .Relative,
                     .size = size,
                 } };
 
                 it = node.next;
             }
 
-            const old_return_label = c.ircgen.return_label;
-            c.ircgen.return_label = Procedure.end_label;
+            std.debug.assert(c.irgen.return_label == null and
+                c.irgen.next_local == 0 and
+                c.irgen.biggest_next_local == 0);
+            c.irgen.return_label = Procedure.end_label;
 
-            const index = c.irc.instrs.items.len;
-            generate_irc_instr(c, undefined);
-            generate_irc_stmt_list(c, Procedure.block);
-            generate_irc_instr(c, .{ .GFE = .{
-                .label = Procedure.end_label,
-                .stack_space_used = @intCast(c.ircgen.biggest_next_local),
-            } });
-            c.irc.instrs.items[index] = .{ .GFB = .{
-                .label = Procedure.start_label,
-                .stack_space_used = @intCast(c.ircgen.biggest_next_local),
-            } };
-            c.ircgen.next_local = 0; // Global function, so there the previous value should have been 0 as well.
-            c.ircgen.biggest_next_local = 0;
+            generate_ir_label(c, Procedure.start_label);
+            const start_proc_index = c.ir.instrs.items.len;
+            generate_ir_instr1(
+                c,
+                .start_proc,
+                .{ .Imm = 0 },
+            );
 
-            c.ircgen.return_label = old_return_label;
+            generate_ir_stmt_list(c, Procedure.block);
+
+            const stack_space_used = utils.align_u64(c.irgen.biggest_next_local, .QWORD);
+            generate_ir_label(c, Procedure.end_label);
+            generate_ir_instr1(
+                c,
+                .end_proc,
+                .{ .Imm = stack_space_used },
+            );
+            generate_ir_instr_at1(
+                c,
+                start_proc_index,
+                .start_proc,
+                .{ .Imm = stack_space_used },
+            );
+
+            c.irgen.next_local = 0;
+            c.irgen.biggest_next_local = 0;
+            c.irgen.return_label = null;
         },
-        .Parameter, .Struct_Field, .Union_Field, .Enum_Field => unreachable,
         .Type => |typ| {
-            generate_irc_type(c, typ);
+            generate_ir_type(c, typ);
         },
+        .Parameter,
+        .Struct_Field,
+        .Union_Field,
+        .Enum_Field,
+        => unreachable,
     }
 }
 
-fn generate_irc_local_symbol(c: *Compiler, symbol: *Ast.Symbol) void {
+fn generate_ir_local_symbol(c: *Compiler, symbol: *Ast.Symbol) void {
     switch (symbol.as) {
         .Variable => |*Variable| {
             if (!(symbol.attributes.is_static or symbol.attributes.is_const)) {
-                Variable.storage = grab_local_from_type(c, Variable.typ.?.data).as_lvalue();
+                Variable.storage = grab_local_from_type(c, Variable.typ.?.data);
             }
 
             if (Variable.value) |value| {
-                _ = generate_irc_rvalue(c, Variable.storage, value);
+                _ = generate_ir_expr(c, Variable.storage, value);
             }
         },
         .Type => |typ| {
-            generate_irc_type(c, typ);
+            generate_ir_type(c, typ);
         },
         .Procedure,
         .Parameter,
@@ -101,28 +148,28 @@ fn generate_irc_local_symbol(c: *Compiler, symbol: *Ast.Symbol) void {
     }
 }
 
-fn generate_irc_type(c: *Compiler, typ: *Ast.Type) void {
+fn generate_ir_type(c: *Compiler, typ: *Ast.Type) void {
     const data = typ.data;
-    switch (data.stages.irc_generation) {
-        .None => data.stages.irc_generation = .Going,
+    switch (data.stages.ir_generation) {
+        .None => data.stages.ir_generation = .Going,
         .Going => unreachable,
         .Done => return,
     }
 
-    defer data.stages.irc_generation = .Done;
+    defer data.stages.ir_generation = .Done;
 
     switch (data.as) {
         .Struct, .Union => |Struct| {
             var it = Struct.rest.first;
             while (it) |node| {
-                generate_irc_global_symbol(c, node.data);
+                generate_ir_global_symbol(c, node.data);
                 it = node.next;
             }
         },
         .Enum => |Enum| {
             var it = Enum.rest.first;
             while (it) |node| {
-                generate_irc_global_symbol(c, node.data);
+                generate_ir_global_symbol(c, node.data);
                 it = node.next;
             }
         },
@@ -138,36 +185,30 @@ fn generate_irc_type(c: *Compiler, typ: *Ast.Type) void {
     }
 }
 
-fn generate_irc_stmt(c: *Compiler, stmt: *Ast.Stmt) void {
+fn generate_ir_stmt(c: *Compiler, stmt: *Ast.Stmt) void {
     switch (stmt.as) {
         .Print => |expr| {
-            const src = generate_irc_rvalue(c, null, expr);
+            const src = generate_ir_expr(c, null, expr);
             switch (expr.typ.data.as) {
                 .Enum => {
-                    generate_irc_instr(c, .{ .Print = .{
-                        .Integer = .{
-                            .src = src,
-                            .is_signed = expr.typ.is_signed(),
-                        },
-                    } });
+                    generate_ir_instr1(
+                        c,
+                        if (expr.typ.is_signed()) .printi else .printu,
+                        src,
+                    );
                 },
                 .Pointer => {
-                    generate_irc_instr(c, .{ .Print = .{
-                        .Pointer = src,
-                    } });
+                    generate_ir_instr1(c, .printp, src);
                 },
                 .Integer => {
-                    generate_irc_instr(c, .{ .Print = .{
-                        .Integer = .{
-                            .src = src,
-                            .is_signed = expr.typ.is_signed(),
-                        },
-                    } });
+                    generate_ir_instr1(
+                        c,
+                        if (expr.typ.is_signed()) .printi else .printu,
+                        src,
+                    );
                 },
                 .Bool => {
-                    generate_irc_instr(c, .{ .Print = .{
-                        .Boolean = src,
-                    } });
+                    generate_ir_instr1(c, .printb, src);
                 },
                 .Struct,
                 .Union,
@@ -181,28 +222,28 @@ fn generate_irc_stmt(c: *Compiler, stmt: *Ast.Stmt) void {
         },
         .Block => |block| {
             // Clean locals allocated on the stack.
-            const old_next_local = c.ircgen.next_local;
-            generate_irc_stmt_list(c, block);
-            c.ircgen.next_local = old_next_local;
+            const old_next_local = c.irgen.next_local;
+            generate_ir_stmt_list(c, block);
+            c.irgen.next_local = old_next_local;
         },
         .If => |If| {
             if (If.false_branch) |false_branch| {
                 const false_branch_label = grab_label(c);
                 const end_label = grab_label(c);
 
-                generate_irc_jmpc(c, If.condition, false_branch_label, false);
+                generate_ir_jmpc(c, If.condition, false_branch_label, false);
 
-                _ = generate_irc_stmt(c, If.true_branch);
-                generate_irc_instr(c, .{ .Jmp = end_label });
-                generate_irc_instr(c, .{ .Label = false_branch_label });
-                _ = generate_irc_stmt(c, false_branch);
-                generate_irc_instr(c, .{ .Label = end_label });
+                _ = generate_ir_stmt(c, If.true_branch);
+                generate_ir_instr1(c, .jmp, .{ .Label = end_label });
+                generate_ir_label(c, false_branch_label);
+                _ = generate_ir_stmt(c, false_branch);
+                generate_ir_label(c, end_label);
             } else {
                 const end_label = grab_label(c);
-                generate_irc_jmpc(c, If.condition, end_label, false);
+                generate_ir_jmpc(c, If.condition, end_label, false);
 
-                _ = generate_irc_stmt(c, If.true_branch);
-                generate_irc_instr(c, .{ .Label = end_label });
+                _ = generate_ir_stmt(c, If.true_branch);
+                generate_ir_label(c, end_label);
             }
         },
         .While, .Do_While => |While| {
@@ -210,32 +251,32 @@ fn generate_irc_stmt(c: *Compiler, stmt: *Ast.Stmt) void {
             const condition_label = grab_label(c);
             const end_label = grab_label(c);
 
-            const old_loop_condition_label = c.ircgen.loop_condition_label;
-            const old_loop_end_label = c.ircgen.loop_end_label;
+            const old_loop_condition_label = c.irgen.loop_condition_label;
+            const old_loop_end_label = c.irgen.loop_end_label;
 
-            c.ircgen.loop_condition_label = condition_label;
-            c.ircgen.loop_end_label = end_label;
+            c.irgen.loop_condition_label = condition_label;
+            c.irgen.loop_end_label = end_label;
 
             if (stmt.as == .While) {
-                generate_irc_instr(c, .{ .Jmp = condition_label });
+                generate_ir_instr1(c, .jmp, .{ .Label = condition_label });
             }
-            generate_irc_instr(c, .{ .Label = start_label });
-            generate_irc_stmt(c, While.body);
-            generate_irc_instr(c, .{ .Label = condition_label });
-            generate_irc_jmpc(c, While.condition, start_label, true);
-            generate_irc_instr(c, .{ .Label = end_label });
+            generate_ir_label(c, start_label);
+            generate_ir_stmt(c, While.body);
+            generate_ir_label(c, condition_label);
+            generate_ir_jmpc(c, While.condition, start_label, true);
+            generate_ir_label(c, end_label);
 
-            c.ircgen.loop_condition_label = old_loop_condition_label;
-            c.ircgen.loop_end_label = old_loop_end_label;
+            c.irgen.loop_condition_label = old_loop_condition_label;
+            c.irgen.loop_end_label = old_loop_end_label;
         },
         .Break => {
-            generate_irc_instr(c, .{ .Jmp = c.ircgen.loop_end_label.? });
+            generate_ir_instr1(c, .jmp, .{ .Label = c.irgen.loop_end_label.? });
         },
         .Continue => {
-            generate_irc_instr(c, .{ .Jmp = c.ircgen.loop_condition_label.? });
+            generate_ir_instr1(c, .jmp, .{ .Label = c.irgen.loop_condition_label.? });
         },
         .Switch => |Switch| {
-            const condition = generate_irc_rvalue(c, null, Switch.condition);
+            const condition = generate_ir_expr(c, null, Switch.condition);
             const is_signed = Switch.condition.typ.is_signed();
 
             const first_label = grab_many_labels(c, Switch.cases.len);
@@ -249,14 +290,14 @@ fn generate_irc_stmt(c: *Compiler, stmt: *Ast.Stmt) void {
                     while (true) {
                         switch (case.*) {
                             .Case => |Case| {
-                                const src = generate_irc_rvalue(c, null, Case.value);
-                                generate_irc_instr(c, .{ .Jmpc = .{
-                                    .src0 = condition,
-                                    .src1 = src,
-                                    .label = label,
-                                    .tag = .Eq,
-                                    .is_signed = is_signed,
-                                } });
+                                const src0 = generate_ir_expr(c, null, Case.value);
+                                generate_ir_instr3(
+                                    c,
+                                    if (is_signed) .ije else .uje,
+                                    condition,
+                                    src0,
+                                    .{ .Label = label },
+                                );
                                 case = Case.subcase;
                             },
                             .Stmt => break,
@@ -269,10 +310,10 @@ fn generate_irc_stmt(c: *Compiler, stmt: *Ast.Stmt) void {
             }
 
             if (Switch.default_case) |else_stmt| {
-                generate_irc_stmt(c, else_stmt);
+                generate_ir_stmt(c, else_stmt);
             }
 
-            generate_irc_instr(c, .{ .Jmp = end_label });
+            generate_ir_instr1(c, .jmp, .{ .Label = end_label });
 
             {
                 var label = first_label;
@@ -283,9 +324,9 @@ fn generate_irc_stmt(c: *Compiler, stmt: *Ast.Stmt) void {
                         switch (case.*) {
                             .Case => |Case| case = Case.subcase,
                             .Stmt => |substmt| {
-                                generate_irc_instr(c, .{ .Label = label });
-                                generate_irc_stmt(c, substmt);
-                                generate_irc_instr(c, .{ .Jmp = end_label });
+                                generate_ir_label(c, label);
+                                generate_ir_stmt(c, substmt);
+                                generate_ir_instr1(c, .jmp, .{ .Label = end_label });
                                 break;
                             },
                         }
@@ -296,425 +337,360 @@ fn generate_irc_stmt(c: *Compiler, stmt: *Ast.Stmt) void {
                 }
             }
 
-            generate_irc_instr(c, .{ .Label = end_label });
+            generate_ir_label(c, end_label);
         },
         .Return => |has_expr| {
             if (has_expr) |expr| {
-                const dst = IRC.Lvalue{
-                    .Mem = .{
-                        .base = .{
-                            .offset = .{ .Local = -IRC.FIRST_PARAM_OFFSET },
-                            .size = 8,
-                        },
-                        .offset = 0,
-                        .size = expr.typ.data.byte_size,
+                const dst = IRE.Operand{ .Mem = .{
+                    .base = .{
+                        .offset = -IRE.FIRST_PARAM_OFFSET,
+                        .size_minus_one = 8 - 1,
+                        .tag = .Relative,
                     },
-                };
-                const src = generate_irc_rvalue(c, null, expr); // Can't move directly to 'dst', because of pointer aliasing. Example: src = foo(&src) may not generate correct code.
-                generate_irc_instr(c, .{ .Ret1 = .{
-                    .dst = dst,
-                    .src = src,
-                    .label = c.ircgen.return_label.?,
-                } });
-            } else {
-                generate_irc_instr(c, .{ .Ret0 = c.ircgen.return_label.? });
+                    .offset = 0,
+                    .size = expr.typ.data.byte_size,
+                } };
+                // Can't move directly to 'dst', because of pointer aliasing. Example: src = foo(&src) may not generate correct code.
+                const src = generate_ir_expr(c, null, expr);
+                generate_ir_instr2(c, .mov, dst, src);
             }
+
+            generate_ir_instr1(c, .jmp, .{ .Label = c.irgen.return_label.? });
         },
         .Symbol => |symbol| {
-            generate_irc_local_symbol(c, symbol);
+            generate_ir_local_symbol(c, symbol);
         },
         .Assign => |Assign| {
-            const dst = generate_irc_rvalue(c, null, Assign.lhs);
-            _ = generate_irc_rvalue(c, dst.Lvalue, Assign.rhs);
+            const dst = generate_ir_expr(c, null, Assign.lhs);
+            _ = generate_ir_expr(c, dst, Assign.rhs);
         },
         .Expr => |expr| {
-            _ = generate_irc_rvalue(c, null, expr);
+            _ = generate_ir_expr(c, null, expr);
         },
     }
 }
 
-fn generate_irc_stmt_list(c: *Compiler, list: Ast.StmtList) void {
+fn generate_ir_stmt_list(c: *Compiler, list: Ast.StmtList) void {
     var it = list.first;
     while (it) |node| {
-        generate_irc_stmt(c, node.data);
+        generate_ir_stmt(c, node.data);
         it = node.next;
     }
 }
 
-pub fn generate_irc_rvalue(c: *Compiler, has_dst: ?IRC.Lvalue, expr: *Ast.Expr) IRC.Rvalue {
-    var move_src = false;
-    const src: IRC.Rvalue = src: {
-        switch (expr.as) {
-            .Binary_Op => |Binary_Op| {
-                const src0 = generate_irc_rvalue(c, null, Binary_Op.lhs);
-                const src1 = generate_irc_rvalue(c, null, Binary_Op.rhs);
+pub fn generate_ir_expr(c: *Compiler, has_dst: ?IRE.Operand, expr: *Ast.Expr) IRE.Operand {
+    const State = struct {
+        c: *Compiler,
+        has_dst: ?IRE.Operand,
+    };
 
-                const dst = maybe_grab_local_from_type(c, has_dst, expr.typ.data);
+    const fns = struct {
+        pub fn maybe_grab_local_from_type(state: *State, data: *Ast.Type.SharedData) *IRE.Operand {
+            if (state.has_dst) |*dst| {
+                return dst;
+            } else {
+                state.has_dst = grab_local_from_type(state.c, data);
+                return &state.has_dst.?;
+            }
+        }
 
-                const tag: IRC.Instr.BinaryOp.Tag = switch (Binary_Op.tag) {
-                    .Or, .And => unreachable,
-                    .Eq => .Eq,
-                    .Neq => .Neq,
-                    .Lt => .Lt,
-                    .Leq => .Leq,
-                    .Gt => .Gt,
-                    .Geq => .Geq,
-                    .Add => .Add,
-                    .Sub => .Sub,
-                    .Mul => .Mul,
-                    .Div => .Div,
-                    .Mod => .Mod,
-                };
+        pub fn move_to_dst(state: *State, src: IRE.Operand) void {
+            if (state.has_dst) |dst| {
+                generate_ir_instr2(state.c, .mov, dst, src);
+            } else {
+                state.has_dst = src;
+            }
+        }
+    };
 
-                const is_signed = Binary_Op.lhs.typ.is_signed();
-                std.debug.assert(!is_signed or Binary_Op.rhs.typ.is_signed());
-                generate_irc_instr(c, .{ .Binary_Op = .{
-                    .dst = dst,
-                    .src0 = src0,
-                    .src1 = src1,
-                    .tag = tag,
-                    .is_signed = is_signed,
-                } });
+    var state = State{
+        .c = c,
+        .has_dst = has_dst,
+    };
 
-                break :src dst.as_rvalue();
-            },
-            .Unary_Op => |Unary_Op| {
-                const src = generate_irc_rvalue(c, null, Unary_Op.subexpr);
-                const is_signed = Unary_Op.subexpr.typ.is_signed();
+    switch (expr.as) {
+        .Binary_Op => |Binary_Op| {
+            const src0 = generate_ir_expr(c, null, Binary_Op.lhs);
+            const src1 = generate_ir_expr(c, null, Binary_Op.rhs);
+            const dst = fns.maybe_grab_local_from_type(&state, expr.typ.data);
 
-                switch (Unary_Op.tag) {
-                    .Pos => {
-                        move_src = true;
-                        break :src src;
-                    },
-                    .Neg => {
-                        const dst = maybe_grab_local_from_type(c, has_dst, expr.typ.data);
-                        generate_irc_instr(c, .{ .Unary_Op = .{
-                            .dst = dst,
-                            .src = src,
-                            .tag = .Neg,
-                            .is_signed = is_signed,
-                        } });
-                        break :src dst.as_rvalue();
-                    },
-                    .Not => {
-                        const dst = maybe_grab_local_from_type(c, has_dst, expr.typ.data);
-                        generate_irc_instr(c, .{ .Unary_Op = .{
-                            .dst = dst,
-                            .src = src,
-                            .tag = .Not,
-                            .is_signed = is_signed,
-                        } });
-                        break :src dst.as_rvalue();
-                    },
-                }
-            },
-            .Ref => |subexpr| {
-                move_src = true;
-                const src = generate_irc_rvalue(c, null, subexpr).Lvalue;
-                break :src .{ .Addr = src };
-            },
-            .Deref => |subexpr| {
-                move_src = true;
-                const src = generate_irc_rvalue(c, null, subexpr);
-                const new_src = deref_rvalue(c, src, 0, expr.typ.data.byte_size);
-                break :src new_src.as_rvalue();
-            },
-            .If => |If| {
-                const false_branch_label = grab_label(c);
-                const end_label = grab_label(c);
+            var opcode: IRE.Opcode = switch (Binary_Op.tag) {
+                .Or, .And => unreachable,
+                .Eq => .ue,
+                .Neq => .une,
+                .Lt => .ul,
+                .Leq => .ule,
+                .Gt => .ug,
+                .Geq => .uge,
+                .Add => .uadd,
+                .Sub => .usub,
+                .Mul => .umul,
+                .Div => .udiv,
+                .Mod => .umod,
+            };
 
-                generate_irc_jmpc(c, If.condition, false_branch_label, false);
-                const dst = maybe_grab_local_from_type(c, has_dst, expr.typ.data);
+            const is_signed = Binary_Op.lhs.typ.is_signed();
+            std.debug.assert(!is_signed or Binary_Op.rhs.typ.is_signed());
 
-                _ = generate_irc_rvalue(c, dst, If.true_branch);
-                generate_irc_instr(c, .{ .Jmp = end_label });
-                generate_irc_instr(c, .{ .Label = false_branch_label });
-                _ = generate_irc_rvalue(c, dst, If.false_branch);
-                generate_irc_instr(c, .{ .Label = end_label });
+            if (is_signed) {
+                opcode = opcode.to_signed();
+            }
 
-                break :src dst.as_rvalue();
-            },
-            .Field => |Field| {
-                move_src = true;
+            generate_ir_instr3(c, opcode, dst.*, src0, src1);
+        },
+        .Unary_Op => |Unary_Op| {
+            const src = generate_ir_expr(c, null, Unary_Op.subexpr);
 
-                const offset: u64 = switch (Field.field.as.Symbol.as) {
-                    .Struct_Field, .Union_Field => |Struct_Field| Struct_Field.offset,
-                    else => unreachable,
-                };
-                const src = generate_irc_rvalue(c, null, Field.subexpr);
+            switch (Unary_Op.tag) {
+                .Pos => {
+                    fns.move_to_dst(&state, src);
+                },
+                .Neg => {
+                    const dst = fns.maybe_grab_local_from_type(&state, expr.typ.data);
+                    generate_ir_instr2(c, .neg, dst.*, src);
+                },
+                .Not => {
+                    const dst = fns.maybe_grab_local_from_type(&state, expr.typ.data);
+                    generate_ir_instr2(c, .not, dst.*, src);
+                },
+            }
+        },
+        .Ref => |subexpr| {
+            const src = generate_ir_expr(c, null, subexpr);
+            const new_src = src.addr_of();
+            fns.move_to_dst(&state, new_src);
+        },
+        .Deref => |subexpr| {
+            const src = generate_ir_expr(c, null, subexpr);
+            const new_src = deref(c, src, 0, expr.typ.data.byte_size);
+            fns.move_to_dst(&state, new_src);
+        },
+        .If => |If| {
+            const false_branch_label = grab_label(c);
+            const end_label = grab_label(c);
 
-                if (Field.subexpr.typ.data.as != .Pointer) {
-                    break :src bump_lvalue(src.Lvalue, offset, expr.typ.data.byte_size).as_rvalue();
-                } else {
-                    break :src deref_rvalue(c, src, offset, expr.typ.data.byte_size).as_rvalue();
-                }
-            },
-            .Call => |Call| {
-                const dst = maybe_grab_local_from_type(c, has_dst, expr.typ.data);
-                const old_next_local = c.ircgen.next_local;
+            generate_ir_jmpc(c, If.condition, false_branch_label, false);
+            const dst = fns.maybe_grab_local_from_type(&state, expr.typ.data);
 
-                var bytes_pushed: u64 = 0;
-                var it = Call.args.last;
-                while (it) |node| {
-                    const arg = node.data.Expr;
-                    const src = generate_irc_rvalue(c, null, arg);
-                    generate_irc_instr(c, .{ .Push = src });
-                    bytes_pushed += utils.align_u64(arg.typ.data.byte_size, .QWORD);
+            _ = generate_ir_expr(c, dst.*, If.true_branch);
+            generate_ir_instr1(c, .jmp, .{ .Label = end_label });
+            generate_ir_label(c, false_branch_label);
+            _ = generate_ir_expr(c, dst.*, If.false_branch);
+            generate_ir_label(c, end_label);
+        },
+        .Field => |Field| {
+            const offset: u64 = switch (Field.field.as.Symbol.as) {
+                .Struct_Field, .Union_Field => |Struct_Field| Struct_Field.offset,
+                else => unreachable,
+            };
 
-                    it = node.prev;
-                }
+            const src = generate_ir_expr(c, null, Field.subexpr);
+            const new_src: IRE.Operand = if (Field.subexpr.typ.data.as != .Pointer)
+                src.bump(offset, expr.typ.data.byte_size)
+            else
+                deref(c, src, offset, expr.typ.data.byte_size);
 
-                const src = generate_irc_rvalue(c, null, Call.subexpr);
-                generate_irc_instr(c, .{ .Call = .{
-                    .dst = dst,
-                    .src = src,
-                } });
-                if (bytes_pushed > 0) {
-                    generate_irc_instr(c, .{ .Pop = bytes_pushed });
-                }
+            fns.move_to_dst(&state, new_src);
+        },
+        .Call => |Call| {
+            const dst = fns.maybe_grab_local_from_type(&state, expr.typ.data);
+            const old_next_local = c.irgen.next_local;
 
-                c.ircgen.next_local = old_next_local;
+            var bytes_pushed: u64 = 0;
 
-                return dst.as_rvalue();
-            },
-            .Constructor => |Constructor| {
-                switch (Constructor.typ.data.as) {
-                    .Struct, .Union => {
-                        const dst = maybe_grab_local_from_type(c, has_dst, expr.typ.data);
+            var it = Call.args.last;
+            while (it) |node| {
+                const arg = node.data.Expr;
+                const src = generate_ir_expr(c, null, arg);
+                generate_ir_instr1(c, .push, src);
+                bytes_pushed += utils.align_u64(arg.typ.data.byte_size, .QWORD);
 
-                        var it = Constructor.args.first;
-                        while (it) |node| {
-                            const Designator = &node.data.Designator;
-                            var size: u64 = 0;
-                            var offset: u64 = 0;
-                            switch (Designator.lhs.as.Symbol.as) {
-                                .Struct_Field, .Union_Field => |Field| {
-                                    offset = Field.offset;
-                                    size = Field.typ.data.byte_size;
-                                },
-                                else => unreachable,
-                            }
+                it = node.prev;
+            }
 
-                            const new_dst = bump_lvalue(dst, offset, size);
-                            _ = generate_irc_rvalue(c, new_dst, Designator.rhs);
+            if (!expr.typ.equal(Ast.void_type)) {
+                generate_ir_instr1(c, .push, dst.addr_of());
+                bytes_pushed += 8;
+            }
 
-                            it = node.next;
-                        }
+            const src = generate_ir_expr(c, null, Call.subexpr);
+            generate_ir_instr1(c, .call, src);
 
-                        break :src dst.as_rvalue();
-                    },
-                    .Array => |Array| {
-                        const dst = maybe_grab_local_from_type(c, has_dst, expr.typ.data);
+            if (bytes_pushed > 0) {
+                generate_ir_instr1(c, .pop, .{ .Imm = bytes_pushed });
+            }
 
+            c.irgen.next_local = old_next_local;
+        },
+        .Constructor => |Constructor| {
+            switch (Constructor.typ.data.as) {
+                .Struct, .Union => {
+                    const dst = fns.maybe_grab_local_from_type(&state, expr.typ.data);
+
+                    var it = Constructor.args.first;
+                    while (it) |node| {
+                        const Designator = &node.data.Designator;
+
+                        var size: u64 = 0;
                         var offset: u64 = 0;
-                        var it = Constructor.args.first;
-                        while (it) |node| {
-                            const size = Array.subtype.data.byte_size;
-                            const arg = node.data.Expr;
-
-                            const new_dst = bump_lvalue(dst, offset, size);
-                            _ = generate_irc_rvalue(c, new_dst, arg);
-
-                            offset += size;
-                            offset = utils.align_u64(offset, Array.subtype.data.alignment);
-                            it = node.next;
+                        switch (Designator.lhs.as.Symbol.as) {
+                            .Struct_Field, .Union_Field => |Field| {
+                                offset = Field.offset;
+                                size = Field.typ.data.byte_size;
+                            },
+                            else => unreachable,
                         }
 
-                        break :src dst.as_rvalue();
-                    },
-                    .Enum,
-                    .Proc,
-                    .Pointer,
-                    .Integer,
-                    .Bool,
-                    => {
-                        const arg = Constructor.args.first.?.data.Expr;
-                        break :src generate_irc_rvalue(c, null, arg);
-                    },
-                    .Void, .Identifier, .Type_Of => unreachable,
-                }
-            },
-            .Subscript => |Subscript| {
-                move_src = true;
+                        const new_dst = dst.bump(offset, size);
+                        _ = generate_ir_expr(c, new_dst, Designator.rhs);
 
-                const subexpr = generate_irc_rvalue(c, null, Subscript.subexpr);
-                const index = generate_irc_rvalue(c, null, Subscript.index);
-                const dst = grab_local(c, 8, .QWORD);
-
-                const offset = utils.align_u64(expr.typ.data.byte_size, expr.typ.data.alignment);
-                generate_irc_instr(c, .{
-                    .Binary_Op = .{
-                        .dst = dst.as_lvalue(),
-                        .src0 = index,
-                        .src1 = .{ .Imm = offset },
-                        .tag = .Mul,
-                        .is_signed = false,
-                    },
-                });
-
-                if (Subscript.subexpr.typ.data.as != .Pointer) {
-                    switch (subexpr.Lvalue) {
-                        .Tmp => {
-                            generate_irc_instr(c, .{ .Binary_Op = .{
-                                .dst = dst.as_lvalue(),
-                                .src0 = dst.as_rvalue(),
-                                .src1 = .{ .Addr = subexpr.Lvalue },
-                                .tag = .Add,
-                                .is_signed = false,
-                            } });
-
-                            break :src .{ .Lvalue = .{
-                                .Mem = .{
-                                    .base = dst,
-                                    .offset = 0,
-                                    .size = expr.typ.data.byte_size,
-                                },
-                            } };
-                        },
-                        .Mem => |mem| {
-                            if (mem.base) |src0| {
-                                generate_irc_instr(c, .{ .Binary_Op = .{
-                                    .dst = dst.as_lvalue(),
-                                    .src0 = dst.as_rvalue(),
-                                    .src1 = src0.as_rvalue(),
-                                    .tag = .Add,
-                                    .is_signed = false,
-                                } });
-                            }
-
-                            break :src .{ .Lvalue = .{
-                                .Mem = .{
-                                    .base = dst,
-                                    .offset = mem.offset,
-                                    .size = expr.typ.data.byte_size,
-                                },
-                            } };
-                        },
+                        it = node.next;
                     }
-                } else {
-                    generate_irc_instr(c, .{ .Binary_Op = .{
-                        .dst = dst.as_lvalue(),
-                        .src0 = dst.as_rvalue(),
-                        .src1 = subexpr,
-                        .tag = .Add,
-                        .is_signed = false,
-                    } });
-                    break :src .{ .Lvalue = .{
-                        .Mem = .{
-                            .base = dst,
-                            .offset = 0,
-                            .size = expr.typ.data.byte_size,
-                        },
-                    } };
-                }
-            },
-            .Byte_Size_Of => unreachable,
-            .Alignment_Of => unreachable,
-            .As, .Cast => |Cast| {
-                var typ = Cast.typ;
-                if (typ.data.as == .Enum) { // TODO: fix this? Not a good solution if we need to do some enum specific stuff.
-                    typ = typ.data.as.Enum.integer_type;
-                }
-                switch (typ.data.as) {
-                    .Struct,
-                    .Union,
-                    .Array,
-                    .Proc,
-                    .Pointer,
-                    => {
-                        move_src = true;
-                        break :src generate_irc_rvalue(c, null, Cast.expr);
-                    },
-                    .Enum => unreachable,
-                    .Integer => |dInteger| {
-                        const src = generate_irc_rvalue(c, null, Cast.expr);
+                },
+                .Array => |Array| {
+                    const dst = fns.maybe_grab_local_from_type(&state, expr.typ.data);
 
+                    var offset: u64 = 0;
+                    var it = Constructor.args.first;
+                    while (it) |node| {
+                        const size = Array.subtype.data.byte_size;
+                        const arg = node.data.Expr;
+
+                        const new_dst = dst.bump(offset, size);
+                        _ = generate_ir_expr(c, new_dst, arg);
+
+                        offset += size;
+                        offset = utils.align_u64(offset, Array.subtype.data.alignment);
+                        it = node.next;
+                    }
+                },
+                .Enum,
+                .Proc,
+                .Pointer,
+                .Integer,
+                .Bool,
+                => {
+                    const arg = Constructor.args.first.?.data.Expr;
+                    const src = generate_ir_expr(c, null, arg);
+                    fns.move_to_dst(&state, src);
+                },
+                .Void,
+                .Identifier,
+                .Type_Of,
+                => unreachable,
+            }
+        },
+        .Subscript => |Subscript| {
+            const subexpr = generate_ir_expr(c, null, Subscript.subexpr);
+            const dst = grab_local(c, 8, .QWORD);
+
+            {
+                const index = generate_ir_expr(c, null, Subscript.index);
+                const offset = utils.align_u64(expr.typ.data.byte_size, expr.typ.data.alignment);
+                generate_ir_instr3(c, .umul, dst, index, .{ .Imm = offset });
+            }
+
+            if (Subscript.subexpr.typ.data.as != .Pointer) {
+                generate_ir_instr3(c, .uadd, dst, dst, subexpr.addr_of());
+            } else {
+                generate_ir_instr3(c, .uadd, dst, dst, subexpr);
+            }
+
+            const src = dst.mem_from_tmp(0, expr.typ.data.byte_size);
+            fns.move_to_dst(&state, src);
+        },
+        .Byte_Size_Of => unreachable,
+        .Alignment_Of => unreachable,
+        .As, .Cast => |Cast| {
+            var typ = Cast.typ;
+            if (typ.data.as == .Enum) { // TODO: fix this? Not a good solution if we need to do some enum specific stuff.
+                typ = typ.data.as.Enum.integer_type;
+            }
+            switch (typ.data.as) {
+                .Struct,
+                .Union,
+                .Array,
+                .Proc,
+                .Pointer,
+                => {
+                    const src = generate_ir_expr(c, null, Cast.expr);
+                    fns.move_to_dst(&state, src);
+                },
+                .Enum => unreachable,
+                .Integer => |dInteger| {
+                    const src = generate_ir_expr(c, null, Cast.expr);
+
+                    _ = src: {
                         switch (Cast.expr.typ.data.as) {
                             .Integer => |sInteger| {
                                 if (dInteger.bits > sInteger.bits and dInteger.is_signed and sInteger.is_signed) {
-                                    const dst = maybe_grab_local_from_type(c, has_dst, expr.typ.data);
-                                    generate_irc_instr(c, .{ .Movsx = .{
-                                        .dst = dst,
-                                        .src = src,
-                                        .src_bits = sInteger.bits,
-                                    } });
-                                    break :src dst.as_rvalue();
+                                    const dst = fns.maybe_grab_local_from_type(&state, expr.typ.data);
+                                    generate_ir_instr3(c, .movsx, dst.*, src, .{ .Imm = sInteger.bits });
+                                    break :src;
                                 } else {}
                             },
                             else => {},
                         }
 
-                        move_src = true;
-                        break :src src;
-                    },
-                    .Bool => {
-                        const dst = maybe_grab_local_from_type(c, has_dst, expr.typ.data);
-                        const src = generate_irc_rvalue(c, null, Cast.expr);
-                        generate_irc_instr(c, .{ .Setnz = .{
-                            .dst = dst,
-                            .src = src,
-                        } });
-                        break :src dst.as_rvalue();
-                    },
-                    .Void, .Identifier, .Type_Of => unreachable,
-                }
-            },
-            .Integer => |value| {
-                move_src = true;
-                break :src .{ .Imm = value };
-            },
-            .Boolean => |value| {
-                move_src = true;
-                break :src .{ .Imm = @intFromBool(value) };
-            },
-            .Null => {
-                move_src = true;
-                break :src .{ .Imm = 0 };
-            },
-            .Symbol => |symbol| {
-                switch (symbol.as) {
-                    .Variable => |Variable| {
-                        move_src = true;
-                        break :src Variable.storage.as_rvalue();
-                    },
-                    .Parameter => |Parameter| {
-                        move_src = true;
-                        break :src Parameter.storage.as_rvalue();
-                    },
-                    .Procedure => |*Procedure| {
-                        move_src = true;
-                        break :src .{ .Label = Procedure.start_label };
-                    },
-                    .Struct_Field, .Union_Field => unreachable,
-                    .Enum_Field => |Enum_Field| {
-                        move_src = true;
-                        break :src .{ .Imm = Enum_Field.computed_value };
-                    },
-                    .Type => unreachable,
-                }
-            },
-            .Type, .Identifier => unreachable,
-        }
-    };
+                        fns.move_to_dst(&state, src);
 
-    if (has_dst) |dst| { // TODO: Do I need to sign extend if 'expr.typ' is signed integer?
-        if (move_src) {
-            generate_irc_instr(c, .{ .Mov = .{
-                .dst = dst,
-                .src = src,
-            } });
-            return dst.as_rvalue();
-        }
+                        break :src;
+                    };
+                },
+                .Bool => {
+                    const src = generate_ir_expr(c, null, Cast.expr);
+                    const dst = fns.maybe_grab_local_from_type(&state, expr.typ.data);
+                    generate_ir_instr2(c, .setnz, dst.*, src);
+                },
+                .Void,
+                .Identifier,
+                .Type_Of,
+                => unreachable,
+            }
+        },
+        .Integer => |value| {
+            fns.move_to_dst(&state, .{ .Imm = value });
+        },
+        .Boolean => |value| {
+            fns.move_to_dst(&state, .{ .Imm = @intFromBool(value) });
+        },
+        .Null => {
+            fns.move_to_dst(&state, .{ .Imm = 0 });
+        },
+        .Symbol => |symbol| {
+            switch (symbol.as) {
+                .Variable => |Variable| {
+                    fns.move_to_dst(&state, Variable.storage);
+                },
+                .Parameter => |Parameter| {
+                    fns.move_to_dst(&state, Parameter.storage);
+                },
+                .Procedure => |*Procedure| {
+                    fns.move_to_dst(&state, .{ .Label = Procedure.start_label });
+                },
+                .Enum_Field => |Enum_Field| {
+                    fns.move_to_dst(&state, .{ .Imm = Enum_Field.computed_value });
+                },
+                .Struct_Field,
+                .Union_Field,
+                .Type,
+                => unreachable,
+            }
+        },
+        .Type,
+        .Identifier,
+        => unreachable,
     }
 
-    return src;
+    std.debug.assert(state.has_dst != null);
+
+    return state.has_dst.?;
 }
 
-fn generate_irc_jmpc(c: *Compiler, expr: *Ast.Expr, label: IRC.Label, jump_if_true: bool) void {
-    var src0: IRC.Rvalue = undefined;
-    var src1: IRC.Rvalue = .{ .Imm = 0 };
-    var tag: IRC.Instr.Jmpc.Tag = .Neq;
+fn generate_ir_jmpc(c: *Compiler, expr: *Ast.Expr, label: IRE.Label, jump_if_true: bool) void {
+    var src0: IRE.Operand = undefined;
+    var src1: IRE.Operand = .{ .Imm = 0 };
+    var opcode: IRE.Opcode = .ujne;
     var is_signed = false;
 
     _ = fill: {
@@ -722,16 +698,16 @@ fn generate_irc_jmpc(c: *Compiler, expr: *Ast.Expr, label: IRC.Label, jump_if_tr
             .Binary_Op => |Binary_Op| {
                 switch (Binary_Op.tag) {
                     .Eq, .Neq, .Lt, .Leq, .Gt, .Geq => {
-                        src0 = generate_irc_rvalue(c, null, Binary_Op.lhs);
-                        src1 = generate_irc_rvalue(c, null, Binary_Op.rhs);
+                        src0 = generate_ir_expr(c, null, Binary_Op.lhs);
+                        src1 = generate_ir_expr(c, null, Binary_Op.rhs);
 
-                        tag = switch (Binary_Op.tag) {
-                            .Eq => .Eq,
-                            .Neq => .Neq,
-                            .Lt => .Lt,
-                            .Leq => .Leq,
-                            .Gt => .Gt,
-                            .Geq => .Geq,
+                        opcode = switch (Binary_Op.tag) {
+                            .Eq => .uje,
+                            .Neq => .ujne,
+                            .Lt => .ujl,
+                            .Leq => .ujle,
+                            .Gt => .ujg,
+                            .Geq => .ujge,
                             else => unreachable,
                         };
 
@@ -745,7 +721,7 @@ fn generate_irc_jmpc(c: *Compiler, expr: *Ast.Expr, label: IRC.Label, jump_if_tr
             .Unary_Op => |Unary_Op| {
                 switch (Unary_Op.tag) {
                     .Not => {
-                        generate_irc_jmpc(c, Unary_Op.subexpr, label, !jump_if_true);
+                        generate_ir_jmpc(c, Unary_Op.subexpr, label, !jump_if_true);
                         return;
                     },
                     else => {},
@@ -754,153 +730,398 @@ fn generate_irc_jmpc(c: *Compiler, expr: *Ast.Expr, label: IRC.Label, jump_if_tr
             else => {},
         }
 
-        src0 = generate_irc_rvalue(c, null, expr);
+        src0 = generate_ir_expr(c, null, expr);
     };
 
     if (!jump_if_true) {
-        tag = switch (tag) {
-            .Eq => .Neq,
-            .Neq => .Eq,
-            .Lt => .Geq,
-            .Leq => .Gt,
-            .Gt => .Leq,
-            .Geq => .Lt,
+        opcode = switch (opcode) {
+            .uje => .ujne,
+            .ujne => .uje,
+            .ujl => .ujge,
+            .ujle => .ujg,
+            .ujg => .ujle,
+            .ujge => .ujl,
+            else => unreachable,
         };
     }
 
-    generate_irc_instr(c, .{ .Jmpc = .{
-        .src0 = src0,
-        .src1 = src1,
-        .label = label,
-        .tag = tag,
-        .is_signed = is_signed,
-    } });
-}
-
-fn generate_irc_instr(c: *Compiler, instr: IRC.Instr) void {
-    c.irc.instrs.append(instr) catch {
-        Compiler.exit(1);
-    };
-}
-
-fn bump_lvalue(lvalue: IRC.Lvalue, offset: u64, size: u64) IRC.Lvalue {
-    var r = lvalue;
-    switch (r) {
-        .Tmp => |*tmp| {
-            switch (tmp.offset) {
-                .Local => |*base_offset| {
-                    base_offset.* += @intCast(offset);
-                },
-                .Global => |*base_offset| {
-                    base_offset.* += offset;
-                },
-            }
-            tmp.size = size;
-        },
-        .Mem => |*mem| {
-            mem.offset += offset;
-            mem.size = size;
-        },
+    if (is_signed) {
+        opcode = opcode.to_signed();
     }
-    return r;
+
+    generate_ir_instr3(c, opcode, src0, src1, .{ .Label = label });
 }
 
-fn deref_lvalue(c: *Compiler, src: IRC.Lvalue, offset: u64, size: u64) IRC.Lvalue {
+fn generate_ir_label(c: *Compiler, label: IRE.Label) void {
+    var labels = &c.irgen.labels;
+
+    var capacity = labels.capacity;
+    if (capacity < label) {
+        capacity = label + capacity / 2 + 1;
+        labels.resize(capacity) catch {
+            Compiler.exit(1);
+        };
+    }
+
+    labels.items[label] = c.ir.instrs.items.len;
+}
+
+pub fn generate_ir_instr0(c: *Compiler, opcode: IRE.Opcode) void {
+    var params = IRE.Instr{
+        .opcode = opcode,
+        .ops = .{ undefined, undefined, undefined },
+        .ops_count = 0,
+    };
+    generate_ir_instr(c, &params);
+}
+
+pub fn generate_ir_instr1(c: *Compiler, opcode: IRE.Opcode, op0: IRE.Operand) void {
+    var params = IRE.Instr{
+        .opcode = opcode,
+        .ops = .{ op0, undefined, undefined },
+        .ops_count = 1,
+    };
+    generate_ir_instr(c, &params);
+}
+
+pub fn generate_ir_instr2(c: *Compiler, opcode: IRE.Opcode, op0: IRE.Operand, op1: IRE.Operand) void {
+    var params = IRE.Instr{
+        .opcode = opcode,
+        .ops = .{ op0, op1, undefined },
+        .ops_count = 2,
+    };
+    generate_ir_instr(c, &params);
+}
+
+pub fn generate_ir_instr3(c: *Compiler, opcode: IRE.Opcode, op0: IRE.Operand, op1: IRE.Operand, op2: IRE.Operand) void {
+    var params = IRE.Instr{
+        .opcode = opcode,
+        .ops = .{ op0, op1, op2 },
+        .ops_count = 3,
+    };
+    generate_ir_instr(c, &params);
+}
+
+pub fn generate_ir_instr_at0(c: *Compiler, index: usize, opcode: IRE.Opcode) void {
+    var params = IRE.Instr{
+        .opcode = opcode,
+        .ops = .{ undefined, undefined, undefined },
+        .ops_count = 0,
+    };
+    generate_ir_instr_at(c, index, &params);
+}
+
+pub fn generate_ir_instr_at1(c: *Compiler, index: usize, opcode: IRE.Opcode, op0: IRE.Operand) void {
+    var params = IRE.Instr{
+        .opcode = opcode,
+        .ops = .{ op0, undefined, undefined },
+        .ops_count = 1,
+    };
+    generate_ir_instr_at(c, index, &params);
+}
+
+pub fn generate_ir_instr2_at(c: *Compiler, index: usize, opcode: IRE.Opcode, op0: IRE.Operand, op1: IRE.Operand) void {
+    var params = IRE.Instr{
+        .opcode = opcode,
+        .ops = .{ op0, op1, undefined },
+        .ops_count = 2,
+    };
+    generate_ir_instr_at(c, index, &params);
+}
+
+pub fn generate_ir_instr_at3(c: *Compiler, index: usize, opcode: IRE.Opcode, op0: IRE.Operand, op1: IRE.Operand, op2: IRE.Operand) void {
+    var params = IRE.Instr{
+        .opcode = opcode,
+        .ops = .{ op0, op1, op2 },
+        .ops_count = 3,
+    };
+    generate_ir_instr_at(c, index, &params);
+}
+
+fn generate_ir_instr(c: *Compiler, params: *IRE.Instr) void {
+    generate_ir_instr_at(c, c.ir.instrs.items.len, params);
+}
+
+fn generate_ir_instr_at(c: *Compiler, index: usize, p: *IRE.Instr) void {
+    std.debug.assert(is_valid_instr: {
+        if (p.ops_count != p.opcode.operand_count()) {
+            break :is_valid_instr false;
+        }
+
+        switch (p.opcode) {
+            .exit,
+            .printp,
+            .printi,
+            .printu,
+            .printb,
+            => break :is_valid_instr true,
+            .ue,
+            .une,
+            .ul,
+            .ule,
+            .ug,
+            .uge,
+            .uadd,
+            .usub,
+            .umul,
+            .udiv,
+            .umod,
+            .ie,
+            .ine,
+            .il,
+            .ile,
+            .ig,
+            .ige,
+            .iadd,
+            .isub,
+            .imul,
+            .idiv,
+            .imod,
+            => break :is_valid_instr p.ops[0].is_lvalue(),
+            .neg,
+            .not,
+            => break :is_valid_instr p.ops[0].is_lvalue(),
+            .jmp,
+            .uje,
+            .ujne,
+            .ujl,
+            .ujle,
+            .ujg,
+            .ujge,
+            .ije,
+            .ijne,
+            .ijl,
+            .ijle,
+            .ijg,
+            .ijge,
+            => break :is_valid_instr true,
+            .setnz,
+            .mov,
+            => break :is_valid_instr p.ops[0].is_lvalue(),
+            .mov_big => break :is_valid_instr p.ops[0].is_lvalue() and p.ops[1].is_lvalue(),
+            .movsx => break :is_valid_instr p.ops[0].is_lvalue(),
+            .call,
+            .push,
+            .pop,
+            => break :is_valid_instr true,
+            .push_big => break :is_valid_instr p.ops[0].is_lvalue(),
+            .start_proc,
+            .end_proc,
+            => break :is_valid_instr true,
+        }
+    });
+
+    switch (p.opcode) {
+        .mov => {
+            const size = p.ops[0].grab_size();
+            if (size > 8) {
+                std.debug.assert(p.ops[1].grab_size() == size);
+                p.opcode = .mov_big;
+                p.ops[0] = p.ops[0].addr_of();
+                p.ops[1] = p.ops[1].addr_of();
+                p.ops[2] = .{ .Imm = size };
+                p.ops_count = 3;
+            }
+        },
+        .push => {
+            const size = p.ops[0].grab_size_no_fail();
+            if (size > 8) {
+                p.opcode = .push_big;
+                p.ops[0] = p.ops[0].addr_of();
+                p.ops[1] = .{ .Imm = size };
+                p.ops_count = 2;
+            }
+        },
+        else => {},
+    }
+
+    var instr = IRD.Instr{
+        .opcode = p.opcode,
+        .ops = undefined,
+        .ops_count = p.ops_count,
+    };
+
+    for (p.ops[0..p.ops_count], 0..) |op, i| {
+        instr.ops[i] = op.decode();
+    }
+
+    write_instr_at(c, index, instr);
+}
+
+fn write_instr_at(c: *Compiler, index: usize, instr: IRD.Instr) void {
+    var data = [1]u32{0} ** (1 + 6 * 2);
+    var off: u5 = 0;
+
+    data[0] |= @as(u32, @intFromEnum(instr.opcode)) << off;
+    off += 8;
+
+    var at: u8 = 1;
+    for (instr.ops[0..instr.ops_count]) |op| {
+        data[0] |= @as(u32, @intFromEnum(op)) << off;
+        off += @bitSizeOf(IRD.Operand.Tag);
+
+        switch (op) {
+            .Tmp => |tmp| {
+                const ptr: [*]const u32 = @ptrCast(&tmp);
+                data[at + 0] = ptr[0];
+                data[at + 1] = ptr[1];
+                at += 2;
+            },
+            .Mem_B => |mem| {
+                data[0] |= @as(u32, mem.size_minus_one) << off;
+                off += 3;
+
+                const ptr: [*]const u32 = @ptrCast(&mem);
+                data[at + 0] = ptr[0];
+                data[at + 1] = ptr[1];
+                at += 2;
+            },
+            .Mem_BO => |mem| {
+                data[0] |= @as(u32, mem.size_minus_one) << off;
+                off += 3;
+
+                const ptr: [*]const u32 = @ptrCast(&mem);
+                data[at + 0] = ptr[0];
+                data[at + 1] = ptr[1];
+                data[at + 2] = ptr[2];
+                data[at + 3] = ptr[3];
+                at += 4;
+            },
+            .Addr_T => |tmp| {
+                const ptr: [*]const u32 = @ptrCast(&tmp);
+                data[at + 0] = ptr[0];
+                data[at + 1] = ptr[1];
+                at += 2;
+            },
+            .Addr_BO => |mem| {
+                const ptr: [*]const u32 = @ptrCast(&mem);
+                data[at + 0] = ptr[0];
+                data[at + 1] = ptr[1];
+                data[at + 2] = ptr[2];
+                data[at + 3] = ptr[3];
+                at += 4;
+            },
+            .Imm => |imm| {
+                const ptr: [*]const u32 = @ptrCast(&imm);
+                data[at + 0] = ptr[0];
+                data[at + 1] = ptr[1];
+                at += 2;
+            },
+            .Label => |label| {
+                const ptr: [*]const u32 = @ptrCast(&label);
+                data[at + 0] = ptr[0];
+                data[at + 1] = ptr[1];
+                at += 2;
+            },
+        }
+    }
+
+    {
+        var bytes: []const u8 = undefined;
+        bytes.ptr = @ptrCast(&data[0]);
+        bytes.len = at * 4;
+        write_instr_bytes_at(c, index, bytes);
+    }
+}
+
+fn write_instr_bytes_at(c: *Compiler, index: usize, bytes: []const u8) void {
+    if (index == c.ir.instrs.items.len) {
+        c.ir.instrs.insertSlice(index, bytes) catch {
+            Compiler.exit(1);
+        };
+    } else {
+        std.debug.assert(index + bytes.len <= c.ir.instrs.items.len);
+        c.ir.instrs.replaceRange(index, bytes.len, bytes) catch {
+            Compiler.exit(1);
+        };
+    }
+}
+
+fn deref(c: *Compiler, src: IRE.Operand, offset: u64, size: u64) IRE.Operand {
     switch (src) {
-        .Tmp => |tmp| {
-            return .{ .Mem = .{
-                .base = tmp,
-                .offset = offset,
-                .size = size,
-            } };
+        .Tmp => {
+            return src.mem_from_tmp(offset, size);
         },
         .Mem => |mem| {
+            std.debug.assert(mem.size <= 8);
             const dst = grab_local(c, mem.size, .QWORD);
-            generate_irc_instr(c, .{ .Mov = .{
-                .dst = dst.as_lvalue(),
-                .src = src.as_rvalue(),
-            } });
-            return .{ .Mem = .{
-                .base = dst,
-                .offset = offset,
-                .size = size,
-            } };
-        },
-    }
-}
+            generate_ir_instr2(c, .mov, dst, src);
 
-fn deref_rvalue(c: *Compiler, src: IRC.Rvalue, offset: u64, size: u64) IRC.Lvalue {
-    switch (src) {
-        .Lvalue => |lvalue| {
-            return deref_lvalue(c, lvalue, offset, size);
+            return dst.mem_from_tmp(offset, size);
         },
-        .Addr => {
-            const dst = grab_local(c, 8, .QWORD);
-            // TODO: Should make 'Addr' a valid memory operand?
-            generate_irc_instr(c, .{ .Mov = .{
-                .dst = dst.as_lvalue(),
-                .src = src,
-            } });
-            return .{ .Mem = .{
-                .base = dst,
-                .offset = offset,
+        .Addr_T => |tmp| {
+            return .{ .Tmp = .{
+                .offset = tmp.offset + @as(i59, @intCast(offset)),
+                .tag = tmp.tag,
                 .size = size,
             } };
         },
-        .Label => |label| {
+        .Addr_M => |mem| {
             return .{ .Mem = .{
-                .base = null,
-                .offset = label + offset,
+                .base = mem.base,
+                .offset = mem.offset + offset,
                 .size = size,
             } };
         },
         .Imm => |imm| {
-            return .{ .Mem = .{
-                .base = null,
-                .offset = imm + offset,
+            return .{ .Tmp = .{
+                .offset = @intCast(imm + offset),
+                .tag = .Absolute,
                 .size = size,
             } };
+        },
+        .Label => {
+            // Since labels are not yet resolved (we don't know absolute offset), we can't perform operations on it during IR generation.
+            const dst = grab_local(c, 8, .QWORD);
+            generate_ir_instr3(c, .uadd, dst, src, .{ .Imm = offset });
+            return dst.mem_from_tmp(offset, size);
         },
     }
 }
 
-fn grab_local(c: *Compiler, byte_size: u64, alignment: Alignment) IRC.Tmp {
-    const offset = utils.align_u64(@intCast(c.ircgen.next_local), alignment);
-    c.ircgen.next_local = @intCast(offset + byte_size);
-    c.ircgen.biggest_next_local = @max(c.ircgen.biggest_next_local, c.ircgen.next_local);
-    return .{
-        .offset = .{ .Local = @intCast(offset) },
+pub fn grab_local(c: *Compiler, byte_size: u64, alignment: Alignment) IRE.Operand {
+    const offset = utils.align_u64(@intCast(c.irgen.next_local), alignment);
+    c.irgen.next_local = @intCast(offset + byte_size);
+    c.irgen.biggest_next_local = @max(c.irgen.biggest_next_local, c.irgen.next_local);
+    return .{ .Tmp = .{
+        .offset = @intCast(offset),
+        .tag = .Relative,
         .size = byte_size,
-    };
+    } };
 }
 
-fn grab_local_from_type(c: *Compiler, data: *Ast.Type.SharedData) IRC.Tmp {
+pub fn grab_local_from_type(c: *Compiler, data: *Ast.Type.SharedData) IRE.Operand {
     return grab_local(c, data.byte_size, data.alignment);
 }
 
-fn maybe_grab_local_from_type(c: *Compiler, has_dst: ?IRC.Lvalue, data: *Ast.Type.SharedData) IRC.Lvalue {
-    return if (has_dst) |dst| dst else grab_local_from_type(c, data).as_lvalue();
-}
+pub fn grab_global(c: *Compiler, byte_size: u64, alignment: Alignment) IRE.Operand {
+    std.debug.assert(c.irgen.next_global == c.ir.globals.items.len);
 
-pub fn grab_global(c: *Compiler, byte_size: u64, alignment: Alignment) IRC.Tmp {
-    const offset = utils.align_u64(c.ircgen.next_global, alignment);
-    c.ircgen.next_global = offset + byte_size;
-    return .{
-        .offset = .{ .Global = offset },
-        .size = byte_size,
+    const old_offset = c.irgen.next_global;
+    const new_offset = utils.align_u64(old_offset, alignment);
+
+    c.irgen.next_global = new_offset + byte_size;
+    c.ir.globals.appendNTimes(0xAA, byte_size + (new_offset - old_offset)) catch {
+        Compiler.exit(1);
     };
+
+    return .{ .Tmp = .{
+        .offset = @intCast(new_offset),
+        .tag = .Global,
+        .size = byte_size,
+    } };
 }
 
-pub fn grab_global_from_type(c: *Compiler, data: *Ast.Type.SharedData) IRC.Tmp {
+pub fn grab_global_from_type(c: *Compiler, data: *Ast.Type.SharedData) IRE.Operand {
     return grab_global(c, data.byte_size, data.alignment);
 }
 
-pub fn grab_label(c: *Compiler) IRC.Label {
+pub fn grab_label(c: *Compiler) IRE.Label {
     return grab_many_labels(c, 1);
 }
 
-pub fn grab_many_labels(c: *Compiler, count: usize) IRC.Label {
-    const label = c.ircgen.next_label;
-    c.ircgen.next_label += count;
+pub fn grab_many_labels(c: *Compiler, count: usize) IRE.Label {
+    const label = c.irgen.next_label;
+    c.irgen.next_label += count;
     return label;
 }

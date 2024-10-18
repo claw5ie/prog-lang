@@ -2,7 +2,7 @@ const std = @import("std");
 const utils = @import("utils.zig");
 const Compiler = @import("compiler.zig");
 const Lexer = @import("lexer.zig");
-const IRCGen = @import("irc-generator.zig");
+const IRGen = @import("irc-generator.zig");
 
 const Token = Compiler.Lexer.Token;
 const Ast = Compiler.Ast;
@@ -676,8 +676,8 @@ fn insert_symbol(c: *Compiler, result: ParseSymbolResult, how_to_parse: HowToPar
                     Compiler.exit(1);
                 }
 
-                const start_label = IRCGen.grab_label(c);
-                const end_label = IRCGen.grab_label(c);
+                const start_label = IRGen.grab_label(c);
+                const end_label = IRGen.grab_label(c);
 
                 symbol.attributes.is_const = true;
                 break :as .{ .Procedure = .{
