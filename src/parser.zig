@@ -374,9 +374,8 @@ fn try_parse_symbol(c: *Compiler) ParseSymbolResult {
     const line_info = Lexer.grab_line_info(c);
     var attributes = Compiler.Attributes{};
 
-    while (Lexer.peek(c) == .Attribute) {
-        const attribute = Lexer.grab(c).as.Attribute;
-        attributes = attributes.combine(attribute);
+    if (Lexer.peek(c) == .Attribute) {
+        attributes = Lexer.grab(c).as.Attribute;
         Lexer.advance(c);
     }
 

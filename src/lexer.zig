@@ -5,6 +5,7 @@ const Compiler = @import("compiler.zig");
 const LineInfo = Compiler.LineInfo;
 const Token = Compiler.Lexer.Token;
 const LOOKAHEAD = Compiler.Lexer.LOOKAHEAD;
+const TOKEN_BUFFER_COUNT = Compiler.Lexer.TOKEN_BUFFER_COUNT;
 
 const is_space = std.ascii.isWhitespace;
 const is_digit = std.ascii.isDigit;
@@ -15,7 +16,7 @@ const is_print = std.ascii.isPrint;
 pub fn putback(c: *Compiler, tok: Token) void {
     std.debug.assert(c.lexer.token_count < LOOKAHEAD);
     c.lexer.token_start -%= 1;
-    c.lexer.token_start %= LOOKAHEAD;
+    c.lexer.token_start %= TOKEN_BUFFER_COUNT;
     c.lexer.token_count += 1;
     c.lexer.buffer[c.lexer.token_start] = tok;
 }
@@ -38,7 +39,7 @@ pub fn peek(c: *Compiler) Token.Tag {
 
 pub fn advance_many(c: *Compiler, count: u8) void {
     c.lexer.token_start += count;
-    c.lexer.token_start %= LOOKAHEAD;
+    c.lexer.token_start %= TOKEN_BUFFER_COUNT;
     c.lexer.token_count -= count;
 }
 
@@ -60,7 +61,7 @@ fn grab_by_ptr(c: *Compiler, index: u8) *Token {
     while (index >= c.lexer.token_count) {
         buffer_token(c);
     }
-    return &c.lexer.buffer[(c.lexer.token_start + index) % LOOKAHEAD];
+    return &c.lexer.buffer[(c.lexer.token_start + index) % TOKEN_BUFFER_COUNT];
 }
 
 fn advance_line_info(c: *Compiler) void {
@@ -72,7 +73,7 @@ fn advance_line_info(c: *Compiler) void {
     }
 }
 
-fn buffer_token(c: *Compiler) void {
+fn parse_token(c: *Compiler) Token {
     var src = c.source_code[c.lexer.line_info.offset..];
     var at: usize = 0;
     var ch = src[at];
@@ -297,8 +298,37 @@ fn buffer_token(c: *Compiler) void {
         };
     }
 
-    std.debug.assert(c.lexer.token_count < LOOKAHEAD);
-    const index = (c.lexer.token_start + c.lexer.token_count) % LOOKAHEAD;
+    return tok;
+}
+
+fn buffer_token(c: *Compiler) void {
+    var curr = parse_token(c);
+
+    switch (curr.as) {
+        .Attribute => |*cattr| {
+            while (true) {
+                const next = parse_token(c);
+                switch (next.as) {
+                    .Attribute => |nattr| {
+                        cattr.combine(nattr);
+                    },
+                    else => {
+                        append_token(c, curr);
+                        append_token(c, next);
+                        return;
+                    },
+                }
+            }
+        },
+        else => {
+            append_token(c, curr);
+        },
+    }
+}
+
+fn append_token(c: *Compiler, tok: Token) void {
+    std.debug.assert(c.lexer.token_count < TOKEN_BUFFER_COUNT);
+    const index = (c.lexer.token_start + c.lexer.token_count) % TOKEN_BUFFER_COUNT;
     c.lexer.buffer[index] = tok;
     c.lexer.token_count += 1;
 }

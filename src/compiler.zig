@@ -61,19 +61,28 @@ pub const Attributes = packed struct {
     is_global: bool = false,
 
     pub fn is_empty(attr: Attributes) bool {
-        return attr.is_static == false and attr.is_const == false;
+        const ptr: *const u8 = @ptrCast(&attr);
+        return ptr.* == 0;
     }
 
-    pub fn combine(self: Attributes, other: Attributes) Attributes {
-        return .{
-            .is_const = self.is_const or other.is_const,
-            .is_static = self.is_static or other.is_static,
-        };
+    pub fn combine(self: *Attributes, other: Attributes) void {
+        const d: *u8 = @ptrCast(self);
+        const s: *const u8 = @ptrCast(&other);
+        d.* |= s.*;
     }
 };
 
 pub const Lexer = struct {
-    buffer: [LOOKAHEAD]Token = undefined,
+    buffer: [TOKEN_BUFFER_COUNT]Token = [1]Token{
+        .{
+            .line_info = .{
+                .line = 1,
+                .column = 1,
+                .offset = 0,
+            },
+            .as = .End_Of_File,
+        },
+    } ** TOKEN_BUFFER_COUNT,
     token_start: u8 = 0,
     token_count: u8 = 0,
     line_info: LineInfo = .{
@@ -82,6 +91,7 @@ pub const Lexer = struct {
         .offset = 0,
     },
 
+    pub const TOKEN_BUFFER_COUNT = 4;
     pub const LOOKAHEAD = 2;
 
     pub const Token = struct {
