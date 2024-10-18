@@ -2,7 +2,7 @@ const std = @import("std");
 const utils = @import("utils.zig");
 const Compiler = @import("compiler.zig");
 const Lexer = @import("lexer.zig");
-const IRGen = @import("irc-generator.zig");
+const IRGen = @import("ir-generator.zig");
 
 const Token = Compiler.Lexer.Token;
 const Ast = Compiler.Ast;

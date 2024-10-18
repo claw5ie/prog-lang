@@ -1770,7 +1770,7 @@ fn deinit(c: *Compiler) void {
 pub fn compile() void {
     const parse = @import("parser.zig").parse;
     const typecheck = @import("typechecker.zig").typecheck;
-    const generate_ir = @import("irc-generator.zig").generate_ir;
+    const generate_ir = @import("ir-generator.zig").generate_ir;
     const interpret = @import("interpreter.zig").interpret;
 
     var c = Compiler.init();
