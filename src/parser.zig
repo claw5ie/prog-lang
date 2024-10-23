@@ -38,13 +38,6 @@ const HowToParseSymbol = union(enum) {
 };
 
 pub fn parse(c: *Compiler, filepath: [:0]const u8) void {
-    Compiler.gpa.free(c.source_code);
-    c.filepath = filepath;
-    c.source_code = utils.read_entire_file(Compiler.gpa, filepath) catch {
-        Compiler.eprint("error: failed to read from a file '{s}'\n", .{filepath});
-        Compiler.exit(1);
-    };
-
     parse_top_level(c);
 }
 

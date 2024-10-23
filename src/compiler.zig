@@ -1,4 +1,3 @@
-lexer: Lexer,
 parser: Parser,
 ast: Ast,
 typechecker: Typechecker,
@@ -16,6 +15,7 @@ const Compiler = @This();
 
 const std = @import("std");
 const utils = @import("utils.zig");
+const Lexer = @import("lexer.zig");
 
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
@@ -54,188 +54,6 @@ pub const LineInfo = struct {
     line: u32,
     column: u32,
     offset: usize,
-};
-
-pub const Attributes = packed struct {
-    is_const: bool = false,
-    is_static: bool = false,
-    is_global: bool = false,
-
-    pub fn is_empty(attr: Attributes) bool {
-        const ptr: *const u8 = @ptrCast(&attr);
-        return ptr.* == 0;
-    }
-
-    pub fn combine(self: *Attributes, other: Attributes) void {
-        const d: *u8 = @ptrCast(self);
-        const s: *const u8 = @ptrCast(&other);
-        d.* |= s.*;
-    }
-};
-
-pub const Lexer = struct {
-    buffer: [TOKEN_BUFFER_COUNT]Token = [1]Token{
-        .{
-            .line_info = .{
-                .line = 1,
-                .column = 1,
-                .offset = 0,
-            },
-            .as = .End_Of_File,
-        },
-    } ** TOKEN_BUFFER_COUNT,
-    token_start: u8 = 0,
-    token_count: u8 = 0,
-    line_info: LineInfo = .{
-        .line = 1,
-        .column = 1,
-        .offset = 0,
-    },
-
-    pub const TOKEN_BUFFER_COUNT = 4;
-    pub const LOOKAHEAD = 2;
-
-    pub const Token = struct {
-        line_info: LineInfo,
-        as: As,
-
-        pub const Tag = enum {
-            Or,
-            And,
-            Eq,
-            Neq,
-            Lt,
-            Leq,
-            Gt,
-            Geq,
-            Add,
-            Sub,
-            Mul,
-            Div,
-            Mod,
-
-            Ref,
-            Deref,
-            Not,
-            Open_Paren,
-            Close_Paren,
-            Open_Curly,
-            Close_Curly,
-            Open_Bracket,
-            Close_Bracket,
-            Colon_Equal,
-            Colon,
-            Semicolon,
-            Dot,
-            Comma,
-            Equal,
-
-            Byte_Size_Of,
-            Alignment_Of,
-            As,
-            Cast,
-            Boolean,
-            Integer,
-            Identifier,
-            Null,
-
-            Struct,
-            Union,
-            Enum,
-            Proc,
-            Integer_Type,
-            Bool_Type,
-            Void_Type,
-            Type_Of,
-
-            Attribute,
-            Print,
-            If,
-            Then,
-            Else,
-            While,
-            Do,
-            Break,
-            Continue,
-            Switch,
-            Return,
-            Alias,
-            Case,
-
-            End_Of_File,
-        };
-
-        pub const As = union(Tag) {
-            Or: void,
-            And: void,
-            Eq: void,
-            Neq: void,
-            Lt: void,
-            Leq: void,
-            Gt: void,
-            Geq: void,
-            Add: void,
-            Sub: void,
-            Mul: void,
-            Div: void,
-            Mod: void,
-
-            Ref: void,
-            Deref: void,
-            Not: void,
-            Open_Paren: void,
-            Close_Paren: void,
-            Open_Curly: void,
-            Close_Curly: void,
-            Open_Bracket: void,
-            Close_Bracket: void,
-            Colon_Equal: void,
-            Colon: void,
-            Semicolon: void,
-            Dot: void,
-            Comma: void,
-            Equal: void,
-
-            Byte_Size_Of: void,
-            Alignment_Of: void,
-            As: void,
-            Cast: void,
-            Boolean: bool,
-            Integer: u64,
-            Identifier: []const u8,
-            Null: void,
-
-            Struct: void,
-            Union: void,
-            Enum: void,
-            Proc: void,
-            Integer_Type: Token.IntegerType,
-            Bool_Type: void,
-            Void_Type: void,
-            Type_Of: void,
-
-            Attribute: Attributes,
-            Print: void,
-            If: void,
-            Then: void,
-            Else: void,
-            While: void,
-            Do: void,
-            Break: void,
-            Continue: void,
-            Switch: void,
-            Return: void,
-            Alias: void,
-            Case: void,
-
-            End_Of_File: void,
-        };
-
-        pub const IntegerType = struct {
-            bits: u8,
-            is_signed: bool,
-        };
-    };
 };
 
 pub const Parser = struct {
@@ -765,6 +583,8 @@ pub const Ast = struct {
             name: []const u8,
             scope: *Scope,
         };
+
+        pub const Attributes = Lexer.Token.Attributes;
     };
 
     pub const SymbolList = std.DoublyLinkedList(*Symbol);
@@ -1706,7 +1526,6 @@ fn init() Compiler {
     };
 
     return .{
-        .lexer = .{},
         .parser = .{
             .current_scope = &global_scope,
         },
@@ -1774,11 +1593,6 @@ fn deinit(c: *Compiler) void {
 }
 
 pub fn compile() void {
-    const parse = @import("parser.zig").parse;
-    const typecheck = @import("typechecker.zig").typecheck;
-    const generate_ir = @import("ir-generator.zig").generate_ir;
-    const interpret = @import("interpreter.zig").interpret;
-
     var c = Compiler.init();
 
     const options = parse_cmd_options();
@@ -1799,26 +1613,43 @@ pub fn compile() void {
                 }
             };
 
-            parse(&c, input_filepath);
-            typecheck(&c);
-            generate_ir(&c);
-            write_ir(&c, output_filepath);
+            c.filepath = input_filepath;
+            c.source_code = utils.read_entire_file(Compiler.gpa, input_filepath) catch {
+                Compiler.eprint("error: failed to read from a file '{s}'\n", .{input_filepath});
+                Compiler.exit(1);
+            };
+
+            var lexer: Lexer = .{
+                .c = &c,
+            };
+            while (true) {
+                const tok = lexer.grab();
+                lexer.advance();
+                std.debug.print("{}\n", .{tok});
+                if (tok.as == .End_Of_File) break;
+            }
+            _ = output_filepath;
+
+            // parse(&c, input_filepath);
+            // typecheck(&c);
+            // generate_ir(&c);
+            // write_ir(&c, output_filepath);
         },
         .Run => {
             // TODO: ABOLISH THIS! BURN IT WITH FIRE!
             c.ir.instrs.deinit();
             c.ir.globals.deinit();
 
-            read_ir(&c, options.has_input_filepath.?);
-            interpret(&c);
+            // read_ir(&c, options.has_input_filepath.?);
+            // interpret(&c);
         },
         .Print => {
             // TODO: ABOLISH THIS AS WELL!!
             c.ir.instrs.deinit();
             c.ir.globals.deinit();
 
-            read_ir(&c, options.has_input_filepath.?);
-            c.ir.print();
+            // read_ir(&c, options.has_input_filepath.?);
+            // c.ir.print();
         },
     }
 
