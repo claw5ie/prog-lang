@@ -60,6 +60,21 @@ main: proc() void
     b = 42;
     #print b;
   }
+
+  {
+    a: Foo.Bar = Foo.Bar(x = Foo(x = 420));
+    #print a.x.x;
+
+    alias Foo: struct
+    {
+      x: i32,
+
+      alias Bar: struct
+      {
+        x: Foo,
+      };
+    };
+  }
 }
 
 foo: proc(x: u32) void

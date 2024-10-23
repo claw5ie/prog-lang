@@ -179,9 +179,11 @@ fn generate_ir_type(c: *Compiler, typ: *Ast.Type) void {
         .Integer,
         .Bool,
         .Void,
+        => {},
+        .Field,
         .Identifier,
         .Type_Of,
-        => {},
+        => unreachable,
     }
 }
 
@@ -214,6 +216,7 @@ fn generate_ir_stmt(c: *Compiler, stmt: *Ast.Stmt) void {
                 .Union,
                 .Proc,
                 .Array,
+                .Field,
                 .Void,
                 .Identifier,
                 .Type_Of,
@@ -575,6 +578,7 @@ pub fn generate_ir_expr(c: *Compiler, has_dst: ?IRE.Operand, expr: *Ast.Expr) IR
                     fns.move_to_dst(&state, src);
                 },
                 .Void,
+                .Field,
                 .Identifier,
                 .Type_Of,
                 => unreachable,
@@ -643,6 +647,7 @@ pub fn generate_ir_expr(c: *Compiler, has_dst: ?IRE.Operand, expr: *Ast.Expr) IR
                     generate_ir_instr2(c, .setnz, dst.*, src);
                 },
                 .Void,
+                .Field,
                 .Identifier,
                 .Type_Of,
                 => unreachable,

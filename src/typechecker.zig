@@ -195,20 +195,52 @@ fn typecheck_symbol(c: *Compiler, symbol: *Ast.Symbol) void {
 }
 
 fn unpack(c: *Compiler, typ: *Ast.Type) void {
-    const data = typ.data;
-    switch (data.stages.unpacking) {
-        .None => data.stages.unpacking = .Going,
+    const old_data = typ.data;
+    switch (old_data.stages.unpacking) {
+        .None => old_data.stages.unpacking = .Going,
         .Going => {
             c.report_error(typ.line_info, "found cyclic reference", .{});
             Compiler.exit(1);
         },
         .Done => return,
     }
-    defer data.stages.unpacking = .Done;
+    defer old_data.stages.unpacking = .Done;
 
-    switch (data.as) {
+    switch (old_data.as) {
         .Array => |Array| {
             unpack(c, Array.subtype);
+        },
+        .Field => |Field| {
+            unpack(c, Field.subtype);
+
+            const scope: *Ast.Scope = switch (Field.subtype.data.as) {
+                .Struct, .Union => |Struct| Struct.scope,
+                .Enum => |Enum| Enum.scope,
+                .Proc,
+                .Array,
+                .Pointer,
+                .Integer,
+                .Bool,
+                .Void,
+                => {
+                    c.report_error(Field.subtype.line_info, "expected struct, union, or enum type, but got '{}'", .{Field.subtype});
+                    Compiler.exit(1);
+                },
+                .Field, .Identifier, .Type_Of => unreachable,
+            };
+
+            const symbol = resolve_identifier(c, Field.field, scope);
+
+            // TODO[dedup].
+            if (symbol.as != .Type) {
+                c.report_error(typ.line_info, "symbol '{s}' is not a type", .{symbol.key.name});
+                Compiler.exit(1);
+            }
+
+            const new_typ = symbol.as.Type;
+            unpack(c, new_typ);
+            typ.data = new_typ.data;
+            typ.symbol = symbol;
         },
         .Pointer => |subtype| {
             unpack(c, subtype);
@@ -220,6 +252,7 @@ fn unpack(c: *Compiler, typ: *Ast.Type) void {
             }, typ.line_info.offset);
 
             if (has_symbol) |symbol| {
+                // TODO[dedup]: need to resolve symbol in two places.
                 if (symbol.as != .Type) {
                     c.report_error(typ.line_info, "symbol '{s}' is not a type", .{Identifier.name});
                     Compiler.exit(1);
@@ -289,7 +322,7 @@ fn shallow_check(c: *Compiler, typ: *Ast.Type) void {
         .Bool,
         .Void,
         => {},
-        .Identifier, .Type_Of => unreachable,
+        .Field, .Identifier, .Type_Of => unreachable,
     }
 }
 
@@ -337,7 +370,7 @@ fn void_array_check(c: *Compiler, typ: *Ast.Type) void {
         .Bool,
         .Void,
         => {},
-        .Identifier, .Type_Of => unreachable,
+        .Field, .Identifier, .Type_Of => unreachable,
     }
 }
 
@@ -510,7 +543,7 @@ fn typecheck_type(c: *Compiler, typ: *Ast.Type) void {
             std.debug.assert(data.byte_size == 0 and
                 data.alignment == .BYTE);
         },
-        .Identifier, .Type_Of => unreachable,
+        .Field, .Identifier, .Type_Of => unreachable,
     }
 }
 
@@ -536,7 +569,7 @@ fn typecheck_stmt(c: *Compiler, stmt: *Ast.Stmt) void {
                 .Integer,
                 .Bool,
                 => {},
-                .Identifier, .Type_Of => unreachable,
+                .Field, .Identifier, .Type_Of => unreachable,
             }
         },
         .Block => |block| {
@@ -963,7 +996,7 @@ fn typecheck_expr(c: *Compiler, expr: *Ast.Expr) TypecheckExprResult {
                                             .Struct_Field, .Union_Field => |Field| {
                                                 const rhs_type = typecheck_expr_only(c, Designator.rhs);
                                                 if (!safe_cast(c, Designator.rhs, rhs_type, Field.typ)) {
-                                                    c.report_error(expr.line_info, "expected '{}', but got '{}'", .{ Field.typ, rhs_type });
+                                                    c.report_error(Designator.rhs.line_info, "expected '{}', but got '{}'", .{ Field.typ, rhs_type });
                                                     Compiler.exit(1);
                                                 }
                                                 is_const = is_const and Designator.rhs.flags.is_const;
@@ -1043,7 +1076,7 @@ fn typecheck_expr(c: *Compiler, expr: *Ast.Expr) TypecheckExprResult {
                             c.report_error(expr.line_info, "can't construct expression of type 'void'", .{});
                             Compiler.exit(1);
                         },
-                        .Identifier, .Type_Of => unreachable,
+                        .Field, .Identifier, .Type_Of => unreachable,
                     }
 
                     const args = Call.args;
@@ -1160,61 +1193,26 @@ fn typecheck_expr(c: *Compiler, expr: *Ast.Expr) TypecheckExprResult {
                 const subexpr_result = typecheck_expr(c, Field.subexpr);
 
                 if (subexpr_result.tag == .Type) {
-                    typecheck_type(c, subexpr_result.typ);
-
-                    const scope: *Ast.Scope = switch (subexpr_result.typ.data.as) {
-                        .Struct, .Union => |Struct| Struct.scope,
-                        .Enum => |Enum| Enum.scope,
-                        .Proc,
-                        .Array,
-                        .Pointer,
-                        .Integer,
-                        .Bool,
-                        .Void,
-                        => {
-                            c.report_error(subexpr_result.typ.line_info, "expected struct, union, or enum type, but got '{}'", .{subexpr_result.typ});
-                            Compiler.exit(1);
-                        },
-                        .Identifier, .Type_Of => unreachable,
+                    const data = c.ast.create(Ast.Type.SharedData);
+                    data.* = .{
+                        .as = .{ .Field = .{
+                            .subtype = subexpr_result.typ,
+                            .field = Field.field,
+                        } },
+                        .byte_size = 0,
+                        .alignment = .BYTE,
+                        .stages = Ast.default_stages_none,
                     };
 
-                    const symbol = resolve_identifier(c, Field.field, scope);
+                    expr.as = .{ .Type = .{
+                        .line_info = expr.line_info,
+                        .data = data,
+                        .symbol = null,
+                    } };
 
-                    // TODO[duplicated-resolve-symbol].
-                    expr.flags.is_const = symbol.attributes.is_const;
-                    expr.flags.is_static = symbol.attributes.is_static;
+                    expr.flags.is_const = true;
 
-                    switch (symbol.as) {
-                        .Variable => |Variable| {
-                            expr.as = .{ .Symbol = symbol };
-                            break :result .{ .typ = Variable.typ.?, .tag = .Value };
-                        },
-                        .Parameter => |Parameter| {
-                            expr.as = .{ .Symbol = symbol };
-                            break :result .{ .typ = Parameter.typ, .tag = .Value };
-                        },
-                        .Procedure => |Procedure| {
-                            expr.as = .{ .Symbol = symbol };
-                            break :result .{ .typ = Procedure.typ, .tag = .Value };
-                        },
-                        .Struct_Field, .Union_Field => |Struct_Field| {
-                            expr.as = .{ .Symbol = symbol };
-                            break :result .{ .typ = Struct_Field.typ, .tag = .Non_Value };
-                        },
-                        .Enum_Field => {
-                            expr.as = .{ .Symbol = symbol };
-                            break :result .{ .typ = subexpr_result.typ, .tag = .Value };
-                        },
-                        .Type => |Type| {
-                            expr.as = .{ .Type = .{
-                                .line_info = expr.line_info,
-                                .data = Type.data,
-                                .symbol = Type.symbol,
-                            } };
-                            expr.flags.is_const = true;
-                            break :result .{ .typ = &expr.as.Type, .tag = .Type };
-                        },
-                    }
+                    break :result .{ .typ = &expr.as.Type, .tag = .Type };
                 } else {
                     expr.flags.is_lvalue = Field.subexpr.flags.is_lvalue;
                     expr.flags.is_const = Field.subexpr.flags.is_const;
@@ -1317,7 +1315,6 @@ fn typecheck_expr(c: *Compiler, expr: *Ast.Expr) TypecheckExprResult {
 
                     typecheck_symbol_type(c, symbol);
 
-                    // TODO[duplicated-resolve-symbol]: duplicated
                     expr.flags.is_const = symbol.attributes.is_const;
                     expr.flags.is_static = symbol.attributes.is_static;
 
@@ -1525,7 +1522,7 @@ fn safe_cast_to_integer(c: *Compiler, expr: *Ast.Expr, expr_type: *Ast.Type, wha
         .Proc, .Pointer => Ast.lookup_integer_type(64, false),
         .Integer => expr_type,
         .Bool => Ast.lookup_integer_type(1, false),
-        .Identifier, .Type_Of => unreachable,
+        .Field, .Identifier, .Type_Of => unreachable,
     };
 
     {
@@ -1633,7 +1630,7 @@ fn safe_cast(c: *Compiler, expr: *Ast.Expr, expr_type: *Ast.Type, cast_to: *Ast.
                     else => {},
                 }
             },
-            .Identifier, .Type_Of => unreachable,
+            .Field, .Identifier, .Type_Of => unreachable,
         }
 
         break :can_cast false;
@@ -1682,7 +1679,7 @@ fn can_unsafe_cast(c: *Compiler, expr: *Ast.Expr, expr_type: *Ast.Type, cast_to:
                 else => {},
             }
         },
-        .Identifier, .Type_Of => unreachable,
+        .Field, .Identifier, .Type_Of => unreachable,
     }
 
     return can_cast;

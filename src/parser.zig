@@ -727,264 +727,7 @@ fn insert_symbol(c: *Compiler, result: ParseSymbolResult, how_to_parse: HowToPar
 }
 
 fn parse_type(c: *Compiler) *Ast.Type {
-    const typ = c.ast.create(Ast.Type);
-    typ.* = parse_type_by_value(c);
-    return typ;
-}
-
-fn parse_type_by_value(c: *Compiler) Ast.Type {
-    var typ: Ast.Type = undefined;
-    if (!try_parse_type_by_value(c, &typ)) {
-        c.report_error(Lexer.grab_line_info(c), "token doesn't start a type", .{});
-        Compiler.exit(1);
-    }
-    return typ;
-}
-
-fn try_parse_type_by_value(c: *Compiler, dst: *Ast.Type) bool {
-    const tok = Lexer.grab(c);
-    Lexer.advance(c);
-
-    dst.* = dst: {
-        switch (tok.as) {
-            .Open_Paren => {
-                const typ = parse_type_by_value(c);
-                Lexer.expect(c, .Close_Paren);
-                break :dst typ;
-            },
-            .Struct => {
-                Lexer.expect(c, .Open_Curly);
-                push_scope(c);
-                const scope = c.parser.current_scope;
-                const fields = c.ast.create(Ast.SymbolList);
-                const rest = c.ast.create(Ast.SymbolList);
-                fields.* = .{};
-                rest.* = .{};
-                parse_symbol_list(c, fields, rest, .{ .Parsing_Container = .Struct });
-                pop_scope(c);
-                Lexer.expect(c, .Close_Curly);
-                const data = c.ast.create(Ast.Type.SharedData);
-                data.* = .{
-                    .as = .{ .Struct = .{
-                        .fields = fields,
-                        .rest = rest,
-                        .scope = scope,
-                    } },
-                    .byte_size = 0,
-                    .alignment = .BYTE,
-                    .stages = Ast.default_stages_none,
-                };
-                break :dst .{
-                    .line_info = tok.line_info,
-                    .data = data,
-                    .symbol = null,
-                };
-            },
-            .Union => {
-                Lexer.expect(c, .Open_Curly);
-                push_scope(c);
-                const scope = c.parser.current_scope;
-                const fields = c.ast.create(Ast.SymbolList);
-                const rest = c.ast.create(Ast.SymbolList);
-                fields.* = .{};
-                rest.* = .{};
-                parse_symbol_list(c, fields, rest, .{ .Parsing_Container = .Union });
-                pop_scope(c);
-                Lexer.expect(c, .Close_Curly);
-                const data = c.ast.create(Ast.Type.SharedData);
-                data.* = .{
-                    .as = .{ .Union = .{
-                        .fields = fields,
-                        .rest = rest,
-                        .scope = scope,
-                    } },
-                    .byte_size = 0,
-                    .alignment = .BYTE,
-                    .stages = Ast.default_stages_none,
-                };
-                break :dst .{
-                    .line_info = tok.line_info,
-                    .data = data,
-                    .symbol = null,
-                };
-            },
-            .Enum => {
-                Lexer.expect(c, .Open_Curly);
-                push_scope(c);
-                const scope = c.parser.current_scope;
-                const fields = c.ast.create(Ast.SymbolList);
-                const rest = c.ast.create(Ast.SymbolList);
-                fields.* = .{};
-                rest.* = .{};
-                parse_symbol_list(c, fields, rest, .{ .Parsing_Container = .Enum });
-                pop_scope(c);
-                Lexer.expect(c, .Close_Curly);
-                const data = c.ast.create(Ast.Type.SharedData);
-                data.* = .{
-                    .as = .{ .Enum = .{
-                        .fields = fields,
-                        .rest = rest,
-                        .integer_type = Ast.lookup_integer_type(0, false),
-                        .scope = scope,
-                    } },
-                    .byte_size = 0,
-                    .alignment = .BYTE,
-                    .stages = Ast.default_stages_none,
-                };
-                break :dst .{
-                    .line_info = tok.line_info,
-                    .data = data,
-                    .symbol = null,
-                };
-            },
-            .Proc => {
-                Lexer.expect(c, .Open_Paren);
-                push_scope(c);
-                const scope = c.parser.current_scope;
-                var params = Ast.SymbolList{};
-                parse_symbol_list(c, &params, null, .Parsing_Procedure);
-                pop_scope(c);
-                Lexer.expect(c, .Close_Paren);
-                const return_type = parse_type(c);
-                const data = c.ast.create(Ast.Type.SharedData);
-                data.* = .{
-                    .as = .{ .Proc = .{
-                        .params = params,
-                        .return_type = return_type,
-                        .scope = scope,
-                    } },
-                    .byte_size = Ast.pointer_byte_size,
-                    .alignment = Ast.pointer_alignment,
-                    .stages = Ast.default_stages_none,
-                };
-                break :dst .{
-                    .line_info = tok.line_info,
-                    .data = data,
-                    .symbol = null,
-                };
-            },
-            .Integer_Type => |Integer_Type| {
-                const typ = Ast.lookup_integer_type(Integer_Type.bits, Integer_Type.is_signed);
-                break :dst .{
-                    .line_info = tok.line_info,
-                    .data = typ.data,
-                    .symbol = null,
-                };
-            },
-            .Bool_Type => {
-                break :dst .{
-                    .line_info = tok.line_info,
-                    .data = Ast.bool_type.data,
-                    .symbol = null,
-                };
-            },
-            .Void_Type => {
-                break :dst .{
-                    .line_info = tok.line_info,
-                    .data = Ast.void_type.data,
-                    .symbol = null,
-                };
-            },
-            .Type_Of => {
-                var exprs: [1]*Ast.Expr = undefined;
-                const count = parse_fixed_size_expr_list(c, &exprs);
-                switch (count) {
-                    1 => {
-                        const data = c.ast.create(Ast.Type.SharedData);
-                        data.* = .{
-                            .as = .{ .Type_Of = exprs[0] },
-                            .byte_size = 0,
-                            .alignment = .BYTE,
-                            .stages = Ast.default_stages_none,
-                        };
-                        break :dst .{
-                            .line_info = tok.line_info,
-                            .data = data,
-                            .symbol = null,
-                        };
-                    },
-                    else => {
-                        c.report_error(tok.line_info, "expected 1 arguments, but got {}", .{count});
-                        Compiler.exit(1);
-                    },
-                }
-            },
-            .Identifier => |name| {
-                const data = c.ast.create(Ast.Type.SharedData);
-                data.* = .{
-                    .as = .{ .Identifier = .{
-                        .name = name,
-                        .scope = c.parser.current_scope,
-                    } },
-                    .byte_size = 0,
-                    .alignment = .BYTE,
-                    .stages = Ast.default_stages_none,
-                };
-                break :dst .{
-                    .line_info = tok.line_info,
-                    .data = data,
-                    .symbol = null,
-                };
-            },
-            else => {
-                Lexer.putback(c, tok);
-                return false;
-            },
-        }
-    };
-
-    while (true) {
-        switch (Lexer.peek(c)) {
-            .Deref => {
-                const line_info = Lexer.grab_line_info(c);
-                Lexer.advance(c);
-
-                const subtype = c.ast.create(Ast.Type);
-                subtype.* = dst.*;
-                const data = c.ast.create(Ast.Type.SharedData);
-                data.* = .{
-                    .as = .{ .Pointer = subtype },
-                    .byte_size = Ast.pointer_byte_size,
-                    .alignment = Ast.pointer_alignment,
-                    .stages = Ast.default_stages_none,
-                };
-                dst.* = .{
-                    .line_info = line_info,
-                    .data = data,
-                    .symbol = null,
-                };
-            },
-            .Open_Bracket => {
-                const line_info = Lexer.grab_line_info(c);
-
-                Lexer.advance(c);
-                const size = parse_expr(c);
-                Lexer.expect(c, .Close_Bracket);
-
-                const subtype = c.ast.create(Ast.Type);
-                subtype.* = dst.*;
-                const data = c.ast.create(Ast.Type.SharedData);
-                data.* = .{
-                    .as = .{ .Array = .{
-                        .subtype = subtype,
-                        .size = size,
-                        .computed_size = 0,
-                    } },
-                    .byte_size = 0,
-                    .alignment = .BYTE,
-                    .stages = Ast.default_stages_none,
-                };
-                dst.* = .{
-                    .line_info = line_info,
-                    .data = data,
-                    .symbol = null,
-                };
-            },
-            else => break,
-        }
-    }
-
-    return true;
+    return c.expr_to_type(parse_expr(c));
 }
 
 fn parse_expr(c: *Compiler) *Ast.Expr {
@@ -1212,7 +955,7 @@ fn parse_expr_highest_prec(c: *Compiler) *Ast.Expr {
 
                 switch (count) {
                     2 => {
-                        const typ = expr_to_type(c, exprs[0]);
+                        const typ = c.expr_to_type(exprs[0]);
                         const expr = c.ast.create(Ast.Expr);
                         expr.* = .{
                             .line_info = tok.line_info,
@@ -1238,7 +981,7 @@ fn parse_expr_highest_prec(c: *Compiler) *Ast.Expr {
 
                 switch (count) {
                     2 => {
-                        const typ = expr_to_type(c, exprs[0]);
+                        const typ = c.expr_to_type(exprs[0]);
                         const expr = c.ast.create(Ast.Expr);
                         expr.* = .{
                             .line_info = tok.line_info,
@@ -1258,26 +1001,230 @@ fn parse_expr_highest_prec(c: *Compiler) *Ast.Expr {
                     },
                 }
             },
-            else => {
-                Lexer.putback(c, tok);
-
-                var typ: Ast.Type = undefined;
-                if (!try_parse_type_by_value(c, &typ)) {
-                    c.report_error(tok.line_info, "token doesn't start an expression", .{});
-                    Compiler.exit(1);
-                }
-
+            .Struct => {
+                Lexer.expect(c, .Open_Curly);
+                push_scope(c);
+                const scope = c.parser.current_scope;
+                const fields = c.ast.create(Ast.SymbolList);
+                const rest = c.ast.create(Ast.SymbolList);
+                fields.* = .{};
+                rest.* = .{};
+                parse_symbol_list(c, fields, rest, .{ .Parsing_Container = .Struct });
+                pop_scope(c);
+                Lexer.expect(c, .Close_Curly);
+                const data = c.ast.create(Ast.Type.SharedData);
+                data.* = .{
+                    .as = .{ .Struct = .{
+                        .fields = fields,
+                        .rest = rest,
+                        .scope = scope,
+                    } },
+                    .byte_size = 0,
+                    .alignment = .BYTE,
+                    .stages = Ast.default_stages_none,
+                };
                 const expr = c.ast.create(Ast.Expr);
                 expr.* = .{
                     .line_info = tok.line_info,
-                    .as = .{ .Type = typ },
+                    .as = .{ .Type = .{
+                        .line_info = tok.line_info,
+                        .data = data,
+                        .symbol = null,
+                    } },
                     .typ = Ast.void_type,
                     .flags = .{},
                     .typechecking = .None,
                 };
-                expr.typ = &expr.as.Type;
-
                 break :base expr;
+            },
+            .Union => {
+                Lexer.expect(c, .Open_Curly);
+                push_scope(c);
+                const scope = c.parser.current_scope;
+                const fields = c.ast.create(Ast.SymbolList);
+                const rest = c.ast.create(Ast.SymbolList);
+                fields.* = .{};
+                rest.* = .{};
+                parse_symbol_list(c, fields, rest, .{ .Parsing_Container = .Union });
+                pop_scope(c);
+                Lexer.expect(c, .Close_Curly);
+                const data = c.ast.create(Ast.Type.SharedData);
+                data.* = .{
+                    .as = .{ .Union = .{
+                        .fields = fields,
+                        .rest = rest,
+                        .scope = scope,
+                    } },
+                    .byte_size = 0,
+                    .alignment = .BYTE,
+                    .stages = Ast.default_stages_none,
+                };
+                const expr = c.ast.create(Ast.Expr);
+                expr.* = .{
+                    .line_info = tok.line_info,
+                    .as = .{ .Type = .{
+                        .line_info = tok.line_info,
+                        .data = data,
+                        .symbol = null,
+                    } },
+                    .typ = Ast.void_type,
+                    .flags = .{},
+                    .typechecking = .None,
+                };
+                break :base expr;
+            },
+            .Enum => {
+                Lexer.expect(c, .Open_Curly);
+                push_scope(c);
+                const scope = c.parser.current_scope;
+                const fields = c.ast.create(Ast.SymbolList);
+                const rest = c.ast.create(Ast.SymbolList);
+                fields.* = .{};
+                rest.* = .{};
+                parse_symbol_list(c, fields, rest, .{ .Parsing_Container = .Enum });
+                pop_scope(c);
+                Lexer.expect(c, .Close_Curly);
+                const data = c.ast.create(Ast.Type.SharedData);
+                data.* = .{
+                    .as = .{ .Enum = .{
+                        .fields = fields,
+                        .rest = rest,
+                        .integer_type = Ast.lookup_integer_type(0, false),
+                        .scope = scope,
+                    } },
+                    .byte_size = 0,
+                    .alignment = .BYTE,
+                    .stages = Ast.default_stages_none,
+                };
+                const expr = c.ast.create(Ast.Expr);
+                expr.* = .{
+                    .line_info = tok.line_info,
+                    .as = .{ .Type = .{
+                        .line_info = tok.line_info,
+                        .data = data,
+                        .symbol = null,
+                    } },
+                    .typ = Ast.void_type,
+                    .flags = .{},
+                    .typechecking = .None,
+                };
+                break :base expr;
+            },
+            .Proc => {
+                Lexer.expect(c, .Open_Paren);
+                push_scope(c);
+                const scope = c.parser.current_scope;
+                var params = Ast.SymbolList{};
+                parse_symbol_list(c, &params, null, .Parsing_Procedure);
+                pop_scope(c);
+                Lexer.expect(c, .Close_Paren);
+                const return_type = parse_type(c);
+                const data = c.ast.create(Ast.Type.SharedData);
+                data.* = .{
+                    .as = .{ .Proc = .{
+                        .params = params,
+                        .return_type = return_type,
+                        .scope = scope,
+                    } },
+                    .byte_size = Ast.pointer_byte_size,
+                    .alignment = Ast.pointer_alignment,
+                    .stages = Ast.default_stages_none,
+                };
+                const expr = c.ast.create(Ast.Expr);
+                expr.* = .{
+                    .line_info = tok.line_info,
+                    .as = .{ .Type = .{
+                        .line_info = tok.line_info,
+                        .data = data,
+                        .symbol = null,
+                    } },
+                    .typ = Ast.void_type,
+                    .flags = .{},
+                    .typechecking = .None,
+                };
+                break :base expr;
+            },
+            .Integer_Type => |Integer_Type| {
+                const typ = Ast.lookup_integer_type(Integer_Type.bits, Integer_Type.is_signed);
+                const expr = c.ast.create(Ast.Expr);
+                expr.* = .{
+                    .line_info = tok.line_info,
+                    .as = .{ .Type = .{
+                        .line_info = tok.line_info,
+                        .data = typ.data,
+                        .symbol = null,
+                    } },
+                    .typ = Ast.void_type,
+                    .flags = .{},
+                    .typechecking = .None,
+                };
+                break :base expr;
+            },
+            .Bool_Type => {
+                const expr = c.ast.create(Ast.Expr);
+                expr.* = .{
+                    .line_info = tok.line_info,
+                    .as = .{ .Type = .{
+                        .line_info = tok.line_info,
+                        .data = Ast.bool_type.data,
+                        .symbol = null,
+                    } },
+                    .typ = Ast.void_type,
+                    .flags = .{},
+                    .typechecking = .None,
+                };
+                break :base expr;
+            },
+            .Void_Type => {
+                const expr = c.ast.create(Ast.Expr);
+                expr.* = .{
+                    .line_info = tok.line_info,
+                    .as = .{ .Type = .{
+                        .line_info = tok.line_info,
+                        .data = Ast.void_type.data,
+                        .symbol = null,
+                    } },
+                    .typ = Ast.void_type,
+                    .flags = .{},
+                    .typechecking = .None,
+                };
+                break :base expr;
+            },
+            .Type_Of => {
+                var exprs: [1]*Ast.Expr = undefined;
+                const count = parse_fixed_size_expr_list(c, &exprs);
+                switch (count) {
+                    1 => {
+                        const data = c.ast.create(Ast.Type.SharedData);
+                        data.* = .{
+                            .as = .{ .Type_Of = exprs[0] },
+                            .byte_size = 0,
+                            .alignment = .BYTE,
+                            .stages = Ast.default_stages_none,
+                        };
+                        const expr = c.ast.create(Ast.Expr);
+                        expr.* = .{
+                            .line_info = tok.line_info,
+                            .as = .{ .Type = .{
+                                .line_info = tok.line_info,
+                                .data = data,
+                                .symbol = null,
+                            } },
+                            .typ = Ast.void_type,
+                            .flags = .{},
+                            .typechecking = .None,
+                        };
+                        break :base expr;
+                    },
+                    else => {
+                        c.report_error(tok.line_info, "expected 1 arguments, but got {}", .{count});
+                        Compiler.exit(1);
+                    },
+                }
+            },
+            else => {
+                c.report_error(tok.line_info, "token doesn't start an expression or a type", .{});
+                Compiler.exit(1);
             },
         }
     };
@@ -1435,78 +1382,6 @@ fn parse_expr_list(c: *Compiler) Ast.ExprList {
     Lexer.expect(c, .Close_Paren);
 
     return list;
-}
-
-// Assume 'expr' is heap allocated and can be reused.
-fn expr_to_type(c: *Compiler, expr: *Ast.Expr) *Ast.Type {
-    switch (expr.as) {
-        .Deref => |subexpr| {
-            const subtype = expr_to_type(c, subexpr);
-
-            const data = c.ast.create(Ast.Type.SharedData);
-            data.* = .{
-                .as = .{ .Pointer = subtype },
-                .byte_size = Ast.pointer_byte_size,
-                .alignment = Ast.pointer_alignment,
-                .stages = Ast.default_stages_none,
-            };
-            expr.as = .{ .Type = .{
-                .line_info = expr.line_info,
-                .data = data,
-                .symbol = null,
-            } };
-
-            return &expr.as.Type;
-        },
-        .Subscript => |Subscript| {
-            const subtype = expr_to_type(c, Subscript.subexpr);
-
-            const data = c.ast.create(Ast.Type.SharedData);
-            data.* = .{
-                .as = .{ .Array = .{
-                    .subtype = subtype,
-                    .size = Subscript.index,
-                    .computed_size = 0,
-                } },
-                .byte_size = 0,
-                .alignment = .BYTE,
-                .stages = Ast.default_stages_none,
-            };
-            expr.as = .{ .Type = .{
-                .line_info = expr.line_info,
-                .data = data,
-                .symbol = null,
-            } };
-
-            return &expr.as.Type;
-        },
-        .Type => |*typ| {
-            return typ;
-        },
-        .Identifier => |Identifier| {
-            const data = c.ast.create(Ast.Type.SharedData);
-            data.* = .{
-                .as = .{ .Identifier = .{
-                    .name = Identifier.name,
-                    .scope = Identifier.scope,
-                } },
-                .byte_size = 0,
-                .alignment = .BYTE,
-                .stages = Ast.default_stages_none,
-            };
-            expr.as = .{ .Type = .{
-                .line_info = expr.line_info,
-                .data = data,
-                .symbol = null,
-            } };
-
-            return &expr.as.Type;
-        },
-        else => {
-            c.report_error(expr.line_info, "expected expression, not a type", .{});
-            Compiler.exit(1);
-        },
-    }
 }
 
 fn push_scope(c: *Compiler) void {

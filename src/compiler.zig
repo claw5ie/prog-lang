@@ -311,7 +311,7 @@ pub const Ast = struct {
                 .Void => try writer.writeAll("void"),
                 .Bool => try writer.writeAll("bool"),
                 .Integer => |Int| try writer.print("{c}{}", .{ @as(u8, if (Int.is_signed) 'i' else 'u'), Int.bits }),
-                .Identifier, .Type_Of => unreachable,
+                .Field, .Identifier, .Type_Of => unreachable,
             }
         }
 
@@ -350,7 +350,7 @@ pub const Ast = struct {
                     flags.is_ordered = true;
                 },
                 .Bool => flags.is_comparable = true,
-                .Identifier, .Type_Of => unreachable,
+                .Field, .Identifier, .Type_Of => unreachable,
             }
 
             return flags;
@@ -448,7 +448,7 @@ pub const Ast = struct {
                 .Void => {
                     return other.data.as == .Void;
                 },
-                .Identifier, .Type_Of => unreachable,
+                .Field, .Identifier, .Type_Of => unreachable,
             }
         }
 
@@ -465,6 +465,7 @@ pub const Ast = struct {
             Enum: Type.Enum,
             Proc: Type.Proc,
             Array: Type.Array,
+            Field: Type.Field,
             Pointer: *Type,
             Integer: Type.IntegerType,
             Bool: void,
@@ -496,6 +497,11 @@ pub const Ast = struct {
             subtype: *Type,
             size: *Expr,
             computed_size: u64,
+        };
+
+        pub const Field = struct {
+            subtype: *Type,
+            field: *Expr,
         };
 
         pub const IntegerType = struct {
@@ -1974,6 +1980,99 @@ pub fn find_symbol(c: *Compiler, key: Ast.Symbol.Key, offset: usize) ?*Ast.Symbo
         }
     }
     return null;
+}
+
+// Assume 'expr' is heap allocated and can be reused.
+pub fn expr_to_type(c: *Compiler, expr: *Ast.Expr) *Ast.Type {
+    switch (expr.as) {
+        .Deref => |subexpr| {
+            const subtype = expr_to_type(c, subexpr);
+
+            const data = c.ast.create(Ast.Type.SharedData);
+            data.* = .{
+                .as = .{ .Pointer = subtype },
+                .byte_size = Ast.pointer_byte_size,
+                .alignment = Ast.pointer_alignment,
+                .stages = Ast.default_stages_none,
+            };
+            expr.as = .{ .Type = .{
+                .line_info = expr.line_info,
+                .data = data,
+                .symbol = null,
+            } };
+
+            return &expr.as.Type;
+        },
+        .Field => |Field| {
+            const subtype = expr_to_type(c, Field.subexpr);
+
+            const data = c.ast.create(Ast.Type.SharedData);
+            data.* = .{
+                .as = .{ .Field = .{
+                    .subtype = subtype,
+                    .field = Field.field,
+                } },
+                .byte_size = 0,
+                .alignment = .BYTE,
+                .stages = Ast.default_stages_none,
+            };
+            expr.as = .{ .Type = .{
+                .line_info = expr.line_info,
+                .data = data,
+                .symbol = null,
+            } };
+
+            return &expr.as.Type;
+        },
+        .Subscript => |Subscript| {
+            const subtype = expr_to_type(c, Subscript.subexpr);
+
+            const data = c.ast.create(Ast.Type.SharedData);
+            data.* = .{
+                .as = .{ .Array = .{
+                    .subtype = subtype,
+                    .size = Subscript.index,
+                    .computed_size = 0,
+                } },
+                .byte_size = 0,
+                .alignment = .BYTE,
+                .stages = Ast.default_stages_none,
+            };
+            expr.as = .{ .Type = .{
+                .line_info = expr.line_info,
+                .data = data,
+                .symbol = null,
+            } };
+
+            return &expr.as.Type;
+        },
+        .Type => |*typ| {
+            return typ;
+        },
+        .Identifier => |Identifier| {
+            const data = c.ast.create(Ast.Type.SharedData);
+            data.* = .{
+                .as = .{ .Identifier = .{
+                    .name = Identifier.name,
+                    .scope = Identifier.scope,
+                } },
+                .byte_size = 0,
+                .alignment = .BYTE,
+                .stages = Ast.default_stages_none,
+            };
+            expr.as = .{ .Type = .{
+                .line_info = expr.line_info,
+                .data = data,
+                .symbol = null,
+            } };
+
+            return &expr.as.Type;
+        },
+        else => {
+            c.report_error(expr.line_info, "expected expression, not a type", .{});
+            Compiler.exit(1);
+        },
+    }
 }
 
 pub fn report_error(c: *Compiler, line_info: LineInfo, comptime format: []const u8, args: anytype) void {
