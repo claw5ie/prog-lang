@@ -1,29 +1,8 @@
-const std = @import("std");
-
-const Allocator = std.mem.Allocator;
-
 pub var stdout_buffer = std.io.bufferedWriter(std.io.getStdOut().writer());
 pub var stderr_buffer = std.io.bufferedWriter(std.io.getStdErr().writer());
 
 pub var stdout = stdout_buffer.writer();
 pub var stderr = stderr_buffer.writer();
-
-pub const Alignment = enum(u2) {
-    BYTE = 0,
-    WORD = 1,
-    DWORD = 2,
-    QWORD = 3,
-
-    pub inline fn to_byte_size(alignment: Alignment) u4 {
-        return @as(u4, 1) << @intFromEnum(alignment);
-    }
-};
-
-pub const Order = enum(u2) {
-    Less = 0,
-    Greater = 1,
-    Equal = 2,
-};
 
 pub fn todo(comptime text: []const u8) noreturn {
     @compileError(text);
@@ -193,3 +172,24 @@ pub fn write_to_file_u64(fd: std.posix.fd_t, value: u64) void {
 pub fn is_prefix(prefix: []const u8, rest: []const u8) bool {
     return prefix.len <= rest.len and std.mem.eql(u8, prefix, rest[0..prefix.len]);
 }
+
+const std = @import("std");
+
+const Allocator = std.mem.Allocator;
+
+pub const Alignment = enum(u2) {
+    BYTE = 0,
+    WORD = 1,
+    DWORD = 2,
+    QWORD = 3,
+
+    pub inline fn to_byte_size(alignment: Alignment) u4 {
+        return @as(u4, 1) << @intFromEnum(alignment);
+    }
+};
+
+pub const Order = enum(u2) {
+    Less = 0,
+    Greater = 1,
+    Equal = 2,
+};

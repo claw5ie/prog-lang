@@ -422,6 +422,7 @@ const utils = @import("utils.zig");
 const Compiler = @import("compiler.zig");
 
 const LineInfo = Compiler.LineInfo;
+const Attributes = Compiler.Attributes;
 
 pub const Token = struct {
     line_info: LineInfo,
@@ -562,22 +563,5 @@ pub const Token = struct {
     pub const IntegerType = struct {
         bits: u8,
         is_signed: bool,
-    };
-
-    pub const Attributes = packed struct {
-        is_const: bool = false,
-        is_static: bool = false,
-        is_global: bool = false,
-
-        pub fn is_empty(attr: Attributes) bool {
-            const ptr: *const u8 = @ptrCast(&attr);
-            return ptr.* == 0;
-        }
-
-        pub fn combine(self: *Attributes, other: Attributes) void {
-            const d: *u8 = @ptrCast(self);
-            const s: *const u8 = @ptrCast(&other);
-            d.* |= s.*;
-        }
     };
 };
