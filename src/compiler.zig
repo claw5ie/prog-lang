@@ -11,6 +11,316 @@ had_error: bool,
 
 const Compiler = @This();
 
+const magic_number_string: []const u8 = "PROGLANG";
+const magic_number_value: u64 = magic_number_value: {
+    const ptr: *const u64 = @alignCast(@ptrCast(magic_number_string.ptr));
+    break :magic_number_value ptr.*;
+};
+
+pub var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
+pub var gpa = general_purpose_allocator.allocator();
+
+pub fn init_vtable(c: *Compiler) void {
+    const start_global = c.interp.vtable.start_instr + utils.align_by_pow2(c.ir.instrs.items.len, 1024);
+    const start_stack = start_global + utils.align_by_pow2(c.ir.globals.items.len, 1024);
+    const end = start_stack + Compiler.Interpreter.STACK_SIZE;
+
+    c.interp.vtable = .{
+        .start_global = start_global,
+        .start_stack = start_stack,
+        .end = end,
+    };
+}
+
+fn init() Compiler {
+    const stack = gpa.alloc(u8, 2 * 1024 * 1024) catch {
+        exit(1);
+    };
+
+    var labels = IRGenerator.LabelMap.init(gpa);
+    labels.resize(256) catch {
+        Compiler.exit(1);
+    };
+
+    return .{
+        .typechecker = .{
+            .enum_type = null,
+            .return_type = null,
+            .is_in_loop = false,
+        },
+        .ir = .{
+            .instrs = ByteList.initCapacity(gpa, 4 * 1024) catch {
+                Compiler.exit(1);
+            },
+            .globals = ByteList.initCapacity(gpa, 4 * 1024) catch {
+                Compiler.exit(1);
+            },
+        },
+        .irgen = .{
+            .labels = labels,
+            .next_local = 0,
+            .biggest_next_local = 0,
+            .next_global = 0,
+            .next_label = 0,
+            .loop_condition_label = null,
+            .loop_end_label = null,
+            .return_label = null,
+        },
+        .interp = .{
+            .stack = stack,
+            .rsp = 0,
+            .rbp = 0,
+            .vtable = .{
+                .start_global = Interpreter.UNUSED_SPACE_SIZE,
+                .start_stack = Interpreter.UNUSED_SPACE_SIZE,
+                .end = Interpreter.UNUSED_SPACE_SIZE,
+            },
+        },
+        .symbol_table = SymbolTable.init(gpa),
+        .string_pool = StringPool.init(gpa),
+        .filepath = undefined,
+        .source_code = undefined,
+        .had_error = false,
+    };
+}
+
+fn deinit(c: *Compiler) void {
+    c.ir.instrs.deinit();
+    c.ir.globals.deinit();
+    gpa.free(c.interp.stack);
+    c.irgen.labels.deinit();
+    c.symbol_table.deinit();
+    c.string_pool.deinit();
+    gpa.free(c.source_code);
+}
+
+pub fn compile() void {
+    var c = Compiler.init();
+
+    const options = parse_cmd_options();
+    switch (options.mode) {
+        .Build => {
+            var buffer = [1]u8{0} ** std.posix.PATH_MAX;
+
+            const input_filepath = options.has_input_filepath.?;
+            const output_filepath: [:0]const u8 = output_filepath: {
+                if (options.has_output_filepath) |path| {
+                    @memcpy(buffer[0..path.len], path);
+                    break :output_filepath buffer[0..path.len :0];
+                } else {
+                    const extension: []const u8 = ".ir";
+                    @memcpy(buffer[0..input_filepath.len], input_filepath);
+                    @memcpy(buffer[input_filepath.len .. input_filepath.len + extension.len], extension);
+                    break :output_filepath buffer[0 .. input_filepath.len + extension.len :0];
+                }
+            };
+
+            c.filepath = input_filepath;
+            c.source_code = utils.read_entire_file(Compiler.gpa, input_filepath) catch {
+                Compiler.eprint("error: failed to read from a file '{s}'\n", .{input_filepath});
+                Compiler.exit(1);
+            };
+
+            var ast = Ast.init(&c);
+            var parser = Parser.init(&c, &ast);
+
+            _ = output_filepath;
+
+            parser.parse();
+            // typecheck(&c);
+            // generate_ir(&c);
+            // write_ir(&c, output_filepath);
+
+            parser.deinit();
+            ast.deinit();
+        },
+        .Run => {
+            // TODO: ABOLISH THIS! BURN IT WITH FIRE!
+            // c.ir.instrs.deinit();
+            // c.ir.globals.deinit();
+
+            // read_ir(&c, options.has_input_filepath.?);
+            // interpret(&c);
+        },
+        .Print => {
+            // TODO: ABOLISH THIS AS WELL!!
+            // c.ir.instrs.deinit();
+            // c.ir.globals.deinit();
+
+            // read_ir(&c, options.has_input_filepath.?);
+            // c.ir.print();
+        },
+    }
+
+    c.deinit();
+}
+
+fn write_ir(c: *Compiler, filepath: [:0]const u8) void {
+    const fd = std.posix.open(
+        filepath,
+        .{
+            .ACCMODE = .WRONLY,
+            .CREAT = true,
+            .TRUNC = true,
+        },
+        0o644,
+    ) catch {
+        eprint("error: couldn't open a file '{s}'\n", .{filepath});
+        exit(1);
+    };
+    defer std.posix.close(fd);
+
+    utils.write_to_file_v(fd, magic_number_string);
+    utils.write_to_file_u64(fd, c.ir.globals.items.len);
+    utils.write_to_file_u64(fd, c.ir.instrs.items.len);
+    utils.write_to_file_v(fd, c.ir.globals.items);
+    utils.write_to_file_v(fd, c.ir.instrs.items);
+}
+
+fn read_ir(c: *Compiler, filepath: [:0]const u8) void {
+    const fd = std.posix.open(filepath, .{}, 0) catch {
+        eprint("error: couldn't open a file '{s}'\n", .{filepath});
+        exit(1);
+    };
+    defer std.posix.close(fd);
+
+    const magic_number = utils.read_from_file_u64(fd);
+    std.debug.assert(magic_number == magic_number_value);
+    const globals_byte_count = utils.read_from_file_u64(fd);
+    const instrs_byte_count = utils.read_from_file_u64(fd);
+    var globals = ByteList.init(gpa);
+    var instrs = ByteList.init(gpa);
+
+    globals.resize(globals_byte_count) catch {
+        Compiler.exit(1);
+    };
+    instrs.resize(instrs_byte_count) catch {
+        Compiler.exit(1);
+    };
+
+    utils.read_from_file_v(fd, globals.items);
+    utils.read_from_file_v(fd, instrs.items);
+
+    c.ir = .{
+        .instrs = instrs,
+        .globals = globals,
+    };
+
+    init_vtable(c);
+}
+
+fn parse_cmd_options() Options {
+    var options = Options{};
+    var activated_modes_count: u32 = 0;
+    var had_error = false;
+    var args = std.process.args();
+
+    _ = args.next().?;
+    while (args.next()) |arg| {
+        if (arg[0] == '-') {
+            if (arg.len > 2) {
+                had_error = true;
+                eprint("error: unrecognized option '{s}'\n", .{arg});
+            } else {
+                switch (arg[1]) {
+                    'r' => {
+                        activated_modes_count += 1;
+                        options.mode = .Run;
+                    },
+                    'p' => {
+                        activated_modes_count += 1;
+                        options.mode = .Print;
+                    },
+                    'o' => {
+                        if (options.has_output_filepath) |path| {
+                            had_error = true;
+                            eprint("error: output filepath was already provided ('{s}')\n", .{path});
+                        } else if (args.next()) |path| {
+                            options.has_output_filepath = path;
+                        } else {
+                            had_error = true;
+                            eprint("error: expected argument for '-o' option\n", .{});
+                        }
+                    },
+                    else => {
+                        had_error = true;
+                        eprint("error: unrecognized option '{s}'\n", .{arg});
+                    },
+                }
+            }
+        } else {
+            if (options.has_input_filepath) |filepath| {
+                had_error = true;
+                eprint("error: filepath was already given ('{s}')\n", .{filepath});
+            } else {
+                options.has_input_filepath = arg;
+            }
+        }
+    }
+
+    if (activated_modes_count > 1) {
+        had_error = true;
+        eprint("error: only one options needs to be enabled\n", .{});
+    }
+
+    if (options.has_input_filepath == null) {
+        had_error = true;
+        eprint("error: no file supplied\n", .{});
+    }
+
+    if (had_error) {
+        exit(1);
+    }
+
+    return options;
+}
+
+pub fn find_symbol_in_scope(c: *Compiler, key: Ast.Symbol.Key, offset: usize) ?*Ast.Symbol {
+    const has_symbol = c.symbol_table.find(key);
+
+    if (has_symbol) |symbol| {
+        switch (symbol.as) {
+            .Variable, .Parameter => {
+                if (symbol.attributes.is_const or symbol.attributes.is_static or symbol.line_info.offset < offset) {
+                    return symbol;
+                }
+            },
+            .Procedure,
+            .Struct_Field,
+            .Union_Field,
+            .Enum_Field,
+            .Type,
+            => return symbol,
+        }
+    }
+
+    return null;
+}
+
+pub fn find_symbol(c: *Compiler, key: Ast.Symbol.Key, offset: usize) ?*Ast.Symbol {
+    var k = key;
+    while (true) {
+        const has_symbol = find_symbol_in_scope(c, k, offset);
+        if (has_symbol) |symbol| {
+            return symbol;
+        } else if (k.scope.parent) |parent| {
+            k.scope = parent;
+        } else {
+            break;
+        }
+    }
+    return null;
+}
+
+pub fn report_error(c: *Compiler, line_info: LineInfo, comptime format: []const u8, args: anytype) void {
+    c.had_error = true;
+    eprint("{s}:{}:{}: error: " ++ format ++ "\n", .{ c.filepath, line_info.line, line_info.column } ++ args);
+}
+
+pub fn report_note(c: *Compiler, line_info: LineInfo, comptime format: []const u8, args: anytype) void {
+    eprint("{s}:{}:{}: note: " ++ format ++ "\n", .{ c.filepath, line_info.line, line_info.column } ++ args);
+}
+
 const std = @import("std");
 const utils = @import("utils.zig");
 const Lexer = @import("lexer.zig");
@@ -24,15 +334,6 @@ pub const ByteList = std.ArrayList(u8);
 pub const oprint = utils.oprint;
 pub const eprint = utils.eprint;
 pub const exit = utils.exit;
-
-const magic_number_string: []const u8 = "PROGLANG";
-const magic_number_value: u64 = magic_number_value: {
-    const ptr: *const u64 = @alignCast(@ptrCast(magic_number_string.ptr));
-    break :magic_number_value ptr.*;
-};
-
-pub var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
-pub var gpa = general_purpose_allocator.allocator();
 
 const Options = struct {
     has_input_filepath: ?[:0]const u8 = null,
@@ -880,304 +1181,3 @@ pub const Stage = enum {
     Going,
     Done,
 };
-
-pub fn init_vtable(c: *Compiler) void {
-    const start_global = c.interp.vtable.start_instr + utils.align_by_pow2(c.ir.instrs.items.len, 1024);
-    const start_stack = start_global + utils.align_by_pow2(c.ir.globals.items.len, 1024);
-    const end = start_stack + Compiler.Interpreter.STACK_SIZE;
-
-    c.interp.vtable = .{
-        .start_global = start_global,
-        .start_stack = start_stack,
-        .end = end,
-    };
-}
-
-fn init() Compiler {
-    const stack = gpa.alloc(u8, 2 * 1024 * 1024) catch {
-        exit(1);
-    };
-
-    var labels = IRGenerator.LabelMap.init(gpa);
-    labels.resize(256) catch {
-        Compiler.exit(1);
-    };
-
-    return .{
-        .typechecker = .{
-            .enum_type = null,
-            .return_type = null,
-            .is_in_loop = false,
-        },
-        .ir = .{
-            .instrs = ByteList.initCapacity(gpa, 4 * 1024) catch {
-                Compiler.exit(1);
-            },
-            .globals = ByteList.initCapacity(gpa, 4 * 1024) catch {
-                Compiler.exit(1);
-            },
-        },
-        .irgen = .{
-            .labels = labels,
-            .next_local = 0,
-            .biggest_next_local = 0,
-            .next_global = 0,
-            .next_label = 0,
-            .loop_condition_label = null,
-            .loop_end_label = null,
-            .return_label = null,
-        },
-        .interp = .{
-            .stack = stack,
-            .rsp = 0,
-            .rbp = 0,
-            .vtable = .{
-                .start_global = Interpreter.UNUSED_SPACE_SIZE,
-                .start_stack = Interpreter.UNUSED_SPACE_SIZE,
-                .end = Interpreter.UNUSED_SPACE_SIZE,
-            },
-        },
-        .symbol_table = SymbolTable.init(gpa),
-        .string_pool = StringPool.init(gpa),
-        .filepath = undefined,
-        .source_code = undefined,
-        .had_error = false,
-    };
-}
-
-fn deinit(c: *Compiler) void {
-    c.ir.instrs.deinit();
-    c.ir.globals.deinit();
-    gpa.free(c.interp.stack);
-    c.irgen.labels.deinit();
-    c.symbol_table.deinit();
-    c.string_pool.deinit();
-    gpa.free(c.source_code);
-}
-
-pub fn compile() void {
-    var c = Compiler.init();
-
-    const options = parse_cmd_options();
-    switch (options.mode) {
-        .Build => {
-            var buffer = [1]u8{0} ** std.posix.PATH_MAX;
-
-            const input_filepath = options.has_input_filepath.?;
-            const output_filepath: [:0]const u8 = output_filepath: {
-                if (options.has_output_filepath) |path| {
-                    @memcpy(buffer[0..path.len], path);
-                    break :output_filepath buffer[0..path.len :0];
-                } else {
-                    const extension: []const u8 = ".ir";
-                    @memcpy(buffer[0..input_filepath.len], input_filepath);
-                    @memcpy(buffer[input_filepath.len .. input_filepath.len + extension.len], extension);
-                    break :output_filepath buffer[0 .. input_filepath.len + extension.len :0];
-                }
-            };
-
-            c.filepath = input_filepath;
-            c.source_code = utils.read_entire_file(Compiler.gpa, input_filepath) catch {
-                Compiler.eprint("error: failed to read from a file '{s}'\n", .{input_filepath});
-                Compiler.exit(1);
-            };
-
-            var ast = Ast.init(&c);
-            var parser = Parser.init(&c, &ast);
-
-            _ = output_filepath;
-
-            parser.parse();
-            // typecheck(&c);
-            // generate_ir(&c);
-            // write_ir(&c, output_filepath);
-
-            parser.deinit();
-            ast.deinit();
-        },
-        .Run => {
-            // TODO: ABOLISH THIS! BURN IT WITH FIRE!
-            // c.ir.instrs.deinit();
-            // c.ir.globals.deinit();
-
-            // read_ir(&c, options.has_input_filepath.?);
-            // interpret(&c);
-        },
-        .Print => {
-            // TODO: ABOLISH THIS AS WELL!!
-            // c.ir.instrs.deinit();
-            // c.ir.globals.deinit();
-
-            // read_ir(&c, options.has_input_filepath.?);
-            // c.ir.print();
-        },
-    }
-
-    c.deinit();
-}
-
-fn write_ir(c: *Compiler, filepath: [:0]const u8) void {
-    const fd = std.posix.open(
-        filepath,
-        .{
-            .ACCMODE = .WRONLY,
-            .CREAT = true,
-            .TRUNC = true,
-        },
-        0o644,
-    ) catch {
-        eprint("error: couldn't open a file '{s}'\n", .{filepath});
-        exit(1);
-    };
-    defer std.posix.close(fd);
-
-    utils.write_to_file_v(fd, magic_number_string);
-    utils.write_to_file_u64(fd, c.ir.globals.items.len);
-    utils.write_to_file_u64(fd, c.ir.instrs.items.len);
-    utils.write_to_file_v(fd, c.ir.globals.items);
-    utils.write_to_file_v(fd, c.ir.instrs.items);
-}
-
-fn read_ir(c: *Compiler, filepath: [:0]const u8) void {
-    const fd = std.posix.open(filepath, .{}, 0) catch {
-        eprint("error: couldn't open a file '{s}'\n", .{filepath});
-        exit(1);
-    };
-    defer std.posix.close(fd);
-
-    const magic_number = utils.read_from_file_u64(fd);
-    std.debug.assert(magic_number == magic_number_value);
-    const globals_byte_count = utils.read_from_file_u64(fd);
-    const instrs_byte_count = utils.read_from_file_u64(fd);
-    var globals = ByteList.init(gpa);
-    var instrs = ByteList.init(gpa);
-
-    globals.resize(globals_byte_count) catch {
-        Compiler.exit(1);
-    };
-    instrs.resize(instrs_byte_count) catch {
-        Compiler.exit(1);
-    };
-
-    utils.read_from_file_v(fd, globals.items);
-    utils.read_from_file_v(fd, instrs.items);
-
-    c.ir = .{
-        .instrs = instrs,
-        .globals = globals,
-    };
-
-    init_vtable(c);
-}
-
-fn parse_cmd_options() Options {
-    var options = Options{};
-    var activated_modes_count: u32 = 0;
-    var had_error = false;
-    var args = std.process.args();
-
-    _ = args.next().?;
-    while (args.next()) |arg| {
-        if (arg[0] == '-') {
-            if (arg.len > 2) {
-                had_error = true;
-                eprint("error: unrecognized option '{s}'\n", .{arg});
-            } else {
-                switch (arg[1]) {
-                    'r' => {
-                        activated_modes_count += 1;
-                        options.mode = .Run;
-                    },
-                    'p' => {
-                        activated_modes_count += 1;
-                        options.mode = .Print;
-                    },
-                    'o' => {
-                        if (options.has_output_filepath) |path| {
-                            had_error = true;
-                            eprint("error: output filepath was already provided ('{s}')\n", .{path});
-                        } else if (args.next()) |path| {
-                            options.has_output_filepath = path;
-                        } else {
-                            had_error = true;
-                            eprint("error: expected argument for '-o' option\n", .{});
-                        }
-                    },
-                    else => {
-                        had_error = true;
-                        eprint("error: unrecognized option '{s}'\n", .{arg});
-                    },
-                }
-            }
-        } else {
-            if (options.has_input_filepath) |filepath| {
-                had_error = true;
-                eprint("error: filepath was already given ('{s}')\n", .{filepath});
-            } else {
-                options.has_input_filepath = arg;
-            }
-        }
-    }
-
-    if (activated_modes_count > 1) {
-        had_error = true;
-        eprint("error: only one options needs to be enabled\n", .{});
-    }
-
-    if (options.has_input_filepath == null) {
-        had_error = true;
-        eprint("error: no file supplied\n", .{});
-    }
-
-    if (had_error) {
-        exit(1);
-    }
-
-    return options;
-}
-
-pub fn find_symbol_in_scope(c: *Compiler, key: Ast.Symbol.Key, offset: usize) ?*Ast.Symbol {
-    const has_symbol = c.symbol_table.find(key);
-
-    if (has_symbol) |symbol| {
-        switch (symbol.as) {
-            .Variable, .Parameter => {
-                if (symbol.attributes.is_const or symbol.attributes.is_static or symbol.line_info.offset < offset) {
-                    return symbol;
-                }
-            },
-            .Procedure,
-            .Struct_Field,
-            .Union_Field,
-            .Enum_Field,
-            .Type,
-            => return symbol,
-        }
-    }
-
-    return null;
-}
-
-pub fn find_symbol(c: *Compiler, key: Ast.Symbol.Key, offset: usize) ?*Ast.Symbol {
-    var k = key;
-    while (true) {
-        const has_symbol = find_symbol_in_scope(c, k, offset);
-        if (has_symbol) |symbol| {
-            return symbol;
-        } else if (k.scope.parent) |parent| {
-            k.scope = parent;
-        } else {
-            break;
-        }
-    }
-    return null;
-}
-
-pub fn report_error(c: *Compiler, line_info: LineInfo, comptime format: []const u8, args: anytype) void {
-    c.had_error = true;
-    eprint("{s}:{}:{}: error: " ++ format ++ "\n", .{ c.filepath, line_info.line, line_info.column } ++ args);
-}
-
-pub fn report_note(c: *Compiler, line_info: LineInfo, comptime format: []const u8, args: anytype) void {
-    eprint("{s}:{}:{}: note: " ++ format ++ "\n", .{ c.filepath, line_info.line, line_info.column } ++ args);
-}

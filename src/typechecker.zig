@@ -1,31 +1,3 @@
-const std = @import("std");
-const utils = @import("utils.zig");
-const Compiler = @import("compiler.zig");
-const IRGen = @import("ir-generator.zig");
-const Interpreter = @import("interpreter.zig");
-
-const Ast = Compiler.Ast;
-const IR = Compiler.IR;
-const IRE = IR.Encoded;
-const Alignment = utils.Alignment;
-
-const TypecheckExprResult = struct {
-    typ: *Ast.Type,
-    tag: Tag,
-
-    pub const Tag = enum {
-        Value,
-        Type,
-        Non_Value,
-    };
-};
-
-const Sign = enum {
-    Signed,
-    Unsigned,
-    Both,
-};
-
 pub fn typecheck(c: *Compiler) void {
     typecheck_top_level(c);
 }
@@ -1715,3 +1687,30 @@ fn make_expr_pointer_mul_integer(c: *Compiler, expr: *Ast.Expr, data: *Ast.Type.
     };
     return new_expr;
 }
+
+const std = @import("std");
+const utils = @import("utils.zig");
+const Compiler = @import("compiler.zig");
+const Interpreter = @import("interpreter.zig");
+
+const Ast = Compiler.Ast;
+const IR = Compiler.IR;
+const IRE = IR.Encoded;
+const Alignment = utils.Alignment;
+
+const TypecheckExprResult = struct {
+    typ: *Ast.Type,
+    tag: Tag,
+
+    pub const Tag = enum {
+        Value,
+        Type,
+        Non_Value,
+    };
+};
+
+const Sign = enum {
+    Signed,
+    Unsigned,
+    Both,
+};
