@@ -239,7 +239,7 @@ pub fn expr_to_type(ast: *Ast, expr: *Expr) *Type {
 const std = @import("std");
 const utils = @import("utils.zig");
 const Compiler = @import("compiler.zig");
-const IR = Compiler.IR;
+const IR = @import("ir.zig");
 
 const ArenaAllocator = std.heap.ArenaAllocator;
 const LineInfo = Compiler.LineInfo;
@@ -722,10 +722,12 @@ pub const Symbol = struct {
     pub const Procedure = struct {
         typ: *Type,
         block: StmtList,
-        labels: ?struct {
+        labels: ?LabelPair,
+
+        pub const LabelPair = struct {
             start: IR.Encoded.Label,
             end: IR.Encoded.Label,
-        },
+        };
     };
 
     pub const StructField = struct {

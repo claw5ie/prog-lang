@@ -621,7 +621,7 @@ fn insert_symbol(p: *Parser, result: ParseSymbolResult, how_to_parse: HowToParse
                 break :as .{ .Variable = .{
                     .typ = result.typ,
                     .value = result.value,
-                    .storage = undefined,
+                    .storage = null,
                 } };
             },
             .Parameter => {
@@ -633,7 +633,7 @@ fn insert_symbol(p: *Parser, result: ParseSymbolResult, how_to_parse: HowToParse
                 break :as .{ .Parameter = .{
                     .typ = result.typ.?,
                     .value = result.value,
-                    .storage = undefined,
+                    .storage = null,
                 } };
             },
             .Procedure => {

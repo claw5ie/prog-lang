@@ -1,62 +1,64 @@
-const std = @import("std");
-const utils = @import("utils.zig");
-const Compiler = @import("compiler.zig");
-const IRGen = @import("ir-generator.zig");
+stack: []u8,
+rsp: u64,
+rbp: u64,
+vtable: Vtable,
+ir: *IR,
 
-const Ast = Compiler.Ast;
-const IR = Compiler.IR;
-const IRE = IR.Encoded;
-const IRD = IR.Decoded;
-const SegmentTag = Compiler.Interpreter.Vtable.SegmentTag;
+const Interpreter = @This();
 
-pub fn interpret(c: *Compiler) void {
-    interpret_top_level(c);
-}
+pub const STACK_SIZE = 4 * 1024 * 1024;
 
-// Expression is not struct/union/array.
-pub fn compute_simple_expr(c: *Compiler, expr: *Ast.Expr) u64 {
-    const op = compute_expr(c, expr);
-    return grab_value_from_operand(c, op, expr.typ.is_signed());
-}
+const UNUSED_SPACE_SIZE = 1024;
 
-pub fn compute_expr_to_operand(c: *Compiler, dst: IRE.Operand, expr: *Ast.Expr) void {
-    std.debug.assert(dst.is_lvalue());
-    const op = compute_expr(c, expr);
-    const dst_address = grab_value_from_operand(c, dst.addr_of().decode(), false);
-    const src_address = grab_address_from_operand(c, op);
-    interp_write_big(c, dst_address, src_address, expr.typ.data.byte_size);
-}
-
-fn compute_expr(c: *Compiler, expr: *Ast.Expr) IRD.Operand {
-    if (!expr.flags.is_const) {
-        c.report_error(expr.line_info, "expression is not constant", .{});
+pub fn init(ir: *IR) Interpreter {
+    const stack = Compiler.gpa.alloc(u8, STACK_SIZE) catch {
         Compiler.exit(1);
-    }
+    };
 
-    var old_irgen = c.irgen;
+    const vtable = init_vtable(ir);
 
-    const dst = IRGen.grab_local_from_type(c, expr.typ.data);
-    std.debug.assert(dst.is_lvalue());
-    _ = IRGen.generate_ir_expr(c, dst, expr);
-    IRGen.generate_ir_instr0(c, .exit);
-    IRGen.remove_labels_and_set_vtable(c);
-    interpret(c);
-
-    c.ir.instrs.clearRetainingCapacity();
-
-    old_irgen.labels = c.irgen.labels;
-    c.irgen = old_irgen;
-
-    return dst.decode();
+    return .{
+        .stack = stack,
+        .rsp = vtable.start_stack,
+        .rbp = vtable.start_stack,
+        .vtable = vtable,
+        .ir = ir,
+    };
 }
 
-fn interpret_top_level(c: *Compiler) void {
-    c.interp.rsp = c.interp.vtable.start_stack;
-    c.interp.rbp = c.interp.rsp;
+pub fn deinit(interp: *Interpreter) void {
+    Compiler.gpa.free(interp.stack);
+}
 
-    var ip: u64 = c.interp.vtable.start_instr;
+pub fn init_vtable(ir: *IR) Vtable {
+    const start_instr = UNUSED_SPACE_SIZE;
+    const start_global = start_instr + utils.align_by_pow2(ir.instrs.items.len, 1024);
+    const start_stack = start_global + utils.align_by_pow2(ir.globals.items.len, 1024);
+    const end = start_stack + STACK_SIZE;
+
+    return .{
+        .unused_space = 0,
+        .start_instr = start_instr,
+        .start_global = start_global,
+        .start_stack = start_stack,
+        .end = end,
+    };
+}
+
+pub fn reset(interp: *Interpreter) void {
+    interp.vtable = init_vtable(interp.ir);
+    interp.rsp = interp.vtable.start_stack;
+    interp.rbp = interp.vtable.start_stack;
+}
+
+pub fn interpret(interp: *Interpreter) void {
+    interpret_top_level(interp);
+}
+
+fn interpret_top_level(interp: *Interpreter) void {
+    var ip: u64 = interp.vtable.start_instr;
     while (true) {
-        const segment, const tag = segment_from_vtable(c, ip);
+        const segment, const tag = segment_from_vtable(interp, ip);
         if (tag != .Instructions) {
             Compiler.eprint("error: can't read instructions from {s} section\n", .{tag.to_string()});
             Compiler.exit(1);
@@ -67,19 +69,19 @@ fn interpret_top_level(c: *Compiler) void {
         switch (instr.opcode) {
             .exit => break,
             .printp => {
-                const value = grab_u64_from_operand(c, instr.ops[0]);
+                const value = grab_u64_from_operand(interp, instr.ops[0]);
                 Compiler.oprint("0x{x}\n", .{value});
             },
             .printi => {
-                const value = grab_i64_from_operand(c, instr.ops[0]);
+                const value = grab_i64_from_operand(interp, instr.ops[0]);
                 Compiler.oprint("{}\n", .{value});
             },
             .printu => {
-                const value = grab_u64_from_operand(c, instr.ops[0]);
+                const value = grab_u64_from_operand(interp, instr.ops[0]);
                 Compiler.oprint("{}\n", .{value});
             },
             .printb => {
-                const value = grab_u64_from_operand(c, instr.ops[0]);
+                const value = grab_u64_from_operand(interp, instr.ops[0]);
                 Compiler.oprint("{s}\n", .{if (value != 0) "true" else "false"});
             },
             .ue,
@@ -94,9 +96,9 @@ fn interpret_top_level(c: *Compiler) void {
             .udiv,
             .umod,
             => {
-                const dst = grab_address_from_operand(c, instr.ops[0]);
-                var src0 = grab_u64_from_operand(c, instr.ops[1]);
-                const src1 = grab_u64_from_operand(c, instr.ops[2]);
+                const dst = grab_address_from_operand(interp, instr.ops[0]);
+                var src0 = grab_u64_from_operand(interp, instr.ops[1]);
+                const src1 = grab_u64_from_operand(interp, instr.ops[2]);
 
                 switch (instr.opcode) {
                     .ue => src0 = @intFromBool(src0 == src1),
@@ -113,7 +115,7 @@ fn interpret_top_level(c: *Compiler) void {
                     else => unreachable,
                 }
 
-                interp_write(c, dst, src0, instr.ops[0].grab_size());
+                write(interp, dst, src0, instr.ops[0].grab_size());
             },
             .ie,
             .ine,
@@ -127,9 +129,9 @@ fn interpret_top_level(c: *Compiler) void {
             .idiv,
             .imod,
             => {
-                const dst = grab_address_from_operand(c, instr.ops[0]);
-                var src0 = grab_i64_from_operand(c, instr.ops[1]);
-                const src1 = grab_i64_from_operand(c, instr.ops[2]);
+                const dst = grab_address_from_operand(interp, instr.ops[0]);
+                var src0 = grab_i64_from_operand(interp, instr.ops[1]);
+                const src1 = grab_i64_from_operand(interp, instr.ops[2]);
 
                 switch (instr.opcode) {
                     .ie => src0 = @intFromBool(src0 == src1),
@@ -146,22 +148,22 @@ fn interpret_top_level(c: *Compiler) void {
                     else => unreachable,
                 }
 
-                interp_write(c, dst, @bitCast(src0), instr.ops[0].grab_size());
+                write(interp, dst, @bitCast(src0), instr.ops[0].grab_size());
             },
             .neg => {
-                const dst = grab_address_from_operand(c, instr.ops[0]);
-                const src = grab_i64_from_operand(c, instr.ops[1]);
+                const dst = grab_address_from_operand(interp, instr.ops[0]);
+                const src = grab_i64_from_operand(interp, instr.ops[1]);
 
-                interp_write(c, dst, @bitCast(-src), instr.ops[0].grab_size());
+                write(interp, dst, @bitCast(-src), instr.ops[0].grab_size());
             },
             .not => {
-                const dst = grab_address_from_operand(c, instr.ops[0]);
-                const src = grab_u64_from_operand(c, instr.ops[1]);
+                const dst = grab_address_from_operand(interp, instr.ops[0]);
+                const src = grab_u64_from_operand(interp, instr.ops[1]);
 
-                interp_write(c, dst, @intFromBool(src == 0), instr.ops[0].grab_size());
+                write(interp, dst, @intFromBool(src == 0), instr.ops[0].grab_size());
             },
             .jmp => {
-                const offset = grab_u64_from_operand(c, instr.ops[0]);
+                const offset = grab_u64_from_operand(interp, instr.ops[0]);
                 ip = offset;
             },
             .uje,
@@ -171,8 +173,8 @@ fn interpret_top_level(c: *Compiler) void {
             .ujg,
             .ujge,
             => {
-                const src0 = grab_u64_from_operand(c, instr.ops[0]);
-                const src1 = grab_u64_from_operand(c, instr.ops[1]);
+                const src0 = grab_u64_from_operand(interp, instr.ops[0]);
+                const src1 = grab_u64_from_operand(interp, instr.ops[1]);
 
                 const should_jump: bool = switch (instr.opcode) {
                     .uje => src0 == src1,
@@ -185,7 +187,7 @@ fn interpret_top_level(c: *Compiler) void {
                 };
 
                 if (should_jump) {
-                    const offset = grab_u64_from_operand(c, instr.ops[2]);
+                    const offset = grab_u64_from_operand(interp, instr.ops[2]);
                     ip = offset;
                 }
             },
@@ -196,8 +198,8 @@ fn interpret_top_level(c: *Compiler) void {
             .ijg,
             .ijge,
             => {
-                const src0 = grab_i64_from_operand(c, instr.ops[0]);
-                const src1 = grab_i64_from_operand(c, instr.ops[1]);
+                const src0 = grab_i64_from_operand(interp, instr.ops[0]);
+                const src1 = grab_i64_from_operand(interp, instr.ops[1]);
 
                 const should_jump: bool = switch (instr.opcode) {
                     .ije => src0 == src1,
@@ -210,33 +212,33 @@ fn interpret_top_level(c: *Compiler) void {
                 };
 
                 if (should_jump) {
-                    const offset = grab_u64_from_operand(c, instr.ops[2]);
+                    const offset = grab_u64_from_operand(interp, instr.ops[2]);
                     ip = offset;
                 }
             },
             .setnz => {
-                const dst = grab_address_from_operand(c, instr.ops[0]);
-                const src = grab_u64_from_operand(c, instr.ops[1]);
+                const dst = grab_address_from_operand(interp, instr.ops[0]);
+                const src = grab_u64_from_operand(interp, instr.ops[1]);
 
-                interp_write(c, dst, @intFromBool(src != 0), instr.ops[0].grab_size());
+                write(interp, dst, @intFromBool(src != 0), instr.ops[0].grab_size());
             },
             .mov => {
-                const dst = grab_address_from_operand(c, instr.ops[0]);
-                const src = grab_u64_from_operand(c, instr.ops[1]);
+                const dst = grab_address_from_operand(interp, instr.ops[0]);
+                const src = grab_u64_from_operand(interp, instr.ops[1]);
 
-                interp_write(c, dst, src, instr.ops[0].grab_size());
+                write(interp, dst, src, instr.ops[0].grab_size());
             },
             .mov_big => {
-                const dst = grab_u64_from_operand(c, instr.ops[0]);
-                const src = grab_u64_from_operand(c, instr.ops[1]);
-                const size = grab_u64_from_operand(c, instr.ops[2]);
+                const dst = grab_u64_from_operand(interp, instr.ops[0]);
+                const src = grab_u64_from_operand(interp, instr.ops[1]);
+                const size = grab_u64_from_operand(interp, instr.ops[2]);
 
-                interp_write_big(c, dst, src, size);
+                write_big(interp, dst, src, size);
             },
             .movsx => {
-                const dst = grab_address_from_operand(c, instr.ops[0]);
-                var src = grab_u64_from_operand(c, instr.ops[1]);
-                const bits = grab_u64_from_operand(c, instr.ops[2]);
+                const dst = grab_address_from_operand(interp, instr.ops[0]);
+                var src = grab_u64_from_operand(interp, instr.ops[1]);
+                const bits = grab_u64_from_operand(interp, instr.ops[2]);
 
                 if (bits > 64) {
                     Compiler.eprint("error: can't extend more than 64 bits\n", .{});
@@ -244,51 +246,51 @@ fn interpret_top_level(c: *Compiler) void {
                 }
 
                 src = utils.sign_extend(src, @intCast(bits));
-                interp_write(c, dst, src, instr.ops[0].grab_size());
+                write(interp, dst, src, instr.ops[0].grab_size());
             },
             .call => {
-                stack_push(c, ip);
+                stack_push(interp, ip);
 
-                const offset = grab_u64_from_operand(c, instr.ops[0]);
+                const offset = grab_u64_from_operand(interp, instr.ops[0]);
                 ip = offset;
             },
             .push => {
-                const src = grab_u64_from_operand(c, instr.ops[0]);
-                stack_push(c, src);
+                const src = grab_u64_from_operand(interp, instr.ops[0]);
+                stack_push(interp, src);
             },
             .push_big => {
-                const src = grab_u64_from_operand(c, instr.ops[0]);
-                const size = grab_u64_from_operand(c, instr.ops[1]);
+                const src = grab_u64_from_operand(interp, instr.ops[0]);
+                const size = grab_u64_from_operand(interp, instr.ops[1]);
 
-                stack_push_big(c, src, size);
+                stack_push_big(interp, src, size);
             },
             .pop => {
-                const bytes = grab_u64_from_operand(c, instr.ops[0]);
-                c.interp.rsp -= bytes;
+                const bytes = grab_u64_from_operand(interp, instr.ops[0]);
+                interp.rsp -= bytes;
             },
             .start_proc => {
-                const stack_space_used = grab_u64_from_operand(c, instr.ops[0]);
+                const stack_space_used = grab_u64_from_operand(interp, instr.ops[0]);
 
-                stack_push(c, c.interp.rbp);
-                c.interp.rbp = c.interp.rsp;
-                c.interp.rsp += stack_space_used;
+                stack_push(interp, interp.rbp);
+                interp.rbp = interp.rsp;
+                interp.rsp += stack_space_used;
             },
             .end_proc => {
-                const stack_space_used = grab_u64_from_operand(c, instr.ops[0]);
+                const stack_space_used = grab_u64_from_operand(interp, instr.ops[0]);
 
-                c.interp.rsp -= stack_space_used;
-                c.interp.rbp = stack_pop(c);
-                ip = stack_pop(c);
+                interp.rsp -= stack_space_used;
+                interp.rbp = stack_pop(interp);
+                ip = stack_pop(interp);
             },
         }
     }
 }
 
-fn grab_address_from_operand(c: *Compiler, op: IRD.Operand) u64 {
+pub fn grab_address_from_operand(interp: *Interpreter, op: IRD.Operand) u64 {
     return switch (op) {
-        .Tmp => |tmp| grab_address_from_tmp(c, tmp),
-        .Mem_B => |mem| grab_address_from_mem(c, mem.base, 0),
-        .Mem_BO => |mem| grab_address_from_mem(c, mem.base, mem.offset),
+        .Tmp => |tmp| grab_address_from_tmp(interp, tmp),
+        .Mem_B => |mem| grab_address_from_mem(interp, mem.base, 0),
+        .Mem_BO => |mem| grab_address_from_mem(interp, mem.base, mem.offset),
         .Addr_T,
         .Addr_BO,
         .Imm,
@@ -297,80 +299,80 @@ fn grab_address_from_operand(c: *Compiler, op: IRD.Operand) u64 {
     };
 }
 
-inline fn grab_u64_from_operand(c: *Compiler, op: IRD.Operand) u64 {
-    return grab_value_from_operand(c, op, false);
+inline fn grab_u64_from_operand(interp: *Interpreter, op: IRD.Operand) u64 {
+    return grab_value_from_operand(interp, op, false);
 }
 
-inline fn grab_i64_from_operand(c: *Compiler, op: IRD.Operand) i64 {
-    return @bitCast(grab_value_from_operand(c, op, true));
+inline fn grab_i64_from_operand(interp: *Interpreter, op: IRD.Operand) i64 {
+    return @bitCast(grab_value_from_operand(interp, op, true));
 }
 
-fn grab_value_from_operand(c: *Compiler, op: IRD.Operand, is_signed: bool) u64 {
+pub fn grab_value_from_operand(interp: *Interpreter, op: IRD.Operand, is_signed: bool) u64 {
     switch (op) {
         .Tmp,
         .Mem_B,
         .Mem_BO,
         => {
-            const address = grab_address_from_operand(c, op);
-            return interp_read(c, address, op.grab_size(), is_signed);
+            const address = grab_address_from_operand(interp, op);
+            return read(interp, address, op.grab_size(), is_signed);
         },
-        .Addr_T => |tmp| return grab_address_from_tmp(c, .{ .offset = tmp.offset, .size_minus_one = 0, .tag = tmp.tag }),
-        .Addr_BO => |mem| return grab_address_from_mem(c, mem.base, mem.offset),
+        .Addr_T => |tmp| return grab_address_from_tmp(interp, .{ .offset = tmp.offset, .size_minus_one = 0, .tag = tmp.tag }),
+        .Addr_BO => |mem| return grab_address_from_mem(interp, mem.base, mem.offset),
         .Imm => |imm| return imm,
         .Label => unreachable,
     }
 }
 
-fn grab_address_from_tmp(c: *Compiler, tmp: IRD.Tmp) u64 {
+fn grab_address_from_tmp(interp: *Interpreter, tmp: IRD.Tmp) u64 {
     return switch (tmp.tag) {
-        .Relative => inc_u_by_i(c.interp.rbp, tmp.offset),
-        .Global => inc_u_by_i(c.interp.vtable.start_global, tmp.offset),
+        .Relative => inc_u_by_i(interp.rbp, tmp.offset),
+        .Global => inc_u_by_i(interp.vtable.start_global, tmp.offset),
         .Absolute => @intCast(tmp.offset),
     };
 }
 
-fn grab_address_from_mem(c: *Compiler, base: IRD.Tmp, offset: u64) u64 {
+fn grab_address_from_mem(interp: *Interpreter, base: IRD.Tmp, offset: u64) u64 {
     var r: u64 = 0;
 
-    r += grab_value_from_tmp(c, base, false);
+    r += grab_value_from_tmp(interp, base, false);
     r += offset;
 
     return r;
 }
 
-fn grab_value_from_tmp(c: *Compiler, tmp: IRD.Tmp, is_signed: bool) u64 {
-    const address = grab_address_from_tmp(c, tmp);
-    return interp_read(c, address, tmp.size_minus_one, is_signed);
+fn grab_value_from_tmp(interp: *Interpreter, tmp: IRD.Tmp, is_signed: bool) u64 {
+    const address = grab_address_from_tmp(interp, tmp);
+    return read(interp, address, tmp.size_minus_one, is_signed);
 }
 
-fn segment_from_vtable(c: *Compiler, address: u64) struct { []u8, Compiler.Interpreter.Vtable.SegmentTag } {
-    const vtable = &c.interp.vtable;
+fn segment_from_vtable(interp: *Interpreter, address: u64) struct { []u8, Vtable.SegmentTag } {
+    const vtable = &interp.vtable;
     if (address < vtable.start_instr) {
         Compiler.eprint("error: can't read/write from/to unused space\n", .{});
         Compiler.exit(1);
     } else if (address < vtable.start_global) {
         const off = address - vtable.start_instr;
-        return .{ c.ir.instrs.items[off..], .Instructions };
+        return .{ interp.ir.instrs.items[off..], .Instructions };
     } else if (address < vtable.start_stack) {
         const off = address - vtable.start_global;
-        return .{ c.ir.globals.items[off..], .Globals };
+        return .{ interp.ir.globals.items[off..], .Globals };
     } else if (address < vtable.end) {
         const off = address - vtable.start_stack;
-        return .{ c.interp.stack[off..], .Stack };
+        return .{ interp.stack[off..], .Stack };
     } else {
         Compiler.eprint("error: address '{}' outside of address space ({})\n", .{ address, vtable.end });
         Compiler.exit(1);
     }
 }
 
-fn interp_read(c: *Compiler, address: u64, size: u8, is_signed: bool) u64 {
+fn read(interp: *Interpreter, address: u64, size: u8, is_signed: bool) u64 {
     std.debug.assert(size <= 8 and size > 0);
 
     const offset: u6 = @intCast((address % 8) * 8);
     const bits: u8 = @intCast(size * 8);
     const ones: u64 = utils.left_shift(0xFFFF_FFFF_FFFF_FFFF, bits);
 
-    const segment, const tag = segment_from_vtable(c, address - (address % 8));
+    const segment, const tag = segment_from_vtable(interp, address - (address % 8));
     check_bounds(segment, tag, size, false);
 
     var value = @as(*u64, @alignCast(@ptrCast(&segment[0]))).*; // Read 8 bytes (aligned by 8).
@@ -384,7 +386,7 @@ fn interp_read(c: *Compiler, address: u64, size: u8, is_signed: bool) u64 {
     return value;
 }
 
-fn interp_write(c: *Compiler, address: u64, value: u64, size: u8) void {
+fn write(interp: *Interpreter, address: u64, value: u64, size: u8) void {
     std.debug.assert(size <= 8 and size > 0);
 
     const start_offset: u8 = @intCast((address % 8) * 8);
@@ -392,7 +394,7 @@ fn interp_write(c: *Compiler, address: u64, value: u64, size: u8) void {
     const ones: u64 = utils.left_shift(0xFFFF_FFFF_FFFF_FFFF, start_offset) &
         utils.right_shift((0xFFFF_FFFF_FFFF_FFFF), end_offset);
 
-    const segment, const tag = segment_from_vtable(c, address - (address % 8));
+    const segment, const tag = segment_from_vtable(interp, address - (address % 8));
     check_bounds(segment, tag, size, true);
 
     const ptr = @as(*u64, @alignCast(@ptrCast(&segment[0])));
@@ -400,9 +402,9 @@ fn interp_write(c: *Compiler, address: u64, value: u64, size: u8) void {
     ptr.* |= utils.left_shift(value, start_offset) & ones;
 }
 
-fn interp_write_big(c: *Compiler, dst_address: u64, src_address: u64, size: u64) void {
-    const dst_segment, const dst_tag = segment_from_vtable(c, dst_address);
-    const src_segment, const src_tag = segment_from_vtable(c, src_address);
+pub fn write_big(interp: *Interpreter, dst_address: u64, src_address: u64, size: u64) void {
+    const dst_segment, const dst_tag = segment_from_vtable(interp, dst_address);
+    const src_segment, const src_tag = segment_from_vtable(interp, src_address);
     check_bounds(dst_segment, dst_tag, size, true);
     check_bounds(src_segment, src_tag, size, false);
 
@@ -415,24 +417,24 @@ fn interp_write_big(c: *Compiler, dst_address: u64, src_address: u64, size: u64)
     @memcpy(dst_slice, src_slice);
 }
 
-fn stack_push(c: *Compiler, value: u64) void {
-    std.debug.assert(c.interp.rsp % 8 == 0);
-    interp_write(c, c.interp.rsp, value, 8);
-    c.interp.rsp += 8;
+fn stack_push(interp: *Interpreter, value: u64) void {
+    std.debug.assert(interp.rsp % 8 == 0);
+    write(interp, interp.rsp, value, 8);
+    interp.rsp += 8;
 }
 
-fn stack_push_big(c: *Compiler, address: u64, size: u64) void {
-    std.debug.assert(c.interp.rsp % 8 == 0);
-    interp_write_big(c, c.interp.rsp, address, size);
-    c.interp.rsp += utils.align_u64(size, .QWORD);
+fn stack_push_big(interp: *Interpreter, address: u64, size: u64) void {
+    std.debug.assert(interp.rsp % 8 == 0);
+    write_big(interp, interp.rsp, address, size);
+    interp.rsp += utils.align_u64(size, .QWORD);
 }
 
-fn stack_pop(c: *Compiler) u64 {
-    c.interp.rsp -= 8;
-    return interp_read(c, c.interp.rsp, 8, false);
+fn stack_pop(interp: *Interpreter) u64 {
+    interp.rsp -= 8;
+    return read(interp, interp.rsp, 8, false);
 }
 
-fn check_bounds(segment: []u8, tag: SegmentTag, size: u64, for_writing: bool) void {
+fn check_bounds(segment: []u8, tag: Vtable.SegmentTag, size: u64, for_writing: bool) void {
     if (for_writing) {
         switch (tag) {
             .Instructions => {
@@ -457,3 +459,35 @@ inline fn inc_u_by_i(value: u64, offset: i59) u64 {
     else
         value - @as(u64, @intCast(-offset));
 }
+
+const std = @import("std");
+const utils = @import("utils.zig");
+const Compiler = @import("compiler.zig");
+const Ast = @import("ast.zig");
+const IR = @import("ir.zig");
+const IRGen = @import("ir-generator.zig");
+
+const IRE = IR.Encoded;
+const IRD = IR.Decoded;
+
+pub const Vtable = struct {
+    unused_space: u64,
+    start_instr: u64,
+    start_global: u64,
+    start_stack: u64,
+    end: u64,
+
+    pub const SegmentTag = enum {
+        Instructions,
+        Globals,
+        Stack,
+
+        pub fn to_string(tag: SegmentTag) []const u8 {
+            return switch (tag) {
+                .Instructions => "instruction",
+                .Globals => "globals",
+                .Stack => "stack",
+            };
+        }
+    };
+};
