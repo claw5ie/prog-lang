@@ -845,10 +845,10 @@ fn typecheck_expr(t: *Typechecker, expr: *Ast.Expr) TypecheckExprResult {
                         break :result .{ .typ = Ast.bool_type, .tag = .Value };
                     },
                     .Eq, .Neq => {
-                        if (!lhs_flags.is_comparable or !rhs_flags.is_comparable) { // TODO: only one side needs to be comparable?
-                            t.c.report_error(Binary_Op.line_info, "errror messages suuuuuuuuuuuuuuuuuck. One of the {}/{} is not comparable", .{ lhs_type, rhs_type });
-                        } else if (!symetric_safe_cast(t, Binary_Op.lhs, lhs_type, Binary_Op.rhs, rhs_type)) {
-                            t.c.report_error(Binary_Op.line_info, "mismatched types: '{}' and '{}'", .{ lhs_type, rhs_type });
+                        if (!((lhs_flags.is_comparable and safe_cast(t, Binary_Op.rhs, rhs_type, lhs_type)) or
+                            (rhs_flags.is_comparable and safe_cast(t, Binary_Op.lhs, lhs_type, rhs_type))))
+                        {
+                            t.c.report_error(Binary_Op.line_info, "can't compare '{}' and '{}'", .{ lhs_type, rhs_type });
                         }
 
                         break :result .{ .typ = Ast.bool_type, .tag = .Value };
