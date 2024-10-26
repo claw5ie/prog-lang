@@ -1,0 +1,1 @@
+tests/typechecker/const-symbol-without-initializer.prog:3:10: error: constant expression needs initializer

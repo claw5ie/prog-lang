@@ -189,6 +189,9 @@ fn typecheck_symbol(t: *Typechecker, symbol: *Ast.Symbol) void {
                     }
 
                     fns.compute_variable_initializer(t, symbol);
+                } else if (symbol.attributes.is_const) {
+                    t.c.report_error(symbol.line_info, "constant expression needs initializer", .{});
+                    Compiler.exit(1);
                 }
             } else if (Variable.value) |value| {
                 const value_type = typecheck_expr_only(t, value);
