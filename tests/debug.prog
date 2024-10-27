@@ -51,6 +51,12 @@ main: proc() void
       i = i + 1;
     }
 
+  _foo: proc() i32
+  {
+    return 420;
+  }
+
+  #print _foo();
   foo(69420);
   #print bar(if true 621 else 0);
   #print bar(if false 0 else 42);

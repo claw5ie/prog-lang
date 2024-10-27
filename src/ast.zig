@@ -1,4 +1,5 @@
 globals: SymbolList,
+local_procedures: SymbolList,
 namespaces: TypeList,
 main: ?*Symbol,
 arena: ArenaAllocator,
@@ -76,6 +77,7 @@ pub fn init(c: *Compiler) Ast {
 
     return .{
         .globals = .{},
+        .local_procedures = .{},
         .namespaces = .{},
         .main = null,
         .arena = ArenaAllocator.init(std.heap.page_allocator),

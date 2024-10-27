@@ -82,6 +82,14 @@ fn generate_ir_top_level(irgen: *IRGen) void {
     }
 
     {
+        var it = irgen.ast.local_procedures.first;
+        while (it) |node| {
+            generate_ir_global_symbol(irgen, node.data);
+            it = node.next;
+        }
+    }
+
+    {
         var it = irgen.ast.globals.first;
         while (it) |node| {
             generate_ir_global_symbol(irgen, node.data);

@@ -756,10 +756,6 @@ fn typecheck_stmt(t: *Typechecker, stmt: *Ast.Stmt) void {
         },
         .Symbol => |symbol| {
             typecheck_symbol(t, symbol);
-            if (symbol.as == .Procedure) {
-                t.c.report_error(stmt.line_info, "no local function allowed, yet", .{});
-                Compiler.exit(1);
-            }
         },
         .Assign => |Assign| {
             const lhs_type = typecheck_expr_only(t, Assign.lhs);

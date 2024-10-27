@@ -219,6 +219,14 @@ fn parse_stmt(p: *Parser) *Ast.Stmt {
                 => {
                     const symbol = insert_symbol(p, result, .Parsing_Statement);
 
+                    if (symbol.as == .Procedure) {
+                        const node = p.ast.create(Ast.SymbolList.Node);
+                        node.* = .{
+                            .data = symbol,
+                        };
+                        p.ast.local_procedures.append(node);
+                    }
+
                     const stmt = p.ast.create(Ast.Stmt);
                     stmt.* = .{
                         .line_info = tok.line_info,
