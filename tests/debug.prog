@@ -73,7 +73,14 @@ main: proc() void
       {
         x: Foo,
       };
+
+      foo: proc() void
+      {
+        #print 42069420;
+      }
     };
+
+    Foo.foo();
   }
 }
 

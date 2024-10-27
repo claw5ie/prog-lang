@@ -1,4 +1,5 @@
 globals: SymbolList,
+namespaces: TypeList,
 main: ?*Symbol,
 arena: ArenaAllocator,
 c: *Compiler,
@@ -22,7 +23,6 @@ pub const default_stages_none = Type.Stages{
     .shallow_check = .None,
     .void_array_check = .None,
     .full_check = .None,
-    .ir_generation = .None,
 };
 
 pub const default_stages_done = Type.Stages{
@@ -30,7 +30,6 @@ pub const default_stages_done = Type.Stages{
     .shallow_check = .Done,
     .void_array_check = .Done,
     .full_check = .Done,
-    .ir_generation = .None,
 };
 
 pub fn init(c: *Compiler) Ast {
@@ -77,6 +76,7 @@ pub fn init(c: *Compiler) Ast {
 
     return .{
         .globals = .{},
+        .namespaces = .{},
         .main = null,
         .arena = ArenaAllocator.init(std.heap.page_allocator),
         .c = c,
@@ -506,9 +506,10 @@ pub const Type = struct {
         shallow_check: Stage,
         void_array_check: Stage,
         full_check: Stage,
-        ir_generation: Stage,
     };
 };
+
+pub const TypeList = std.DoublyLinkedList(*Type);
 
 pub const Expr = struct {
     line_info: LineInfo,

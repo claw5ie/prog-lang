@@ -73,16 +73,28 @@ fn generate_ir_top_level(irgen: *IRGen) void {
         generate_ir_instr0(irgen, .exit);
     }
 
-    var it = irgen.ast.globals.first;
-    while (it) |node| {
-        generate_ir_global_symbol(irgen, node.data);
-        it = node.next;
+    {
+        var it = irgen.ast.namespaces.first;
+        while (it) |node| {
+            generate_ir_type(irgen, node.data);
+            it = node.next;
+        }
+    }
+
+    {
+        var it = irgen.ast.globals.first;
+        while (it) |node| {
+            generate_ir_global_symbol(irgen, node.data);
+            it = node.next;
+        }
     }
 }
 
 fn generate_ir_global_symbol(irgen: *IRGen, symbol: *Ast.Symbol) void {
     switch (symbol.as) {
-        .Variable => {},
+        .Variable => |Variable| {
+            std.debug.assert(Variable.storage != null);
+        },
         .Procedure => |*Procedure| {
             const Proc = &Procedure.typ.data.as.Proc;
 
@@ -142,8 +154,8 @@ fn generate_ir_global_symbol(irgen: *IRGen, symbol: *Ast.Symbol) void {
             irgen.biggest_next_local = 0;
             irgen.return_label = null;
         },
-        .Type => |typ| {
-            generate_ir_type(irgen, typ);
+        .Type => {
+            // NOTE[global-symbols-generation].
         },
         .Parameter,
         .Struct_Field,
@@ -164,10 +176,11 @@ fn generate_ir_local_symbol(irgen: *IRGen, symbol: *Ast.Symbol) void {
                 _ = generate_ir_expr(irgen, Variable.storage, value);
             }
         },
-        .Type => |typ| {
-            generate_ir_type(irgen, typ);
-        },
         .Procedure,
+        .Type,
+        => {
+            // NOTE[global-symbols-generation]: those are already generated separately.
+        },
         .Parameter,
         .Struct_Field,
         .Union_Field,
@@ -177,16 +190,7 @@ fn generate_ir_local_symbol(irgen: *IRGen, symbol: *Ast.Symbol) void {
 }
 
 fn generate_ir_type(irgen: *IRGen, typ: *Ast.Type) void {
-    const data = typ.data;
-    switch (data.stages.ir_generation) {
-        .None => data.stages.ir_generation = .Going,
-        .Going => unreachable,
-        .Done => return,
-    }
-
-    defer data.stages.ir_generation = .Done;
-
-    switch (data.as) {
+    switch (typ.data.as) {
         .Struct, .Union => |Struct| {
             var it = Struct.rest.first;
             while (it) |node| {

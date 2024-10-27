@@ -997,6 +997,13 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                     .flags = .{},
                     .typechecking = .None,
                 };
+                {
+                    const node = p.ast.create(Ast.TypeList.Node);
+                    node.* = .{
+                        .data = &expr.as.Type,
+                    };
+                    p.ast.namespaces.append(node);
+                }
                 break :base expr;
             },
             .Union => {
@@ -1033,6 +1040,13 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                     .flags = .{},
                     .typechecking = .None,
                 };
+                {
+                    const node = p.ast.create(Ast.TypeList.Node);
+                    node.* = .{
+                        .data = &expr.as.Type,
+                    };
+                    p.ast.namespaces.append(node);
+                }
                 break :base expr;
             },
             .Enum => {
@@ -1070,6 +1084,13 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                     .flags = .{},
                     .typechecking = .None,
                 };
+                {
+                    const node = p.ast.create(Ast.TypeList.Node);
+                    node.* = .{
+                        .data = &expr.as.Type,
+                    };
+                    p.ast.namespaces.append(node);
+                }
                 break :base expr;
             },
             .Proc => {
