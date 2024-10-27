@@ -784,6 +784,40 @@ fn typecheck_expr(t: *Typechecker, expr: *Ast.Expr) TypecheckExprResult {
     }
     defer expr.typechecking = .Done;
 
+    const fns = struct {
+        pub fn typecheck_expr_symbol(_t: *Typechecker, _expr: *Ast.Expr, symbol: *Ast.Symbol) TypecheckExprResult {
+            _expr.as = .{ .Symbol = symbol };
+            _expr.flags.is_const = symbol.attributes.is_const;
+            _expr.flags.is_static = symbol.attributes.is_static;
+
+            switch (symbol.as) {
+                .Variable => |*Variable| {
+                    typecheck_symbol(_t, symbol); // TODO: allow cyclic references when using #type_of/#alignment_of, etc.
+
+                    _expr.flags.is_lvalue = true;
+
+                    return .{ .typ = Variable.typ.?, .tag = .Value };
+                },
+                .Parameter => |Parameter| {
+                    _expr.flags.is_lvalue = true;
+                    return .{ .typ = Parameter.typ, .tag = .Value };
+                },
+                .Procedure => |Procedure| {
+                    return .{ .typ = Procedure.typ, .tag = .Value };
+                },
+                .Type => |Type| {
+                    return .{ .typ = Type, .tag = .Type };
+                },
+                .Struct_Field, .Union_Field => |Field| {
+                    return .{ .typ = Field.typ, .tag = .Non_Value };
+                },
+                .Enum_Field => {
+                    return .{ .typ = _t.enum_type.?, .tag = .Value };
+                },
+            }
+        }
+    };
+
     const result: TypecheckExprResult = result: {
         switch (expr.as) {
             .Binary_Op => |*Binary_Op| {
@@ -1248,26 +1282,45 @@ fn typecheck_expr(t: *Typechecker, expr: *Ast.Expr) TypecheckExprResult {
                 const subexpr_result = typecheck_expr(t, Field.subexpr);
 
                 if (subexpr_result.tag == .Type) {
-                    const data = t.ast.create(Ast.Type.SharedData);
-                    data.* = .{
-                        .as = .{ .Field = .{
-                            .subtype = subexpr_result.typ,
-                            .field = Field.field,
-                        } },
-                        .byte_size = 0,
-                        .alignment = .BYTE,
-                        .stages = Ast.default_stages_none,
+                    typecheck_type(t, subexpr_result.typ);
+
+                    const scope: *Ast.Scope = switch (subexpr_result.typ.data.as) {
+                        .Struct, .Union => |Struct| Struct.scope,
+                        .Enum => |Enum| Enum.scope,
+                        .Proc,
+                        .Array,
+                        .Pointer,
+                        .Integer,
+                        .Bool,
+                        .Void,
+                        => {
+                            t.c.report_error(subexpr_result.typ.line_info, "expected struct, union, or enum type, but got '{}'", .{subexpr_result.typ});
+                            Compiler.exit(1);
+                        },
+                        .Field,
+                        .Identifier,
+                        .Type_Of,
+                        => unreachable,
                     };
 
-                    expr.as = .{ .Type = .{
-                        .line_info = expr.line_info,
-                        .data = data,
-                        .symbol = null,
-                    } };
+                    const symbol = resolve_identifier(t, Field.field, scope);
 
-                    expr.flags.is_const = true;
+                    switch (symbol.as) {
+                        .Type => |Type| {
+                            expr.as = .{ .Type = .{
+                                .line_info = expr.line_info,
+                                .data = Type.data,
+                                .symbol = symbol,
+                            } };
 
-                    break :result .{ .typ = &expr.as.Type, .tag = .Type };
+                            expr.flags.is_const = true;
+
+                            break :result .{ .typ = &expr.as.Type, .tag = .Type };
+                        },
+                        else => {
+                            break :result fns.typecheck_expr_symbol(t, expr, symbol);
+                        },
+                    }
                 } else {
                     expr.flags.is_lvalue = Field.subexpr.flags.is_lvalue;
                     expr.flags.is_const = Field.subexpr.flags.is_const;
@@ -1366,38 +1419,9 @@ fn typecheck_expr(t: *Typechecker, expr: *Ast.Expr) TypecheckExprResult {
                 }, expr.line_info.offset);
 
                 if (has_symbol) |symbol| {
-                    expr.as = .{ .Symbol = symbol };
-
                     typecheck_symbol_type(t, symbol);
 
-                    expr.flags.is_const = symbol.attributes.is_const;
-                    expr.flags.is_static = symbol.attributes.is_static;
-
-                    switch (symbol.as) {
-                        .Variable => |*Variable| {
-                            typecheck_symbol(t, symbol); // TODO: allow cyclic references when using #type_of/#alignment_of, etc.
-
-                            expr.flags.is_lvalue = true;
-
-                            break :result .{ .typ = Variable.typ.?, .tag = .Value };
-                        },
-                        .Parameter => |Parameter| {
-                            expr.flags.is_lvalue = true;
-                            break :result .{ .typ = Parameter.typ, .tag = .Value };
-                        },
-                        .Procedure => |Procedure| {
-                            break :result .{ .typ = Procedure.typ, .tag = .Value };
-                        },
-                        .Type => |Type| {
-                            break :result .{ .typ = Type, .tag = .Type };
-                        },
-                        .Struct_Field, .Union_Field => |Field| {
-                            break :result .{ .typ = Field.typ, .tag = .Non_Value };
-                        },
-                        .Enum_Field => {
-                            break :result .{ .typ = t.enum_type.?, .tag = .Value };
-                        },
-                    }
+                    break :result fns.typecheck_expr_symbol(t, expr, symbol);
                 } else {
                     t.c.report_error(expr.line_info, "symbol '{s}' is not defined", .{Identifier.name});
                     Compiler.exit(1);
