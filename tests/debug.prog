@@ -1,8 +1,11 @@
 // Comment
+
+g_a: u1 = 1;
+
 main: proc() void
 {
   {
-    #print 1 || false;
+    #print g_a || false;
     #print 42 == false;
     #print false != 42;
     // #print false - true; // TODO: fix this

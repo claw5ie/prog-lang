@@ -163,13 +163,13 @@ fn parse_cmd_options() Options {
     return options;
 }
 
-pub fn find_symbol_in_scope(c: *Compiler, key: Ast.Symbol.Key, offset: usize) ?*Ast.Symbol {
+pub fn find_symbol_in_scope(c: *Compiler, key: Ast.Symbol.Key, skip_local_variables: bool, offset: usize) ?*Ast.Symbol {
     const has_symbol = c.symbol_table.find(key);
 
     if (has_symbol) |symbol| {
         switch (symbol.as) {
             .Variable, .Parameter => {
-                if (symbol.attributes.is_const or symbol.attributes.is_static or symbol.line_info.offset < offset) {
+                if (symbol.attributes.is_const or symbol.attributes.is_static or (symbol.line_info.offset < offset and !skip_local_variables)) {
                     return symbol;
                 }
             },
@@ -186,12 +186,18 @@ pub fn find_symbol_in_scope(c: *Compiler, key: Ast.Symbol.Key, offset: usize) ?*
 }
 
 pub fn find_symbol(c: *Compiler, key: Ast.Symbol.Key, offset: usize) ?*Ast.Symbol {
+    return find_symbol_with_scope_bound(c, key, &Ast.global_scope, offset);
+}
+
+pub fn find_symbol_with_scope_bound(c: *Compiler, key: Ast.Symbol.Key, scope_bound: *Ast.Scope, offset: usize) ?*Ast.Symbol {
+    var skip_local_variables = false;
     var k = key;
     while (true) {
-        const has_symbol = find_symbol_in_scope(c, k, offset);
+        const has_symbol = find_symbol_in_scope(c, k, skip_local_variables, offset);
         if (has_symbol) |symbol| {
             return symbol;
         } else if (k.scope.parent) |parent| {
+            skip_local_variables = skip_local_variables or k.scope == scope_bound;
             k.scope = parent;
         } else {
             break;

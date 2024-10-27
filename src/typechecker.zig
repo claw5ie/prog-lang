@@ -1,5 +1,6 @@
 enum_type: ?*Ast.Type,
 return_type: ?*Ast.Type,
+scope_bound: *Ast.Scope,
 is_in_loop: bool,
 interp: Interpreter,
 ast: *Ast,
@@ -12,6 +13,7 @@ pub fn typecheck(c: *Compiler, ast: *Ast, irgen: *IRGen) void {
     var typechecker = Typechecker{
         .enum_type = null,
         .return_type = null,
+        .scope_bound = &Ast.global_scope,
         .is_in_loop = false,
         .ast = ast,
         .irgen = irgen,
@@ -31,10 +33,10 @@ fn typecheck_top_level(t: *Typechecker) void {
         it = node.next;
     }
 
-    const has_main = t.c.find_symbol(.{
+    const has_main = t.c.find_symbol_in_scope(.{
         .name = "main",
         .scope = &Ast.global_scope,
-    }, 0);
+    }, false, 0);
 
     if (has_main) |main| {
         t.ast.main = main;
@@ -205,6 +207,11 @@ fn typecheck_symbol(t: *Typechecker, symbol: *Ast.Symbol) void {
             }
         },
         .Procedure => |Procedure| {
+            const old_scope_bound = t.scope_bound;
+            defer t.scope_bound = old_scope_bound;
+
+            t.scope_bound = Procedure.typ.data.as.Proc.scope;
+
             const old_return_type = t.return_type;
             t.return_type = Procedure.typ.data.as.Proc.return_type;
 
@@ -287,10 +294,10 @@ fn unpack(t: *Typechecker, typ: *Ast.Type) void {
             unpack(t, subtype);
         },
         .Identifier => |Identifier| {
-            const has_symbol = t.c.find_symbol(.{
+            const has_symbol = t.c.find_symbol_with_scope_bound(.{
                 .name = Identifier.name,
                 .scope = Identifier.scope,
-            }, typ.line_info.offset);
+            }, t.scope_bound, typ.line_info.offset);
 
             if (has_symbol) |symbol| {
                 fns.unpack_symbol(t, typ, symbol);
@@ -425,6 +432,11 @@ fn typecheck_type(t: *Typechecker, typ: *Ast.Type) void {
 
     switch (data.as) {
         .Struct => |Struct| {
+            const old_scope_bound = t.scope_bound;
+            defer t.scope_bound = old_scope_bound;
+
+            t.scope_bound = Struct.scope;
+
             var size: u64 = 0;
             var alignment: Alignment = .BYTE;
 
@@ -455,6 +467,11 @@ fn typecheck_type(t: *Typechecker, typ: *Ast.Type) void {
             }
         },
         .Union => |Union| {
+            const old_scope_bound = t.scope_bound;
+            defer t.scope_bound = old_scope_bound;
+
+            t.scope_bound = Union.scope;
+
             var size: u64 = 0;
             var alignment: Alignment = .BYTE;
 
@@ -483,6 +500,11 @@ fn typecheck_type(t: *Typechecker, typ: *Ast.Type) void {
             }
         },
         .Enum => |*Enum| {
+            const old_scope_bound = t.scope_bound;
+            defer t.scope_bound = old_scope_bound;
+
+            t.scope_bound = Enum.scope;
+
             const old_enum_type = t.enum_type;
             t.enum_type = typ;
 
@@ -1413,10 +1435,10 @@ fn typecheck_expr(t: *Typechecker, expr: *Ast.Expr) TypecheckExprResult {
             },
             .Symbol => unreachable,
             .Identifier => |Identifier| {
-                const has_symbol = t.c.find_symbol(.{
+                const has_symbol = t.c.find_symbol_with_scope_bound(.{
                     .name = Identifier.name,
                     .scope = Identifier.scope,
-                }, expr.line_info.offset);
+                }, t.scope_bound, expr.line_info.offset);
 
                 if (has_symbol) |symbol| {
                     typecheck_symbol_type(t, symbol);
@@ -1443,7 +1465,7 @@ fn resolve_identifier(t: *Typechecker, expr: *Ast.Expr, scope: *Ast.Scope) *Ast.
             const has_symbol = t.c.find_symbol_in_scope(.{
                 .name = Identifier.name,
                 .scope = Identifier.scope,
-            }, expr.line_info.offset);
+            }, false, expr.line_info.offset);
 
             if (has_symbol) |symbol| {
                 expr.as = .{ .Symbol = symbol };
