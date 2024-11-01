@@ -84,59 +84,72 @@ fn advance_line_info(l: *Lexer) void {
 }
 
 fn parse_token(l: *Lexer) Token {
-    var src = l.c.source_code[l.line_info.offset..];
-    var at: usize = 0;
-    var ch = src[at];
+    const State = struct {
+        src: [:0]const u8,
+        at: usize,
+        ch: u8,
+        l: *Lexer,
+    };
 
-    while (ch != 0) {
-        while (is_space(ch)) {
-            at += 1;
-            ch = src[at];
-            advance_line_info(l);
+    const fns = struct {
+        pub fn _advance(s: *State) void {
+            s.at += 1;
+            s.ch = s.src[s.at];
+            advance_line_info(s.l);
+        }
+    };
+
+    var s: State = s: {
+        const src = l.c.source_code[l.line_info.offset..];
+        break :s .{
+            .src = src,
+            .at = 0,
+            .ch = src[0],
+            .l = l,
+        };
+    };
+
+    while (s.ch != 0) {
+        while (is_space(s.ch)) {
+            fns._advance(&s);
         }
 
-        if (ch == '/' and src[at + 1] == '/') {
-            while (ch != 0 and ch != '\n') {
-                at += 1;
-                ch = src[at];
-                advance_line_info(l);
+        if (s.ch == '/' and s.src[s.at + 1] == '/') {
+            while (s.ch != 0 and s.ch != '\n') {
+                fns._advance(&s);
             }
         } else {
             break;
         }
     }
 
-    src = src[at..];
-    at = 0;
+    s.src = s.src[s.at..];
+    s.at = 0;
 
     var tok = Token{
         .line_info = l.line_info,
         .as = .End_Of_File,
     };
 
-    if (ch == 0) {
+    if (s.ch == 0) {
         // leave.
-    } else if (is_digit(ch)) {
+    } else if (is_digit(s.ch)) {
         while (true) {
-            at += 1;
-            ch = src[at];
-            advance_line_info(l);
-            if (!is_digit(ch)) break;
+            fns._advance(&s);
+            if (!is_digit(s.ch)) break;
         }
 
-        const text = src[0..at];
+        const text = s.src[0..s.at];
         const value = std.fmt.parseInt(u64, text, 10) catch {
             l.c.report_error(tok.line_info, "integer literal '{s}' is too big (> 64 bits).", .{text});
             Compiler.exit(1);
         };
 
         tok.as = .{ .Integer = value };
-    } else if (is_alpha(ch) or ch == '_') {
+    } else if (is_alpha(s.ch) or s.ch == '_') {
         while (true) {
-            at += 1;
-            ch = src[at];
-            advance_line_info(l);
-            if (!is_alnum(ch) and ch != '_') break;
+            fns._advance(&s);
+            if (!is_alnum(s.ch) and s.ch != '_') break;
         }
 
         const Keyword = struct {
@@ -170,7 +183,7 @@ fn parse_token(l: *Lexer) Token {
         };
 
         tok.as = as: {
-            const text = src[0..at];
+            const text = s.src[0..s.at];
 
             if (text[0] == 'i' or text[0] == 'u') {
                 switch (text.len) {
@@ -207,13 +220,11 @@ fn parse_token(l: *Lexer) Token {
 
             break :as .{ .Identifier = new_text };
         };
-    } else if (ch == '#' and (is_alpha(src[at + 1]) or src[at + 1] == '_')) {
+    } else if (s.ch == '#' and (is_alpha(s.src[s.at + 1]) or s.src[s.at + 1] == '_')) {
         while (true) {
-            at += 1;
-            ch = src[at];
-            advance_line_info(l);
+            fns._advance(&s);
 
-            if (!is_alnum(ch) and ch != '_') break;
+            if (!is_alnum(s.ch) and s.ch != '_') break;
         }
 
         const SpicyKeyword = struct {
@@ -238,7 +249,7 @@ fn parse_token(l: *Lexer) Token {
             };
         };
 
-        const text = src[0..at];
+        const text = s.src[0..s.at];
 
         tok.as = as: {
             for (state.keywords) |keyword| {
@@ -250,8 +261,8 @@ fn parse_token(l: *Lexer) Token {
             l.c.report_error(tok.line_info, "invalid keyword '{s}'\n", .{text});
             Compiler.exit(1);
         };
-    } else if (!is_print(ch)) {
-        l.c.report_error(tok.line_info, "non-printable character with code '{}'\n", .{ch});
+    } else if (!is_print(s.ch)) {
+        l.c.report_error(tok.line_info, "non-printable character with code '{}'\n", .{s.ch});
         Compiler.exit(1);
     } else {
         const Symbol = struct {
@@ -294,16 +305,16 @@ fn parse_token(l: *Lexer) Token {
 
         tok.as = as: {
             for (state.symbols) |symbol| {
-                if (utils.is_prefix(symbol.text, src)) {
+                if (utils.is_prefix(symbol.text, s.src)) {
                     const count: u32 = @intCast(symbol.text.len);
-                    at += count;
+                    s.at += count;
                     l.line_info.column += count;
                     l.line_info.offset += count;
                     break :as symbol.as;
                 }
             }
 
-            l.c.report_error(tok.line_info, "unrecognized character '{c}'\n", .{src[at]});
+            l.c.report_error(tok.line_info, "unrecognized character '{c}'\n", .{s.ch});
             Compiler.exit(1);
         };
     }
