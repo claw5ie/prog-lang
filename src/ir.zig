@@ -336,10 +336,10 @@ pub const Decoded = struct {
                     try writer.print("{}", .{tmp});
                 },
                 .Mem_B => |mem| {
-                    try writer.print("{} [{}]", .{ @as(u64, mem.size_minus_one) + 1, mem.base });
+                    try writer.print("[{}]/{}", .{ mem.base, @as(u64, mem.size_minus_one) + 1 });
                 },
                 .Mem_BO => |mem| {
-                    try writer.print("{} [{} + {}]", .{ @as(u64, mem.size_minus_one) + 1, mem.base, mem.offset });
+                    try writer.print("[{} + {}]/{}", .{ mem.base, mem.offset, @as(u64, mem.size_minus_one) + 1 });
                 },
                 .Addr_T => |tmp| {
                     try writer.print(
