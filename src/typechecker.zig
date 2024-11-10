@@ -72,14 +72,15 @@ fn typecheck_top_level(t: *Typechecker) void {
 // Expression is not struct/union/array.
 fn compute_simple_expr(t: *Typechecker, expr: *Ast.Expr) u64 {
     const op = compute_expr(t, expr);
-    return t.interp.grab_value_from_operand(op, expr.typ.is_signed());
+    const address = t.interp.grab_value_from_operand(op, false);
+    return t.interp.read(address, @intCast(expr.typ.data.byte_size), expr.typ.is_signed());
 }
 
 fn compute_expr_to_operand(t: *Typechecker, dst: IRE.Operand, expr: *Ast.Expr) void {
     std.debug.assert(dst.is_lvalue());
     const op = compute_expr(t, expr);
     const dst_address = t.interp.grab_value_from_operand(dst.addr_of().decode(), false);
-    const src_address = t.interp.grab_address_from_operand(op);
+    const src_address = t.interp.grab_value_from_operand(op, false);
     t.interp.write_big(dst_address, src_address, expr.typ.data.byte_size);
 }
 
@@ -101,7 +102,7 @@ fn compute_expr(t: *Typechecker, expr: *Ast.Expr) IRD.Operand {
     old_irgen.labels = t.irgen.labels;
     t.irgen.* = old_irgen;
 
-    return dst.decode();
+    return dst.addr_of().decode();
 }
 
 fn typecheck_symbol_type(t: *Typechecker, symbol: *Ast.Symbol) void {

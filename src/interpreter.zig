@@ -365,7 +365,7 @@ fn segment_from_vtable(interp: *Interpreter, address: u64) struct { []u8, Vtable
     }
 }
 
-fn read(interp: *Interpreter, address: u64, size: u8, is_signed: bool) u64 {
+pub fn read(interp: *Interpreter, address: u64, size: u8, is_signed: bool) u64 {
     std.debug.assert(size <= 8 and size > 0);
 
     const offset: u6 = @intCast((address % 8) * 8);
