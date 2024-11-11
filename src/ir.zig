@@ -343,7 +343,7 @@ pub const Decoded = struct {
                 },
                 .Addr_T => |tmp| {
                     try writer.print(
-                        "addr [{c}{}]",
+                        "addr {c}{}",
                         .{
                             @as(u8, switch (tmp.tag) {
                                 .Relative => 'r',
