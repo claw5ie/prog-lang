@@ -37,56 +37,48 @@ pub fn print(ir: *IR) void {
 }
 
 pub fn write_to_file(ir: *IR, filepath: [:0]const u8) void {
-    const fd = std.posix.open(
-        filepath,
-        .{
-            .ACCMODE = .WRONLY,
-            .CREAT = true,
-            .TRUNC = true,
-        },
-        0o644,
-    ) catch {
-        Compiler.eprint("error: couldn't open a file '{s}'\n", .{filepath});
-        Compiler.exit(1);
+    const file = std.fs.cwd().createFile(filepath, .{}) catch {
+        exit_error("{s}: couldn't open the file", .{filepath});
     };
-    defer std.posix.close(fd);
+    defer file.close();
 
-    nostd.write_to_file_v(fd, Compiler.magic_number_string);
-    nostd.write_to_file_u64(fd, ir.globals.items.len);
-    nostd.write_to_file_u64(fd, ir.instrs.items.len);
-    nostd.write_to_file_v(fd, ir.globals.items);
-    nostd.write_to_file_v(fd, ir.instrs.items);
+    nostd.write_to_file(file, Compiler.magic_number_string);
+    nostd.write_u64_to_file(file, ir.globals.items.len);
+    nostd.write_u64_to_file(file, ir.instrs.items.len);
+    nostd.write_to_file(file, ir.globals.items);
+    nostd.write_to_file(file, ir.instrs.items);
 }
 
 pub fn read_from_file(filepath: [:0]const u8) IR {
-    const fd = std.posix.open(filepath, .{}, 0) catch {
-        Compiler.eprint("error: couldn't open a file '{s}'\n", .{filepath});
-        Compiler.exit(1);
+    const file = std.fs.cwd().openFile(filepath, .{}) catch {
+        exit_error("{s}: couldn't open the file", .{filepath});
     };
-    defer std.posix.close(fd);
+    defer file.close();
 
-    const magic_number = nostd.read_from_file_u64(fd);
+    const magic_number = nostd.read_u64_from_file(file);
     std.debug.assert(magic_number == Compiler.magic_number_value);
-    const globals_byte_count = nostd.read_from_file_u64(fd);
-    const instrs_byte_count = nostd.read_from_file_u64(fd);
+    const globals_byte_count = nostd.read_u64_from_file(file);
+    const instrs_byte_count = nostd.read_u64_from_file(file);
     var globals = ByteList.init(nostd.general_allocator);
     var instrs = ByteList.init(nostd.general_allocator);
 
     globals.resize(globals_byte_count) catch {
-        Compiler.exit(1);
+        nostd.exit(1);
     };
     instrs.resize(instrs_byte_count) catch {
-        Compiler.exit(1);
+        nostd.exit(1);
     };
 
-    nostd.read_from_file_v(fd, globals.items);
-    nostd.read_from_file_v(fd, instrs.items);
+    nostd.read_from_file(file, globals.items);
+    nostd.read_from_file(file, instrs.items);
 
     return .{
         .instrs = instrs,
         .globals = globals,
     };
 }
+
+const exit_error = nostd.exit_error;
 
 const std = @import("std");
 const nostd = @import("nostd.zig");

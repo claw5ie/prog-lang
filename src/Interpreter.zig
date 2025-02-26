@@ -32,8 +32,8 @@ pub fn deinit(interp: *Interpreter) void {
 
 pub fn init_vtable(ir: *IR) Vtable {
     const start_instr = UNUSED_SPACE_SIZE;
-    const start_global = start_instr + nostd.align_by_pow2(ir.instrs.items.len, 1024);
-    const start_stack = start_global + nostd.align_by_pow2(ir.globals.items.len, 1024);
+    const start_global = start_instr + nostd.align_up_by_pow2(ir.instrs.items.len, 1024);
+    const start_stack = start_global + nostd.align_up_by_pow2(ir.globals.items.len, 1024);
     const end = start_stack + STACK_SIZE;
 
     return .{
@@ -426,7 +426,7 @@ fn stack_push(interp: *Interpreter, value: u64) void {
 fn stack_push_big(interp: *Interpreter, address: u64, size: u64) void {
     std.debug.assert(interp.rsp % 8 == 0);
     write_big(interp, interp.rsp, address, size);
-    interp.rsp += nostd.align_u64(size, .QWORD);
+    interp.rsp += nostd.align_up(size, .Qword);
 }
 
 fn stack_pop(interp: *Interpreter) u64 {

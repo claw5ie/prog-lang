@@ -990,7 +990,7 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                         .scope = scope,
                     } },
                     .byte_size = 0,
-                    .alignment = .BYTE,
+                    .alignment = .Byte,
                     .stages = Ast.default_stages_none,
                 };
                 const expr = p.ast.create(Ast.Expr);
@@ -1033,7 +1033,7 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                         .scope = scope,
                     } },
                     .byte_size = 0,
-                    .alignment = .BYTE,
+                    .alignment = .Byte,
                     .stages = Ast.default_stages_none,
                 };
                 const expr = p.ast.create(Ast.Expr);
@@ -1077,7 +1077,7 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                         .scope = scope,
                     } },
                     .byte_size = 0,
-                    .alignment = .BYTE,
+                    .alignment = .Byte,
                     .stages = Ast.default_stages_none,
                 };
                 const expr = p.ast.create(Ast.Expr);
@@ -1190,7 +1190,7 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                         data.* = .{
                             .as = .{ .Type_Of = exprs[0] },
                             .byte_size = 0,
-                            .alignment = .BYTE,
+                            .alignment = .Byte,
                             .stages = Ast.default_stages_none,
                         };
                         const expr = p.ast.create(Ast.Expr);

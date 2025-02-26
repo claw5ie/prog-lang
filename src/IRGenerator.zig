@@ -116,7 +116,7 @@ fn generate_global_symbol(generator: *IRGenerator, symbol: *Ast.Symbol) void {
             while (it) |node| {
                 const Parameter = &node.data.as.Parameter;
 
-                const size = nostd.align_u64(Parameter.typ.data.byte_size, .QWORD);
+                const size = nostd.align_up(Parameter.typ.data.byte_size, .Qword);
                 offset -= @intCast(size);
                 Parameter.storage = .{ .Tmp = .{
                     .offset = offset,
@@ -144,7 +144,7 @@ fn generate_global_symbol(generator: *IRGenerator, symbol: *Ast.Symbol) void {
 
             generate_stmt_list(generator, Procedure.block);
 
-            const stack_space_used = nostd.align_u64(generator.biggest_next_local, .QWORD);
+            const stack_space_used = nostd.align_up(generator.biggest_next_local, .Qword);
             generate_label(generator, labels.end);
             generate_instr1(
                 generator,
@@ -546,7 +546,7 @@ pub fn generate_expr(generator: *IRGenerator, has_dst: ?IRE.Operand, expr: *Ast.
                 const arg = node.data.Expr;
                 const src = generate_expr(generator, null, arg);
                 generate_instr1(generator, .push, src);
-                bytes_pushed += nostd.align_u64(arg.typ.data.byte_size, .QWORD);
+                bytes_pushed += nostd.align_up(arg.typ.data.byte_size, .Qword);
 
                 it = node.prev;
             }
@@ -603,7 +603,7 @@ pub fn generate_expr(generator: *IRGenerator, has_dst: ?IRE.Operand, expr: *Ast.
                         _ = generate_expr(generator, new_dst, arg);
 
                         offset += size;
-                        offset = nostd.align_u64(offset, Array.subtype.data.alignment);
+                        offset = nostd.align_up(offset, Array.subtype.data.alignment);
                         it = node.next;
                     }
                 },
@@ -626,11 +626,11 @@ pub fn generate_expr(generator: *IRGenerator, has_dst: ?IRE.Operand, expr: *Ast.
         },
         .Subscript => |Subscript| {
             const subexpr = generate_expr(generator, null, Subscript.subexpr);
-            const dst = grab_local(generator, 8, .QWORD);
+            const dst = grab_local(generator, 8, .Qword);
 
             {
                 const index = generate_expr(generator, null, Subscript.index);
-                const offset = nostd.align_u64(expr.typ.data.byte_size, expr.typ.data.alignment);
+                const offset = nostd.align_up(expr.typ.data.byte_size, expr.typ.data.alignment);
                 generate_instr3(generator, .umul, dst, index, .{ .Imm = offset });
             }
 
@@ -1091,7 +1091,7 @@ fn deref(generator: *IRGenerator, src: IRE.Operand, offset: u64, size: u64) IRE.
         },
         .Mem => |mem| {
             std.debug.assert(mem.size <= 8);
-            const dst = grab_local(generator, mem.size, .QWORD);
+            const dst = grab_local(generator, mem.size, .Qword);
             generate_instr2(generator, .mov, dst, src);
 
             return dst.mem_from_tmp(offset, size);
@@ -1119,7 +1119,7 @@ fn deref(generator: *IRGenerator, src: IRE.Operand, offset: u64, size: u64) IRE.
         },
         .Label => {
             // Since labels are not yet resolved (we don't know absolute offset), we can't perform operations on it during IR generation.
-            const dst = grab_local(generator, 8, .QWORD);
+            const dst = grab_local(generator, 8, .Qword);
             generate_instr3(generator, .uadd, dst, src, .{ .Imm = offset });
             return dst.mem_from_tmp(offset, size);
         },
@@ -1127,7 +1127,7 @@ fn deref(generator: *IRGenerator, src: IRE.Operand, offset: u64, size: u64) IRE.
 }
 
 pub fn grab_local(generator: *IRGenerator, byte_size: u64, alignment: Alignment) IRE.Operand {
-    const offset = nostd.align_u64(@intCast(generator.next_local), alignment);
+    const offset = nostd.align_up(@intCast(generator.next_local), alignment);
     generator.next_local = @intCast(offset + byte_size);
     generator.biggest_next_local = @max(generator.biggest_next_local, generator.next_local);
     return .{ .Tmp = .{
@@ -1145,7 +1145,7 @@ pub fn grab_global(generator: *IRGenerator, byte_size: u64, alignment: Alignment
     std.debug.assert(generator.next_global == generator.ir.globals.items.len);
 
     const old_offset = generator.next_global;
-    const new_offset = nostd.align_u64(old_offset, alignment);
+    const new_offset = nostd.align_up(old_offset, alignment);
 
     generator.next_global = new_offset + byte_size;
     generator.ir.globals.appendNTimes(0xAA, byte_size + (new_offset - old_offset)) catch {

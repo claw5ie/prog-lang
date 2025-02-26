@@ -17,7 +17,7 @@ pub var bool_type: *Type = undefined;
 pub var void_type: *Type = undefined;
 
 pub const pointer_byte_size = 8;
-pub const pointer_alignment: Alignment = .QWORD;
+pub const pointer_alignment: Alignment = .Qword;
 
 pub const default_stages_none = Type.Stages{
     .unpacking = .None,
@@ -44,13 +44,13 @@ pub fn init(c: *Compiler) Ast {
         pub var s_bool_type_data = Type.SharedData{
             .as = .Bool,
             .byte_size = 1,
-            .alignment = .BYTE,
+            .alignment = .Byte,
             .stages = default_stages_done,
         };
         pub var s_void_type_data = Type.SharedData{
             .as = .Void,
             .byte_size = 0,
-            .alignment = .BYTE,
+            .alignment = .Byte,
             .stages = default_stages_done,
         };
 
@@ -102,7 +102,7 @@ pub fn create(ast: *Ast, comptime T: type) *T {
 }
 
 pub fn integer_type_from_u64(value: u64) *Type {
-    const bits = nostd.count_bits(value);
+    const bits = nostd.highest_bit_count(value);
     return lookup_integer_type(bits, false);
 }
 
@@ -122,10 +122,10 @@ pub fn lookup_integer_type(bits: u8, is_signed: bool) *Type {
             } },
             .byte_size = byte_size,
             .alignment = switch (byte_size) {
-                1 => .BYTE,
-                2 => .WORD,
-                4 => .DWORD,
-                8 => .QWORD,
+                1 => .Byte,
+                2 => .Word,
+                4 => .Dword,
+                8 => .Qword,
                 else => unreachable,
             },
             .stages = default_stages_done,
@@ -176,7 +176,7 @@ pub fn expr_to_type(ast: *Ast, expr: *Expr) *Type {
                     .field = Field.field,
                 } },
                 .byte_size = 0,
-                .alignment = .BYTE,
+                .alignment = .Byte,
                 .stages = default_stages_none,
             };
             expr.as = .{ .Type = .{
@@ -198,7 +198,7 @@ pub fn expr_to_type(ast: *Ast, expr: *Expr) *Type {
                     .computed_size = 0,
                 } },
                 .byte_size = 0,
-                .alignment = .BYTE,
+                .alignment = .Byte,
                 .stages = default_stages_none,
             };
             expr.as = .{ .Type = .{
@@ -220,7 +220,7 @@ pub fn expr_to_type(ast: *Ast, expr: *Expr) *Type {
                     .scope = Identifier.scope,
                 } },
                 .byte_size = 0,
-                .alignment = .BYTE,
+                .alignment = .Byte,
                 .stages = default_stages_none,
             };
             expr.as = .{ .Type = .{

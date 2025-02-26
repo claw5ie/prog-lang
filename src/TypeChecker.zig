@@ -439,7 +439,7 @@ fn check_type(t: *TypeChecker, typ: *Ast.Type) void {
             t.scope_bound = Struct.scope;
 
             var size: u64 = 0;
-            var alignment: Alignment = .BYTE;
+            var alignment: Alignment = .Byte;
 
             var it = Struct.fields.first;
             while (it) |node| {
@@ -448,7 +448,7 @@ fn check_type(t: *TypeChecker, typ: *Ast.Type) void {
 
                 const Field = &symbol.as.Struct_Field;
                 const field_alignment = Field.typ.data.alignment;
-                size = nostd.align_u64(size, field_alignment);
+                size = nostd.align_up(size, field_alignment);
                 Field.offset = size;
 
                 size += Field.typ.data.byte_size;
@@ -474,7 +474,7 @@ fn check_type(t: *TypeChecker, typ: *Ast.Type) void {
             t.scope_bound = Union.scope;
 
             var size: u64 = 0;
-            var alignment: Alignment = .BYTE;
+            var alignment: Alignment = .Byte;
 
             var it = Union.fields.first;
             while (it) |node| {
@@ -552,7 +552,7 @@ fn check_type(t: *TypeChecker, typ: *Ast.Type) void {
                 }
             }
 
-            const bits = nostd.count_bits(max_value) + @intFromBool(is_signed);
+            const bits = nostd.highest_bit_count(max_value) + @intFromBool(is_signed);
             if (bits > 64) {
                 t.c.report_error(typ.line_info, "enum can't be represented in <= 64 bits", .{});
                 Compiler.exit(1);
@@ -609,11 +609,11 @@ fn check_type(t: *TypeChecker, typ: *Ast.Type) void {
         },
         .Bool => {
             std.debug.assert(data.byte_size == 1 and
-                data.alignment == .BYTE);
+                data.alignment == .Byte);
         },
         .Void => {
             std.debug.assert(data.byte_size == 0 and
-                data.alignment == .BYTE);
+                data.alignment == .Byte);
         },
         .Field,
         .Identifier,
@@ -1254,7 +1254,7 @@ fn check_expr(t: *TypeChecker, expr: *Ast.Expr) TypecheckExprResult {
                             .computed_size = 0,
                         } },
                         .byte_size = 0,
-                        .alignment = .BYTE,
+                        .alignment = .Byte,
                         .stages = Ast.default_stages_none,
                     };
 
@@ -1512,7 +1512,7 @@ fn safe_cast_two_integers(t: *TypeChecker, lhs: *Ast.Expr, lhs_type: *Ast.Type, 
     const lInteger = &new_lhs_type.data.as.Integer;
     const rInteger = &new_rhs_type.data.as.Integer;
 
-    const Case = enum(u4) {
+    const Case = enum(u8) {
         ULU = 0,
         UGU = 1,
         UEU = 2,
@@ -1531,9 +1531,15 @@ fn safe_cast_two_integers(t: *TypeChecker, lhs: *Ast.Expr, lhs_type: *Ast.Type, 
     };
 
     const case: Case = case: {
-        const order = nostd.compare(lInteger.bits, rInteger.bits);
-        const index = 3 * ((2 * @as(u8, @intFromBool(lInteger.is_signed))) + @intFromBool(rInteger.is_signed)) + @intFromEnum(order);
-        break :case @enumFromInt(index);
+        const left_sign: u8 = @intFromBool(lInteger.is_signed);
+        const right_sign: u8 = @intFromBool(rInteger.is_signed);
+        const order: u8 = if (lInteger.bits < rInteger.bits)
+            0
+        else if (lInteger.bits > rInteger.bits)
+            1
+        else
+            2;
+        break :case @enumFromInt(3 * (2 * left_sign + right_sign) + order);
     };
 
     const Side = enum {
@@ -1784,7 +1790,7 @@ fn can_unsafe_cast(t: *TypeChecker, expr: *Ast.Expr, expr_type: *Ast.Type, cast_
 }
 
 fn make_expr_pointer_mul_integer(t: *TypeChecker, expr: *Ast.Expr, data: *Ast.Type.SharedData) *Ast.Expr {
-    const size = nostd.align_u64(data.byte_size, data.alignment);
+    const size = nostd.align_up(data.byte_size, data.alignment);
     const rhs = t.ast.create(Ast.Expr);
     rhs.* = .{
         .line_info = expr.line_info,

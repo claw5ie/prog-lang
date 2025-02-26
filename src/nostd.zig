@@ -25,67 +25,67 @@ pub fn eprint(comptime format: []const u8, args: anytype) void {
     };
 }
 
+pub fn exit_error(comptime format: []const u8, args: anytype) noreturn {
+    eprint("error: " ++ format ++ "\n", args);
+    exit(1);
+}
+
 pub fn exit(code: u8) noreturn {
-    stdout_buffer.flush() catch {
-        std.posix.exit(1);
-    };
-    stderr_buffer.flush() catch {
-        std.posix.exit(1);
-    };
+    stdout_buffer.flush() catch {};
+    stderr_buffer.flush() catch {};
+    if (code == 0) {
+        std.debug.assert(general_purpose_allocator_context.deinit() == .ok);
+    }
     std.posix.exit(code);
 }
 
-pub fn read_entire_file(allocator: Allocator, filepath: []const u8) ![:0]u8 {
-    const fd = try std.posix.open(filepath, .{}, 0);
-    const size: usize = size: {
-        const stats = try std.posix.fstat(fd);
-        break :size @intCast(stats.size);
-    };
-    const text = allocator.alloc(u8, size + 1) catch {
-        std.posix.exit(1);
-    };
-    std.debug.assert(try std.posix.read(fd, text[0..size]) == size);
-    text[size] = 0;
+pub const File = std.fs.File;
 
-    std.posix.close(fd);
+pub fn read_entire_file(allocator: Allocator, filepath: []const u8) File.OpenError![:0]u8 {
+    const file = try std.fs.cwd().openFile(filepath, .{});
+    defer file.close();
+    const stats = file.stat() catch {
+        exit_error("{s}: failed to stat the file", .{filepath});
+    };
+    const text = allocator.allocSentinel(u8, stats.size, 0) catch {
+        exit_error("{s}: failed to allocate {} bytes", .{ filepath, stats.size + 1 });
+    };
+    const bytes_read = file.read(text) catch {
+        exit_error("{s}: failed to read {} bytes", .{ filepath, stats.size });
+    };
+    std.debug.assert(bytes_read == text.len);
 
-    return text[0..size :0];
+    return text;
 }
 
-pub fn read_from_file_v(fd: std.posix.fd_t, buffer: []u8) void {
-    const count = std.posix.read(fd, buffer) catch {
-        eprint("error: failed to read {} bytes\n", .{buffer.len});
-        exit(1);
+pub fn read_from_file(file: File, buffer: []u8) void {
+    const bytes_read = file.read(buffer) catch {
+        exit_error("failed to read {} bytes", .{buffer.len});
     };
-    std.debug.assert(count == buffer.len);
+    std.debug.assert(bytes_read == buffer.len);
 }
 
-pub fn read_from_file_u64(fd: std.posix.fd_t) u64 {
+pub fn read_u64_from_file(file: File) u64 {
     var value: u64 = 0;
     var buffer: []u8 = undefined;
     buffer.ptr = @ptrCast(&value);
     buffer.len = 8;
-    read_from_file_v(fd, buffer);
+    read_from_file(file, buffer);
     return value;
 }
 
-pub fn write_to_file_v(fd: std.posix.fd_t, bytes: []const u8) void {
-    const count = std.posix.write(fd, bytes) catch {
-        eprint("error: failed to write {} bytes\n", .{bytes.len});
-        exit(1);
+pub fn write_to_file(file: File, bytes: []const u8) void {
+    const bytes_written = file.write(bytes) catch {
+        exit_error("failed to write {} bytes", .{bytes.len});
     };
-    std.debug.assert(count == bytes.len);
+    std.debug.assert(bytes_written == bytes.len);
 }
 
-pub fn write_to_file_u64(fd: std.posix.fd_t, value: u64) void {
-    var view: []const u8 = undefined;
-    view.ptr = @ptrCast(&value);
-    view.len = 8;
-    write_to_file_v(fd, view);
-}
-
-pub fn compare(lhs: anytype, rhs: @TypeOf(lhs)) Order {
-    return if (lhs < rhs) .Less else if (lhs > rhs) .Greater else .Equal;
+pub fn write_u64_to_file(file: File, value: u64) void {
+    var bytes: []const u8 = undefined;
+    bytes.ptr = @ptrCast(&value);
+    bytes.len = 8;
+    write_to_file(file, bytes);
 }
 
 pub fn left_shift(value: u64, offset: u64) u64 {
@@ -128,50 +128,59 @@ pub fn sign_extend(value: u64, bits: u8) u64 {
     return value;
 }
 
-pub fn align_u64(value: u64, alignment: Alignment) u64 {
-    return align_by_pow2(value, alignment.to_byte_size());
+pub fn align_up(value: u64, alignment: Alignment) u64 {
+    return align_up_by_pow2(value, alignment.to_byte_size());
 }
 
-pub fn align_by_pow2(value: u64, alignment: u64) u64 {
-    std.debug.assert(round_to_next_pow2(alignment) == alignment);
-    const pow2_minus_one: u64 = alignment - 1;
-    var v = value;
-    v += pow2_minus_one;
-    v &= ~pow2_minus_one;
-    return v;
+pub fn align_up_by_pow2(value: u64, alignment: u64) u64 {
+    std.debug.assert(alignment > 0 and round_to_next_pow2(alignment) == alignment);
+    const alignment_minus_one = alignment - 1;
+    var _value = value;
+    _value += alignment_minus_one;
+    _value &= ~alignment_minus_one;
+    return _value;
 }
 
-pub fn count_bits(value: u64) u8 {
+// Source: https://graphics.stanford.edu/~seander/bithacks.html#IntegerLog
+// Author: Sean Eron Anderson
+pub fn integer_log2(value: u64) u6 {
     const state = struct {
         pub const b = [_]u64{ 0x2, 0xC, 0xF0, 0xFF00, 0xFFFF0000, 0xFFFFFFFF00000000 };
         pub const s = [_]u6{ 1, 2, 4, 8, 16, 32 };
     };
 
-    var v = value;
-    var i: u8 = 5;
-    var r: u8 = 0;
+    var _value = value;
+    var result: u6 = 0;
+
+    var i: u8 = 6;
     while (i > 0) {
         i -= 1;
-        if ((v & state.b[i]) != 0) {
-            v >>= state.s[i];
-            r |= state.s[i];
+        if ((_value & state.b[i]) != 0) {
+            _value >>= state.s[i];
+            result |= state.s[i];
         }
     }
 
-    return r + @intFromBool(v != 0);
+    return result;
 }
 
+pub fn highest_bit_count(value: u64) u8 {
+    return if (value != 0) @as(u8, integer_log2(value)) + 1 else 0;
+}
+
+// Source: https://graphics.stanford.edu/~seander/bithacks.html#RoundUpPowerOf2
+// Author: Sean Eron Anderson
 pub fn round_to_next_pow2(value: u64) u64 {
-    var v = value;
-    v -%= 1;
-    v |= v >> 1;
-    v |= v >> 2;
-    v |= v >> 4;
-    v |= v >> 8;
-    v |= v >> 16;
-    v |= v >> 32;
-    v +%= 1;
-    return v;
+    var _value = value + @intFromBool(value == 0);
+    _value -%= 1;
+    _value |= _value >> 1;
+    _value |= _value >> 2;
+    _value |= _value >> 4;
+    _value |= _value >> 8;
+    _value |= _value >> 16;
+    _value |= _value >> 32;
+    _value +%= 1;
+    return _value;
 }
 
 pub fn is_prefix(prefix: []const u8, rest: []const u8) bool {
@@ -228,20 +237,14 @@ pub const StringPool = struct {
 };
 
 pub const Alignment = enum(u2) {
-    BYTE = 0,
-    WORD = 1,
-    DWORD = 2,
-    QWORD = 3,
+    Byte = 0,
+    Word = 1,
+    Dword = 2,
+    Qword = 3,
 
-    pub inline fn to_byte_size(alignment: Alignment) u4 {
-        return @as(u4, 1) << @intFromEnum(alignment);
+    pub inline fn to_byte_size(alignment: Alignment) u8 {
+        return @as(u8, 1) << @intFromEnum(alignment);
     }
-};
-
-pub const Order = enum(u2) {
-    Less = 0,
-    Greater = 1,
-    Equal = 2,
 };
 
 const std = @import("std");
