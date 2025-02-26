@@ -65,7 +65,7 @@ fn parse_stmt(p: *Parser) *Ast.Stmt {
 
             return stmt;
         },
-        .Open_Curly => {
+        .Left_Brace => {
             p.lexer.putback(tok);
 
             push_scope(p);
@@ -274,13 +274,13 @@ fn parse_stmt(p: *Parser) *Ast.Stmt {
 }
 
 fn parse_stmt_switch(p: *Parser) Ast.Stmt.Switch.CaseList {
-    p.lexer.expect(.Open_Curly);
+    p.lexer.expect(.Left_Brace);
     push_scope(p);
 
     var list = Ast.Stmt.Switch.CaseList{};
 
     var tt = p.lexer.peek();
-    while (tt != .End_Of_File and tt != .Close_Curly) {
+    while (tt != .End_Of_File and tt != .Right_Brace) {
         const case = parse_switch_case(p);
 
         {
@@ -294,7 +294,7 @@ fn parse_stmt_switch(p: *Parser) Ast.Stmt.Switch.CaseList {
         tt = p.lexer.peek();
     }
 
-    p.lexer.expect(.Close_Curly);
+    p.lexer.expect(.Right_Brace);
     pop_scope(p);
 
     return list;
@@ -330,12 +330,12 @@ fn parse_switch_case(p: *Parser) *Ast.Stmt.Switch.Case {
 }
 
 fn parse_stmt_list(p: *Parser) Ast.StmtList {
-    p.lexer.expect(.Open_Curly);
+    p.lexer.expect(.Left_Brace);
 
     var list = Ast.StmtList{};
 
     var tt = p.lexer.peek();
-    while (tt != .End_Of_File and tt != .Close_Curly) {
+    while (tt != .End_Of_File and tt != .Right_Brace) {
         const stmt = parse_stmt(p);
 
         {
@@ -349,17 +349,17 @@ fn parse_stmt_list(p: *Parser) Ast.StmtList {
         tt = p.lexer.peek();
     }
 
-    p.lexer.expect(.Close_Curly);
+    p.lexer.expect(.Right_Brace);
 
     return list;
 }
 
 fn try_parse_symbol(p: *Parser) ParseSymbolResult {
-    const position = p.lexer.grab_position();
+    const position = p.lexer.grab().position;
     var attributes = Token.Attributes{};
 
-    if (p.lexer.peek() == .Attribute) {
-        attributes = p.lexer.grab().as.Attribute;
+    if (p.lexer.peek() == .Attributes) {
+        attributes = p.lexer.grab().as.Attributes;
         p.lexer.advance();
     }
 
@@ -382,38 +382,40 @@ fn try_parse_symbol(p: *Parser) ParseSymbolResult {
     var tag: ParseSymbolResult.Tag = .Expr;
 
     switch (p.lexer.peek()) {
-        .Colon_Equal => {
-            tag = .Symbol_Without_Type;
-            p.lexer.advance();
-            value = parse_expr(p);
-        },
         .Colon => {
-            tag = .Symbol_With_Type;
-            p.lexer.advance();
-            typ = parse_type(p);
-            switch (p.lexer.peek()) {
-                .Open_Curly => {
-                    switch (typ.?.data.as) {
-                        .Proc => |Proc| {
-                            tag = .Procedure;
-                            const old_current_scope = p.current_scope;
+            if (p.lexer.peek_at(1) == .Equal) {
+                p.lexer.advance();
+                tag = .Symbol_Without_Type;
+                p.lexer.advance();
+                value = parse_expr(p);
+            } else {
+                tag = .Symbol_With_Type;
+                p.lexer.advance();
+                typ = parse_type(p);
+                switch (p.lexer.peek()) {
+                    .Left_Brace => {
+                        switch (typ.?.data.as) {
+                            .Proc => |Proc| {
+                                tag = .Procedure;
+                                const old_current_scope = p.current_scope;
 
-                            p.current_scope = Proc.scope;
-                            block = parse_stmt_list(p);
-                            p.current_scope = old_current_scope;
-                        },
-                        else => {
-                            p.c.report_error(p.lexer.grab_position(), "unexpected procedure body", .{});
-                            exit(1);
-                        },
-                    }
-                },
-                .Equal => {
-                    tag = .Symbol_With_Type_And_Value;
-                    p.lexer.advance();
-                    value = parse_expr(p);
-                },
-                else => {},
+                                p.current_scope = Proc.scope;
+                                block = parse_stmt_list(p);
+                                p.current_scope = old_current_scope;
+                            },
+                            else => {
+                                p.c.report_error(p.lexer.grab().position, "unexpected procedure body", .{});
+                                exit(1);
+                            },
+                        }
+                    },
+                    .Equal => {
+                        tag = .Symbol_With_Type_And_Value;
+                        p.lexer.advance();
+                        value = parse_expr(p);
+                    },
+                    else => {},
+                }
             }
         },
         else => {},
@@ -462,7 +464,7 @@ fn parse_symbol(p: *Parser, how_to_parse: HowToParseSymbol) *Ast.Symbol {
 
 fn parse_symbol_list(p: *Parser, fields: *Ast.SymbolList, rest: ?*Ast.SymbolList, how_to_parse: HowToParseSymbol) void {
     var tt = p.lexer.peek();
-    while (tt != .End_Of_File and tt != .Close_Paren and tt != .Close_Curly) {
+    while (tt != .End_Of_File and tt != .Right_Parenthesis and tt != .Right_Brace) {
         const symbol = parse_symbol(p, how_to_parse);
         var expect_comma = false;
 
@@ -491,7 +493,7 @@ fn parse_symbol_list(p: *Parser, fields: *Ast.SymbolList, rest: ?*Ast.SymbolList
         }
 
         tt = p.lexer.peek();
-        if (expect_comma and tt != .End_Of_File and tt != .Close_Paren and tt != .Close_Curly) {
+        if (expect_comma and tt != .End_Of_File and tt != .Right_Parenthesis and tt != .Right_Brace) {
             p.lexer.expect(.Comma);
             tt = p.lexer.peek();
         }
@@ -712,7 +714,7 @@ fn parse_expr_prec(p: *Parser, min_prec: i32) *Ast.Expr {
 
     while (curr_prec < prev_prec and curr_prec >= min_prec) {
         while (true) {
-            const position = p.lexer.grab_position();
+            const position = p.lexer.grab().position;
             p.lexer.advance();
 
             const rhs = parse_expr_prec(p, curr_prec + 1);
@@ -770,7 +772,10 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                 };
                 break :base expr;
             },
-            .Add, .Sub, .Not => {
+            .Plus,
+            .Minus,
+            .Not,
+            => {
                 const subexpr = parse_expr_highest_prec(p);
                 const expr = p.ast.create(Ast.Expr);
                 expr.* = .{
@@ -785,7 +790,7 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                 };
                 break :base expr;
             },
-            .Ref => {
+            .Reference => {
                 const subexpr = parse_expr_highest_prec(p);
                 const expr = p.ast.create(Ast.Expr);
                 expr.* = .{
@@ -797,10 +802,10 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                 };
                 break :base expr;
             },
-            .Open_Paren => {
+            .Left_Parenthesis => {
                 const expr = parse_expr(p);
                 expr.position = tok.position;
-                p.lexer.expect(.Close_Paren);
+                p.lexer.expect(.Right_Parenthesis);
                 break :base expr;
             },
             .If => {
@@ -972,7 +977,7 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                 }
             },
             .Struct => {
-                p.lexer.expect(.Open_Curly);
+                p.lexer.expect(.Left_Brace);
                 push_scope(p);
                 const scope = p.current_scope;
                 const fields = p.ast.create(Ast.SymbolList);
@@ -981,7 +986,7 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                 rest.* = .{};
                 parse_symbol_list(p, fields, rest, .{ .Parsing_Container = .Struct });
                 pop_scope(p);
-                p.lexer.expect(.Close_Curly);
+                p.lexer.expect(.Right_Brace);
                 const data = p.ast.create(Ast.Type.SharedData);
                 data.* = .{
                     .as = .{ .Struct = .{
@@ -1015,7 +1020,7 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                 break :base expr;
             },
             .Union => {
-                p.lexer.expect(.Open_Curly);
+                p.lexer.expect(.Left_Brace);
                 push_scope(p);
                 const scope = p.current_scope;
                 const fields = p.ast.create(Ast.SymbolList);
@@ -1024,7 +1029,7 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                 rest.* = .{};
                 parse_symbol_list(p, fields, rest, .{ .Parsing_Container = .Union });
                 pop_scope(p);
-                p.lexer.expect(.Close_Curly);
+                p.lexer.expect(.Right_Brace);
                 const data = p.ast.create(Ast.Type.SharedData);
                 data.* = .{
                     .as = .{ .Union = .{
@@ -1058,7 +1063,7 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                 break :base expr;
             },
             .Enum => {
-                p.lexer.expect(.Open_Curly);
+                p.lexer.expect(.Left_Brace);
                 push_scope(p);
                 const scope = p.current_scope;
                 const fields = p.ast.create(Ast.SymbolList);
@@ -1067,7 +1072,7 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                 rest.* = .{};
                 parse_symbol_list(p, fields, rest, .{ .Parsing_Container = .Enum });
                 pop_scope(p);
-                p.lexer.expect(.Close_Curly);
+                p.lexer.expect(.Right_Brace);
                 const data = p.ast.create(Ast.Type.SharedData);
                 data.* = .{
                     .as = .{ .Enum = .{
@@ -1102,13 +1107,13 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                 break :base expr;
             },
             .Proc => {
-                p.lexer.expect(.Open_Paren);
+                p.lexer.expect(.Left_Parenthesis);
                 push_scope(p);
                 const scope = p.current_scope;
                 var params = Ast.SymbolList{};
                 parse_symbol_list(p, &params, null, .Parsing_Procedure);
                 pop_scope(p);
-                p.lexer.expect(.Close_Paren);
+                p.lexer.expect(.Right_Parenthesis);
                 const return_type = parse_type(p);
                 const data = p.ast.create(Ast.Type.SharedData);
                 data.* = .{
@@ -1151,7 +1156,7 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                 };
                 break :base expr;
             },
-            .Bool_Type => {
+            .Boolean_Type => {
                 const expr = p.ast.create(Ast.Expr);
                 expr.* = .{
                     .position = tok.position,
@@ -1222,7 +1227,7 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
 
     while (true) {
         switch (p.lexer.peek()) {
-            .Open_Paren => {
+            .Left_Parenthesis => {
                 const args = parse_expr_list(p);
 
                 const new_base = p.ast.create(Ast.Expr);
@@ -1238,10 +1243,10 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                 };
                 base = new_base;
             },
-            .Open_Bracket => {
+            .Left_Bracket => {
                 p.lexer.advance();
                 const index = parse_expr(p);
-                p.lexer.expect(.Close_Bracket);
+                p.lexer.expect(.Right_Bracket);
 
                 const new_base = p.ast.create(Ast.Expr);
                 new_base.* = .{
@@ -1256,7 +1261,7 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                 };
                 base = new_base;
             },
-            .Deref => {
+            .Dereference => {
                 p.lexer.advance();
 
                 const new_base = p.ast.create(Ast.Expr);
@@ -1307,12 +1312,12 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
 }
 
 fn parse_fixed_size_expr_list(p: *Parser, dst: []*Ast.Expr) usize {
-    p.lexer.expect(.Open_Paren);
+    p.lexer.expect(.Left_Parenthesis);
 
     var count: usize = 0;
 
     var tt = p.lexer.peek();
-    while (tt != .End_Of_File and tt != .Close_Paren) {
+    while (tt != .End_Of_File and tt != .Right_Parenthesis) {
         const expr = parse_expr(p);
 
         if (count < dst.len) {
@@ -1322,24 +1327,24 @@ fn parse_fixed_size_expr_list(p: *Parser, dst: []*Ast.Expr) usize {
         count += 1;
 
         tt = p.lexer.peek();
-        if (tt != .End_Of_File and tt != .Close_Paren) {
+        if (tt != .End_Of_File and tt != .Right_Parenthesis) {
             p.lexer.expect(.Comma);
             tt = p.lexer.peek();
         }
     }
 
-    p.lexer.expect(.Close_Paren);
+    p.lexer.expect(.Right_Parenthesis);
 
     return count;
 }
 
 fn parse_expr_list(p: *Parser) Ast.ExprList {
-    p.lexer.expect(.Open_Paren);
+    p.lexer.expect(.Left_Parenthesis);
 
     var list = Ast.ExprList{};
 
     var tt = p.lexer.peek();
-    while (tt != .End_Of_File and tt != .Close_Paren) {
+    while (tt != .End_Of_File and tt != .Right_Parenthesis) {
         const expr_node = p.ast.create(Ast.ExprListNode);
         expr_node.* = expr_node: {
             const lhs = parse_expr(p);
@@ -1364,13 +1369,13 @@ fn parse_expr_list(p: *Parser) Ast.ExprList {
         }
 
         tt = p.lexer.peek();
-        if (tt != .End_Of_File and tt != .Close_Paren) {
+        if (tt != .End_Of_File and tt != .Right_Parenthesis) {
             p.lexer.expect(.Comma);
             tt = p.lexer.peek();
         }
     }
 
-    p.lexer.expect(.Close_Paren);
+    p.lexer.expect(.Right_Parenthesis);
 
     return list;
 }
@@ -1391,10 +1396,21 @@ fn prec_of_op(op: Token.Tag) i32 {
     return switch (op) {
         .Or => 0,
         .And => 1,
-        .Eq, .Neq => 2,
-        .Lt, .Leq, .Gt, .Geq => 3,
-        .Add, .Sub => 4,
-        .Mul, .Div, .Mod => 5,
+        .Double_Equal,
+        .Not_Equal,
+        => 2,
+        .Less_Than,
+        .Less_Equal,
+        .Greater_Than,
+        .Greater_Equal,
+        => 3,
+        .Plus,
+        .Minus,
+        => 4,
+        .Asterisk,
+        .Slash,
+        .Percent_Sign,
+        => 5,
         else => LOWEST_PREC - 1,
     };
 }
@@ -1403,25 +1419,25 @@ fn token_tag_to_binary_op_tag(op: Token.Tag) Ast.Expr.BinaryOp.Tag {
     return switch (op) {
         .Or => .Or,
         .And => .And,
-        .Eq => .Eq,
-        .Neq => .Neq,
-        .Lt => .Lt,
-        .Leq => .Leq,
-        .Gt => .Gt,
-        .Geq => .Geq,
-        .Add => .Add,
-        .Sub => .Sub,
-        .Mul => .Mul,
-        .Div => .Div,
-        .Mod => .Mod,
+        .Double_Equal => .Eq,
+        .Not_Equal => .Neq,
+        .Less_Than => .Lt,
+        .Less_Equal => .Leq,
+        .Greater_Than => .Gt,
+        .Greater_Equal => .Geq,
+        .Plus => .Add,
+        .Minus => .Sub,
+        .Asterisk => .Mul,
+        .Slash => .Div,
+        .Percent_Sign => .Mod,
         else => unreachable,
     };
 }
 
 fn token_tag_to_unary_op_tag(op: Token.Tag) Ast.Expr.UnaryOp.Tag {
     return switch (op) {
-        .Add => .Pos,
-        .Sub => .Neg,
+        .Plus => .Pos,
+        .Minus => .Neg,
         .Not => .Not,
         else => unreachable,
     };

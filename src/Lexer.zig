@@ -1,425 +1,355 @@
-buffer: [TOKEN_BUFFER_COUNT]Token = [1]Token{
-    .{
-        .position = .{
-            .line = 1,
-            .column = 1,
-            .offset = 0,
-        },
-        .as = .End_Of_File,
-    },
-} ** TOKEN_BUFFER_COUNT,
-token_start: u8 = 0,
-token_count: u8 = 0,
-position: FilePosition = .{
-    .line = 1,
-    .column = 1,
-    .offset = 0,
-},
+token_buffer: [token_buffer_count]Token = [1]Token{default_token} ** token_buffer_count,
+token_start: TokenIndex = 0,
+token_count: TokenIndex = 0,
+position: FilePosition = default_token.position,
 c: *Compiler,
 
 const Lexer = @This();
 
-pub const LOOKAHEAD = 2;
+const default_token: Token = .{
+    .position = .{
+        .line = 1,
+        .column = 1,
+        .offset = 0,
+    },
+    .as = .End_Of_File,
+};
 
-const TOKEN_BUFFER_COUNT = 4;
+const Keyword = struct {
+    text: []const u8,
+    as: Token.As,
 
-pub fn putback(l: *Lexer, tok: Token) void {
-    std.debug.assert(l.token_count < LOOKAHEAD);
-    l.token_start -%= 1;
-    l.token_start %= TOKEN_BUFFER_COUNT;
-    l.token_count += 1;
-    l.buffer[l.token_start] = tok;
-}
-
-pub fn grab(l: *Lexer) Token {
-    return grab_by_ptr(l, 0).*;
-}
-
-pub fn grab_position(l: *Lexer) FilePosition {
-    return grab_by_ptr(l, 0).position;
-}
-
-pub fn peek_ahead(l: *Lexer, index: u8) Token.Tag {
-    return grab_by_ptr(l, index).as;
-}
-
-pub fn peek(l: *Lexer) Token.Tag {
-    return peek_ahead(l, 0);
-}
-
-pub fn advance_many(l: *Lexer, count: u8) void {
-    l.token_start += count;
-    l.token_start %= TOKEN_BUFFER_COUNT;
-    l.token_count -= count;
-}
-
-pub fn advance(l: *Lexer) void {
-    advance_many(l, 1);
-}
-
-pub fn expect(l: *Lexer, expected: Token.Tag) void {
-    if (peek(l) != expected) {
-        const tok = grab(l);
-        l.c.report_error(tok.position, "expected {s}", .{token_tag_to_text(expected)});
-        exit(1);
+    pub fn make_with_custom_text(text: []const u8, as: Token.As) Keyword {
+        return .{ .text = text, .as = as };
     }
-    advance(l);
-}
 
-fn grab_by_ptr(l: *Lexer, index: u8) *Token {
-    std.debug.assert(index < LOOKAHEAD);
-    while (index >= l.token_count) {
-        buffer_token(l);
+    pub fn make(as: Token.As) Keyword {
+        const tag: Token.Tag = as;
+        return make_with_custom_text(tag.to_unquoted_text(), as);
     }
-    return &l.buffer[(l.token_start + index) % TOKEN_BUFFER_COUNT];
-}
+};
 
-fn advance_position(l: *Lexer) void {
-    l.position.column += 1;
-    l.position.offset += 1;
-    if (l.c.source_code[l.position.offset - 1] == '\n') {
-        l.position.line += 1;
-        l.position.column = 1;
-    }
-}
+pub const keywords = [_]Keyword{
+    Keyword.make_with_custom_text("false", .{ .Boolean = false }),
+    Keyword.make_with_custom_text("true", .{ .Boolean = true }),
+    Keyword.make(.Null),
 
-fn parse_token(l: *Lexer) Token {
-    const State = struct {
-        src: [:0]const u8,
-        at: usize,
-        ch: u8,
-        l: *Lexer,
+    Keyword.make(.Struct),
+    Keyword.make(.Union),
+    Keyword.make(.Enum),
+    Keyword.make(.Proc),
+    Keyword.make(.Boolean_Type),
+    Keyword.make(.Void_Type),
+
+    Keyword.make(.If),
+    Keyword.make(.Then),
+    Keyword.make(.Else),
+    Keyword.make(.While),
+    Keyword.make(.Do),
+    Keyword.make(.Break),
+    Keyword.make(.Continue),
+    Keyword.make(.Switch),
+    Keyword.make(.Return),
+    Keyword.make(.Alias),
+    Keyword.make(.Case),
+};
+
+pub const hashed_keywords = [_]Keyword{
+    Keyword.make(.Byte_Size_Of),
+    Keyword.make(.Alignment_Of),
+    Keyword.make(.As),
+    Keyword.make(.Cast),
+    Keyword.make(.Type_Of),
+
+    Keyword.make_with_custom_text("#static", .{ .Attributes = .{ .is_static = true } }),
+    Keyword.make_with_custom_text("#const", .{ .Attributes = .{ .is_const = true } }),
+
+    Keyword.make(.Print),
+};
+
+pub const symbols = symbols: {
+    var ss = [_]Keyword{
+        Keyword.make(.Or),
+        Keyword.make(.And),
+        Keyword.make(.Double_Equal),
+        Keyword.make(.Not_Equal),
+        Keyword.make(.Less_Than),
+        Keyword.make(.Less_Equal),
+        Keyword.make(.Greater_Than),
+        Keyword.make(.Greater_Equal),
+        Keyword.make(.Plus),
+        Keyword.make(.Minus),
+        Keyword.make(.Asterisk),
+        Keyword.make(.Slash),
+        Keyword.make(.Percent_Sign),
+        Keyword.make(.Reference),
+        Keyword.make(.Dereference),
+        Keyword.make(.Not),
+        Keyword.make(.Left_Parenthesis),
+        Keyword.make(.Right_Parenthesis),
+        Keyword.make(.Left_Brace),
+        Keyword.make(.Right_Brace),
+        Keyword.make(.Left_Bracket),
+        Keyword.make(.Right_Bracket),
+        Keyword.make(.Colon),
+        Keyword.make(.Semicolon),
+        Keyword.make(.Equal),
+        Keyword.make(.Dot),
+        Keyword.make(.Comma),
     };
 
-    const fns = struct {
-        pub fn _advance(s: *State) void {
-            s.at += 1;
-            s.ch = s.src[s.at];
-            advance_position(s.l);
+    const Sort = struct {
+        const Context = struct {};
+
+        pub fn less_than(_: Context, lhs: Keyword, rhs: Keyword) bool {
+            return lhs.text.len > rhs.text.len;
         }
     };
 
-    var s: State = s: {
-        const src = l.c.source_code[l.position.offset..];
-        break :s .{
-            .src = src,
-            .at = 0,
-            .ch = src[0],
-            .l = l,
-        };
-    };
+    std.mem.sortUnstable(Keyword, &ss, Sort.Context{}, Sort.less_than);
 
-    while (s.ch != 0) {
-        while (is_space(s.ch)) {
-            fns._advance(&s);
+    break :symbols ss;
+};
+
+pub const lookahead = 2;
+const token_buffer_count = 4;
+
+pub fn putback(lexer: *Lexer, token: Token) void {
+    std.debug.assert(lexer.token_count < lookahead);
+    lexer.token_start = compute_token_index(lexer.*, token_buffer_count - 1);
+    lexer.token_count += 1;
+    lexer.token_buffer[lexer.token_start] = token;
+}
+
+pub fn grab(lexer: *Lexer) Token {
+    return grab_by_ptr(lexer, 0).*;
+}
+
+pub fn peek_at(lexer: *Lexer, index: TokenIndex) Token.Tag {
+    return grab_by_ptr(lexer, index).as;
+}
+
+pub fn peek(lexer: *Lexer) Token.Tag {
+    return peek_at(lexer, 0);
+}
+
+pub fn advance_many(lexer: *Lexer, count: TokenIndex) void {
+    lexer.token_start = compute_token_index(lexer.*, count);
+    lexer.token_count -= count;
+}
+
+pub fn advance(lexer: *Lexer) void {
+    advance_many(lexer, 1);
+}
+
+pub fn expect(lexer: *Lexer, expected: Token.Tag) void {
+    if (peek(lexer) != expected) {
+        const token = grab(lexer);
+        lexer.c.report_fatal_error(token.position, "expected {s}", .{expected.to_quoted_text()});
+    }
+    advance(lexer);
+}
+
+inline fn compute_token_index(lexer: Lexer, index: TokenIndex) TokenIndex {
+    return (lexer.token_start + index) % token_buffer_count;
+}
+
+fn grab_by_ptr(lexer: *Lexer, index: TokenIndex) *Token {
+    std.debug.assert(index < lookahead);
+    while (index >= lexer.token_count) {
+        buffer_next_token(lexer);
+    }
+    return &lexer.token_buffer[compute_token_index(lexer.*, index)];
+}
+
+fn peek_character_at(lexer: Lexer, index: usize) u8 {
+    const source_code = lexer.c.source_code;
+    const absolute_offset = lexer.position.offset + index;
+
+    return if (absolute_offset < source_code.len) source_code[absolute_offset] else 0;
+}
+
+fn advance_many_characters_assume_no_newlines(lexer: *Lexer, count: usize) void {
+    const _count: u32 = @intCast(count);
+    lexer.position.column += _count;
+    lexer.position.offset += _count;
+}
+
+fn advance_to_next_character(lexer: *Lexer) u8 {
+    const ch = peek_character_at(lexer.*, 0);
+
+    std.debug.assert(ch != 0);
+
+    advance_many_characters_assume_no_newlines(lexer, 1);
+
+    if (ch == '\n') {
+        lexer.position.line += 1;
+        lexer.position.column = 1;
+    }
+
+    return peek_character_at(lexer.*, 0);
+}
+
+fn parse_token(lexer: *Lexer) Token {
+    var current = peek_character_at(lexer.*, 0);
+
+    while (current != 0) {
+        while (is_space(current)) {
+            current = advance_to_next_character(lexer);
         }
 
-        if (s.ch == '/' and s.src[s.at + 1] == '/') {
-            while (s.ch != 0 and s.ch != '\n') {
-                fns._advance(&s);
+        const next = peek_character_at(lexer.*, 1);
+
+        if (current == '/' and next == '/') {
+            while (current != 0 and current != '\n') {
+                current = advance_to_next_character(lexer);
             }
-        } else {
-            break;
-        }
+        } else break;
     }
 
-    s.src = s.src[s.at..];
-    s.at = 0;
+    const position = lexer.position;
+    const next = peek_character_at(lexer.*, 1);
 
-    var tok = Token{
-        .position = l.position,
-        .as = .End_Of_File,
-    };
-
-    if (s.ch == 0) {
-        // leave.
-    } else if (is_digit(s.ch)) {
+    if (current == 0) {
+        return .{
+            .position = position,
+            .as = .End_Of_File,
+        };
+    } else if (is_digit(current)) {
         while (true) {
-            fns._advance(&s);
-            if (!is_digit(s.ch)) break;
+            current = advance_to_next_character(lexer);
+            if (!is_digit(current)) break;
         }
 
-        const text = s.src[0..s.at];
+        const text = lexer.c.source_code[position.offset..lexer.position.offset];
         const value = std.fmt.parseInt(u64, text, 10) catch {
-            l.c.report_error(tok.position, "integer literal '{s}' is too big (> 64 bits).", .{text});
-            exit(1);
+            lexer.c.report_fatal_error(position, "integer literal '{s}' is too big (> 64 bits)", .{text});
         };
 
-        tok.as = .{ .Integer = value };
-    } else if (is_alpha(s.ch) or s.ch == '_') {
+        return .{
+            .position = position,
+            .as = .{ .Integer = value },
+        };
+    } else if (is_alpha(current) or current == '_') {
         while (true) {
-            fns._advance(&s);
-            if (!is_alnum(s.ch) and s.ch != '_') break;
+            current = advance_to_next_character(lexer);
+            if (!(is_alnum(current) or current == '_')) break;
         }
 
-        const Keyword = struct {
-            text: []const u8,
-            as: Token.As,
-        };
+        const text = lexer.c.source_code[position.offset..lexer.position.offset];
 
-        const state = struct {
-            pub const keywords = [_]Keyword{
-                .{ .text = "continue", .as = .Continue },
-                .{ .text = "switch", .as = .Switch },
-                .{ .text = "return", .as = .Return },
-                .{ .text = "struct", .as = .Struct },
-                .{ .text = "union", .as = .Union },
-                .{ .text = "while", .as = .While },
-                .{ .text = "break", .as = .Break },
-                .{ .text = "false", .as = .{ .Boolean = false } },
-                .{ .text = "alias", .as = .Alias },
-                .{ .text = "enum", .as = .Enum },
-                .{ .text = "proc", .as = .Proc },
-                .{ .text = "void", .as = .Void_Type },
-                .{ .text = "bool", .as = .Bool_Type },
-                .{ .text = "true", .as = .{ .Boolean = true } },
-                .{ .text = "null", .as = .Null },
-                .{ .text = "then", .as = .Then },
-                .{ .text = "else", .as = .Else },
-                .{ .text = "case", .as = .Case },
-                .{ .text = "if", .as = .If },
-                .{ .text = "do", .as = .Do },
-            };
-        };
+        if (text[0] == 'i' or text[0] == 'u') {
+            const is_signed = text[0] == 'i';
 
-        tok.as = as: {
-            const text = s.src[0..s.at];
-
-            if (text[0] == 'i' or text[0] == 'u') {
-                switch (text.len) {
-                    2 => {
-                        if (is_digit(text[1])) {
-                            break :as .{ .Integer_Type = .{
+            switch (text.len) {
+                2 => {
+                    if (is_digit(text[1]) and if (is_signed) text[1] != '0' else true) {
+                        return .{
+                            .position = position,
+                            .as = .{ .Integer_Type = .{
                                 .bits = text[1] - '0',
-                                .is_signed = text[0] == 'i',
-                            } };
-                        }
-                    },
-                    3 => {
-                        if (is_digit(text[1]) and is_digit(text[2]) and text[1] != '0') {
-                            const bits = 10 * (text[1] - '0') + (text[2] - '0');
-                            if (bits <= 64) {
-                                break :as .{ .Integer_Type = .{
+                                .is_signed = is_signed,
+                            } },
+                        };
+                    }
+                },
+                3 => {
+                    if (is_digit(text[1]) and is_digit(text[2]) and text[1] != '0') {
+                        const bits = 10 * (text[1] - '0') + (text[2] - '0');
+
+                        if (bits <= 64) {
+                            return .{
+                                .position = position,
+                                .as = .{ .Integer_Type = .{
                                     .bits = bits,
-                                    .is_signed = text[0] == 'i',
-                                } };
-                            }
+                                    .is_signed = is_signed,
+                                } },
+                            };
                         }
-                    },
-                    else => {},
-                }
+                    }
+                },
+                else => {},
             }
-
-            for (state.keywords) |keyword| {
-                if (std.mem.eql(u8, text, keyword.text)) {
-                    break :as keyword.as;
-                }
-            }
-
-            const new_text = l.c.string_pool.insert(text);
-
-            break :as .{ .Identifier = new_text };
-        };
-    } else if (s.ch == '#' and (is_alpha(s.src[s.at + 1]) or s.src[s.at + 1] == '_')) {
-        while (true) {
-            fns._advance(&s);
-
-            if (!is_alnum(s.ch) and s.ch != '_') break;
         }
 
-        const SpicyKeyword = struct {
-            text: []const u8,
-            as: Token.As,
-        };
-
-        const state = struct {
-            pub const keywords = [_]SpicyKeyword{
-                .{ .text = "#byte_size_of", .as = .Byte_Size_Of },
-                .{ .text = "#alignment_of", .as = .Alignment_Of },
-                .{ .text = "#type_of", .as = .Type_Of },
-                .{ .text = "#static", .as = .{ .Attribute = .{
-                    .is_static = true,
-                } } },
-                .{ .text = "#const", .as = .{ .Attribute = .{
-                    .is_const = true,
-                } } },
-                .{ .text = "#print", .as = .Print },
-                .{ .text = "#cast", .as = .Cast },
-                .{ .text = "#as", .as = .As },
-            };
-        };
-
-        const text = s.src[0..s.at];
-
-        tok.as = as: {
-            for (state.keywords) |keyword| {
-                if (std.mem.eql(u8, text, keyword.text)) {
-                    break :as keyword.as;
-                }
+        for (keywords) |keyword| {
+            if (std.mem.eql(u8, text, keyword.text)) {
+                return .{
+                    .position = position,
+                    .as = keyword.as,
+                };
             }
+        }
 
-            l.c.report_error(tok.position, "invalid keyword '{s}'\n", .{text});
-            exit(1);
+        const new_text = lexer.c.string_pool.insert(text);
+
+        return .{
+            .position = position,
+            .as = .{ .Identifier = new_text },
         };
-    } else if (!is_print(s.ch)) {
-        l.c.report_error(tok.position, "non-printable character with code '{}'\n", .{s.ch});
-        exit(1);
+    } else if (current == '#' and (is_alpha(next) or next == '_')) {
+        while (true) {
+            current = advance_to_next_character(lexer);
+            if (!(is_alnum(current) or current == '_')) break;
+        }
+
+        const text = lexer.c.source_code[position.offset..lexer.position.offset];
+
+        for (hashed_keywords) |keyword| {
+            if (std.mem.eql(u8, text, keyword.text)) {
+                return .{
+                    .position = position,
+                    .as = keyword.as,
+                };
+            }
+        }
+
+        lexer.c.report_fatal_error(position, "invalid keyword", .{});
+    } else if (!is_print(current)) {
+        lexer.c.report_fatal_error(position, "non-printable character with code '{}'", .{current});
     } else {
-        const Symbol = struct {
-            text: []const u8,
-            as: Token.As,
-        };
+        const text = lexer.c.source_code[position.offset..];
 
-        const state = struct {
-            pub const symbols = [_]Symbol{
-                .{ .text = "||", .as = .Or },
-                .{ .text = "&&", .as = .And },
-                .{ .text = "==", .as = .Eq },
-                .{ .text = "!=", .as = .Neq },
-                .{ .text = "<=", .as = .Leq },
-                .{ .text = ">=", .as = .Geq },
-                .{ .text = ":=", .as = .Colon_Equal },
-                .{ .text = "<", .as = .Lt },
-                .{ .text = ">", .as = .Gt },
-                .{ .text = "+", .as = .Add },
-                .{ .text = "-", .as = .Sub },
-                .{ .text = "*", .as = .Mul },
-                .{ .text = "/", .as = .Div },
-                .{ .text = "%", .as = .Mod },
-                .{ .text = "&", .as = .Ref },
-                .{ .text = "^", .as = .Deref },
-                .{ .text = "!", .as = .Not },
-                .{ .text = "(", .as = .Open_Paren },
-                .{ .text = ")", .as = .Close_Paren },
-                .{ .text = "{", .as = .Open_Curly },
-                .{ .text = "}", .as = .Close_Curly },
-                .{ .text = "[", .as = .Open_Bracket },
-                .{ .text = "]", .as = .Close_Bracket },
-                .{ .text = ":", .as = .Colon },
-                .{ .text = ";", .as = .Semicolon },
-                .{ .text = "=", .as = .Equal },
-                .{ .text = ".", .as = .Dot },
-                .{ .text = ",", .as = .Comma },
-            };
-        };
-
-        tok.as = as: {
-            for (state.symbols) |symbol| {
-                if (nostd.is_prefix(symbol.text, s.src)) {
-                    const count: u32 = @intCast(symbol.text.len);
-                    s.at += count;
-                    l.position.column += count;
-                    l.position.offset += count;
-                    break :as symbol.as;
-                }
+        for (symbols) |symbol| {
+            if (nostd.is_prefix(symbol.text, text)) {
+                advance_many_characters_assume_no_newlines(lexer, symbol.text.len);
+                return .{
+                    .position = position,
+                    .as = symbol.as,
+                };
             }
+        }
 
-            l.c.report_error(tok.position, "unrecognized character '{c}'\n", .{s.ch});
-            exit(1);
-        };
-    }
-
-    return tok;
-}
-
-fn buffer_token(l: *Lexer) void {
-    var curr = parse_token(l);
-
-    switch (curr.as) {
-        .Attribute => |*cattr| {
-            while (true) {
-                const next = parse_token(l);
-                switch (next.as) {
-                    .Attribute => |nattr| {
-                        cattr.combine(nattr);
-                    },
-                    else => {
-                        append_token(l, curr);
-                        append_token(l, next);
-                        return;
-                    },
-                }
-            }
-        },
-        else => {
-            append_token(l, curr);
-        },
+        lexer.c.report_fatal_error(position, "unrecognized character '{c}'", .{current});
     }
 }
 
-fn append_token(l: *Lexer, tok: Token) void {
-    std.debug.assert(l.token_count < TOKEN_BUFFER_COUNT);
-    const index = (l.token_start + l.token_count) % TOKEN_BUFFER_COUNT;
-    l.buffer[index] = tok;
-    l.token_count += 1;
+fn buffer_next_token(lexer: *Lexer) void {
+    var current = parse_token(lexer);
+
+    while (current.as == .Attributes) {
+        const next = parse_token(lexer);
+
+        switch (next.as) {
+            .Attributes => |attributes| {
+                current.as.Attributes.merge(attributes);
+            },
+            else => {
+                append_token(lexer, current);
+                append_token(lexer, next);
+                return;
+            },
+        }
+    }
+
+    append_token(lexer, current);
 }
 
-fn token_tag_to_text(tag: Token.Tag) []const u8 {
-    return switch (tag) {
-        .Or => "'||'",
-        .And => "'&&'",
-        .Eq => "'=='",
-        .Neq => "'!='",
-        .Lt => "'<'",
-        .Leq => "'<='",
-        .Gt => "'>'",
-        .Geq => "'>='",
-        .Add => "'+'",
-        .Sub => "'-'",
-        .Mul => "'*'",
-        .Div => "'/'",
-        .Mod => "'%'",
-
-        .Ref => "'&'",
-        .Deref => "'^'",
-        .Not => "'!'",
-        .Open_Paren => "'('",
-        .Close_Paren => "')'",
-        .Open_Curly => "'{'",
-        .Close_Curly => "'}'",
-        .Open_Bracket => "'['",
-        .Close_Bracket => "']'",
-        .Colon_Equal => "':='",
-        .Colon => "':'",
-        .Semicolon => "';'",
-        .Dot => "'.'",
-        .Comma => "','",
-        .Equal => "'='",
-
-        .Byte_Size_Of => "#byte_size_of",
-        .Alignment_Of => "#alignment_of",
-        .As => "#as",
-        .Cast => "'#cast'",
-        .Boolean => "boolean literal",
-        .Integer => "integer literal",
-        .Identifier => "identifier",
-        .Null => "'null'",
-
-        .Struct => "'struct'",
-        .Union => "'union'",
-        .Enum => "'enum'",
-        .Proc => "'proc'",
-        .Integer_Type => "integer type",
-        .Bool_Type => "'bool'",
-        .Void_Type => "'void'",
-        .Type_Of => "#type_of",
-
-        .Attribute => "attribute",
-        .Print => "'#print'",
-        .If => "'if'",
-        .Then => "'then'",
-        .Else => "'else'",
-        .While => "'while'",
-        .Do => "'do'",
-        .Break => "'break'",
-        .Continue => "'continue'",
-        .Switch => "'switch'",
-        .Return => "'return'",
-        .Alias => "'alias'",
-        .Case => "'case'",
-
-        .End_Of_File => "EOF",
-    };
+fn append_token(lexer: *Lexer, token: Token) void {
+    std.debug.assert(lexer.token_count < token_buffer_count);
+    const index = compute_token_index(lexer.*, lexer.token_count);
+    lexer.token_buffer[index] = token;
+    lexer.token_count += 1;
 }
 
 const is_space = std.ascii.isWhitespace;
@@ -430,11 +360,9 @@ const is_print = std.ascii.isPrint;
 
 const exit = nostd.exit;
 
-const std = @import("std");
-const nostd = @import("nostd.zig");
-const Compiler = @import("Compiler.zig");
+pub const FilePosition = Compiler.FilePosition;
 
-const FilePosition = Compiler.FilePosition;
+pub const TokenIndex = u8;
 
 pub const Token = struct {
     position: FilePosition,
@@ -443,28 +371,27 @@ pub const Token = struct {
     pub const Tag = enum {
         Or,
         And,
-        Eq,
-        Neq,
-        Lt,
-        Leq,
-        Gt,
-        Geq,
-        Add,
-        Sub,
-        Mul,
-        Div,
-        Mod,
+        Double_Equal,
+        Not_Equal,
+        Less_Than,
+        Less_Equal,
+        Greater_Than,
+        Greater_Equal,
+        Plus,
+        Minus,
+        Asterisk,
+        Slash,
+        Percent_Sign,
 
-        Ref,
-        Deref,
+        Reference,
+        Dereference,
         Not,
-        Open_Paren,
-        Close_Paren,
-        Open_Curly,
-        Close_Curly,
-        Open_Bracket,
-        Close_Bracket,
-        Colon_Equal,
+        Left_Parenthesis,
+        Right_Parenthesis,
+        Left_Brace,
+        Right_Brace,
+        Left_Bracket,
+        Right_Bracket,
         Colon,
         Semicolon,
         Dot,
@@ -485,11 +412,11 @@ pub const Token = struct {
         Enum,
         Proc,
         Integer_Type,
-        Bool_Type,
+        Boolean_Type,
         Void_Type,
         Type_Of,
 
-        Attribute,
+        Attributes,
         Print,
         If,
         Then,
@@ -504,33 +431,110 @@ pub const Token = struct {
         Case,
 
         End_Of_File,
+
+        pub fn to_quoted_text(tag: Tag) []const u8 {
+            return switch (tag) {
+                .Or => "'||'",
+                .And => "'&&'",
+                .Double_Equal => "'=='",
+                .Not_Equal => "'!='",
+                .Less_Than => "'<'",
+                .Less_Equal => "'<='",
+                .Greater_Than => "'>'",
+                .Greater_Equal => "'>='",
+                .Plus => "'+'",
+                .Minus => "'-'",
+                .Asterisk => "'*'",
+                .Slash => "'/'",
+                .Percent_Sign => "'%'",
+
+                .Reference => "'&'",
+                .Dereference => "'^'",
+                .Not => "'!'",
+                .Left_Parenthesis => "'('",
+                .Right_Parenthesis => "')'",
+                .Left_Brace => "'{'",
+                .Right_Brace => "'}'",
+                .Left_Bracket => "'['",
+                .Right_Bracket => "']'",
+                .Colon => "':'",
+                .Semicolon => "';'",
+                .Dot => "'.'",
+                .Comma => "','",
+                .Equal => "'='",
+
+                .Byte_Size_Of => "'#byte_size_of'",
+                .Alignment_Of => "'#alignment_of'",
+                .As => "'#as'",
+                .Cast => "'#cast'",
+                .Boolean => "boolean literal",
+                .Integer => "integer literal",
+                .Identifier => "identifier",
+                .Null => "'null'",
+
+                .Struct => "'struct'",
+                .Union => "'union'",
+                .Enum => "'enum'",
+                .Proc => "'proc'",
+                .Integer_Type => "integer type",
+                .Boolean_Type => "'bool'",
+                .Void_Type => "'void'",
+                .Type_Of => "'#type_of'",
+
+                .Attributes => "'attributes'",
+                .Print => "'#print'",
+                .If => "'if'",
+                .Then => "'then'",
+                .Else => "'else'",
+                .While => "'while'",
+                .Do => "'do'",
+                .Break => "'break'",
+                .Continue => "'continue'",
+                .Switch => "'switch'",
+                .Return => "'return'",
+                .Alias => "'alias'",
+                .Case => "'case'",
+
+                .End_Of_File => "end-of-file",
+            };
+        }
+
+        pub fn to_unquoted_text(tag: Tag) []const u8 {
+            const string = tag.to_quoted_text();
+
+            if (string[0] == '\'') {
+                std.debug.assert(string[string.len - 1] == '\'');
+                return string[1 .. string.len - 1];
+            } else {
+                return string;
+            }
+        }
     };
 
     pub const As = union(Tag) {
         Or: void,
         And: void,
-        Eq: void,
-        Neq: void,
-        Lt: void,
-        Leq: void,
-        Gt: void,
-        Geq: void,
-        Add: void,
-        Sub: void,
-        Mul: void,
-        Div: void,
-        Mod: void,
+        Double_Equal: void,
+        Not_Equal: void,
+        Less_Than: void,
+        Less_Equal: void,
+        Greater_Than: void,
+        Greater_Equal: void,
+        Plus: void,
+        Minus: void,
+        Asterisk: void,
+        Slash: void,
+        Percent_Sign: void,
 
-        Ref: void,
-        Deref: void,
+        Reference: void,
+        Dereference: void,
         Not: void,
-        Open_Paren: void,
-        Close_Paren: void,
-        Open_Curly: void,
-        Close_Curly: void,
-        Open_Bracket: void,
-        Close_Bracket: void,
-        Colon_Equal: void,
+        Left_Parenthesis: void,
+        Right_Parenthesis: void,
+        Left_Brace: void,
+        Right_Brace: void,
+        Left_Bracket: void,
+        Right_Bracket: void,
         Colon: void,
         Semicolon: void,
         Dot: void,
@@ -551,11 +555,11 @@ pub const Token = struct {
         Enum: void,
         Proc: void,
         Integer_Type: Token.IntegerType,
-        Bool_Type: void,
+        Boolean_Type: void,
         Void_Type: void,
         Type_Of: void,
 
-        Attribute: Attributes,
+        Attributes: Attributes,
         Print: void,
         If: void,
         Then: void,
@@ -587,10 +591,14 @@ pub const Token = struct {
             return ptr.* == 0;
         }
 
-        pub fn combine(self: *Attributes, other: Attributes) void {
+        pub fn merge(self: *Attributes, other: Attributes) void {
             const d: *u8 = @ptrCast(self);
             const s: *const u8 = @ptrCast(&other);
             d.* |= s.*;
         }
     };
 };
+
+const std = @import("std");
+const nostd = @import("nostd.zig");
+const Compiler = @import("Compiler.zig");
