@@ -57,7 +57,7 @@ pub fn compile() void {
 
             Compiler.gpa.free(c.source_code);
             c.filepath = input_filepath;
-            c.source_code = utils.read_entire_file(Compiler.gpa, input_filepath) catch {
+            c.source_code = nostd.read_entire_file(Compiler.gpa, input_filepath) catch {
                 Compiler.eprint("error: failed to read from a file '{s}'\n", .{input_filepath});
                 Compiler.exit(1);
             };
@@ -65,14 +65,14 @@ pub fn compile() void {
             var ast = Ast.init(&c);
             var parser = Parser.init(&c, &ast);
             var ir = IR.init();
-            var irgen = IRGen.init(&ast, &ir);
+            var ir_generator = IRGenerator.init(&ast, &ir);
 
             parser.parse();
-            Typechecker.typecheck(&c, &ast, &irgen);
-            irgen.generate_ir();
+            TypeChecker.check(&c, &ast, &ir_generator);
+            ir_generator.generate();
             ir.write_to_file(output_filepath);
 
-            irgen.deinit();
+            ir_generator.deinit();
             ir.deinit();
             parser.deinit();
             ast.deinit();
@@ -216,21 +216,21 @@ pub fn report_note(c: *Compiler, line_info: LineInfo, comptime format: []const u
 }
 
 const std = @import("std");
-const utils = @import("utils.zig");
-const Lexer = @import("lexer.zig");
-const Parser = @import("parser.zig");
-const Ast = @import("ast.zig");
-const Typechecker = @import("typechecker.zig");
-const IR = @import("ir.zig");
-const IRGen = @import("ir-generator.zig");
-const Interpreter = @import("interpreter.zig");
+const nostd = @import("nostd.zig");
+const Lexer = @import("Lexer.zig");
+const Parser = @import("Parser.zig");
+const Ast = @import("Ast.zig");
+const TypeChecker = @import("TypeChecker.zig");
+const IR = @import("IR.zig");
+const IRGenerator = @import("IRGenerator.zig");
+const Interpreter = @import("Interpreter.zig");
 
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
-const Alignment = utils.Alignment;
-pub const oprint = utils.oprint;
-pub const eprint = utils.eprint;
-pub const exit = utils.exit;
+const Alignment = nostd.Alignment;
+pub const oprint = nostd.oprint;
+pub const eprint = nostd.eprint;
+pub const exit = nostd.exit;
 
 const Options = struct {
     has_input_filepath: ?[:0]const u8 = null,

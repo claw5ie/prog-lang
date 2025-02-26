@@ -32,8 +32,8 @@ pub fn deinit(interp: *Interpreter) void {
 
 pub fn init_vtable(ir: *IR) Vtable {
     const start_instr = UNUSED_SPACE_SIZE;
-    const start_global = start_instr + utils.align_by_pow2(ir.instrs.items.len, 1024);
-    const start_stack = start_global + utils.align_by_pow2(ir.globals.items.len, 1024);
+    const start_global = start_instr + nostd.align_by_pow2(ir.instrs.items.len, 1024);
+    const start_stack = start_global + nostd.align_by_pow2(ir.globals.items.len, 1024);
     const end = start_stack + STACK_SIZE;
 
     return .{
@@ -245,7 +245,7 @@ fn interpret_top_level(interp: *Interpreter) void {
                     Compiler.exit(1);
                 }
 
-                src = utils.sign_extend(src, @intCast(bits));
+                src = nostd.sign_extend(src, @intCast(bits));
                 write(interp, dst, src, instr.ops[0].grab_size());
             },
             .call => {
@@ -370,7 +370,7 @@ pub fn read(interp: *Interpreter, address: u64, size: u8, is_signed: bool) u64 {
 
     const offset: u6 = @intCast((address % 8) * 8);
     const bits: u8 = @intCast(size * 8);
-    const ones: u64 = utils.left_shift(0xFFFF_FFFF_FFFF_FFFF, bits);
+    const ones: u64 = nostd.left_shift(0xFFFF_FFFF_FFFF_FFFF, bits);
 
     const segment, const tag = segment_from_vtable(interp, address - (address % 8));
     check_bounds(segment, tag, size, false);
@@ -380,7 +380,7 @@ pub fn read(interp: *Interpreter, address: u64, size: u8, is_signed: bool) u64 {
     value &= ~ones; // Zero upper bits.
 
     if (is_signed) {
-        value = utils.sign_extend(value, bits);
+        value = nostd.sign_extend(value, bits);
     }
 
     return value;
@@ -391,15 +391,15 @@ fn write(interp: *Interpreter, address: u64, value: u64, size: u8) void {
 
     const start_offset: u8 = @intCast((address % 8) * 8);
     const end_offset: u8 = 64 - start_offset - (size * 8);
-    const ones: u64 = utils.left_shift(0xFFFF_FFFF_FFFF_FFFF, start_offset) &
-        utils.right_shift((0xFFFF_FFFF_FFFF_FFFF), end_offset);
+    const ones: u64 = nostd.left_shift(0xFFFF_FFFF_FFFF_FFFF, start_offset) &
+        nostd.right_shift((0xFFFF_FFFF_FFFF_FFFF), end_offset);
 
     const segment, const tag = segment_from_vtable(interp, address - (address % 8));
     check_bounds(segment, tag, size, true);
 
     const ptr = @as(*u64, @alignCast(@ptrCast(&segment[0])));
     ptr.* &= ~ones;
-    ptr.* |= utils.left_shift(value, start_offset) & ones;
+    ptr.* |= nostd.left_shift(value, start_offset) & ones;
 }
 
 pub fn write_big(interp: *Interpreter, dst_address: u64, src_address: u64, size: u64) void {
@@ -426,7 +426,7 @@ fn stack_push(interp: *Interpreter, value: u64) void {
 fn stack_push_big(interp: *Interpreter, address: u64, size: u64) void {
     std.debug.assert(interp.rsp % 8 == 0);
     write_big(interp, interp.rsp, address, size);
-    interp.rsp += utils.align_u64(size, .QWORD);
+    interp.rsp += nostd.align_u64(size, .QWORD);
 }
 
 fn stack_pop(interp: *Interpreter) u64 {
@@ -461,11 +461,11 @@ inline fn inc_u_by_i(value: u64, offset: i59) u64 {
 }
 
 const std = @import("std");
-const utils = @import("utils.zig");
-const Compiler = @import("compiler.zig");
-const Ast = @import("ast.zig");
-const IR = @import("ir.zig");
-const IRGen = @import("ir-generator.zig");
+const nostd = @import("nostd.zig");
+const Compiler = @import("Compiler.zig");
+const Ast = @import("Ast.zig");
+const IR = @import("IR.zig");
+const IRGenerator = @import("IRGenerator.zig");
 
 const IRE = IR.Encoded;
 const IRD = IR.Decoded;

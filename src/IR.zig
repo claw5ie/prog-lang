@@ -51,11 +51,11 @@ pub fn write_to_file(ir: *IR, filepath: [:0]const u8) void {
     };
     defer std.posix.close(fd);
 
-    utils.write_to_file_v(fd, Compiler.magic_number_string);
-    utils.write_to_file_u64(fd, ir.globals.items.len);
-    utils.write_to_file_u64(fd, ir.instrs.items.len);
-    utils.write_to_file_v(fd, ir.globals.items);
-    utils.write_to_file_v(fd, ir.instrs.items);
+    nostd.write_to_file_v(fd, Compiler.magic_number_string);
+    nostd.write_to_file_u64(fd, ir.globals.items.len);
+    nostd.write_to_file_u64(fd, ir.instrs.items.len);
+    nostd.write_to_file_v(fd, ir.globals.items);
+    nostd.write_to_file_v(fd, ir.instrs.items);
 }
 
 pub fn read_from_file(filepath: [:0]const u8) IR {
@@ -65,10 +65,10 @@ pub fn read_from_file(filepath: [:0]const u8) IR {
     };
     defer std.posix.close(fd);
 
-    const magic_number = utils.read_from_file_u64(fd);
+    const magic_number = nostd.read_from_file_u64(fd);
     std.debug.assert(magic_number == Compiler.magic_number_value);
-    const globals_byte_count = utils.read_from_file_u64(fd);
-    const instrs_byte_count = utils.read_from_file_u64(fd);
+    const globals_byte_count = nostd.read_from_file_u64(fd);
+    const instrs_byte_count = nostd.read_from_file_u64(fd);
     var globals = ByteList.init(Compiler.gpa);
     var instrs = ByteList.init(Compiler.gpa);
 
@@ -79,8 +79,8 @@ pub fn read_from_file(filepath: [:0]const u8) IR {
         Compiler.exit(1);
     };
 
-    utils.read_from_file_v(fd, globals.items);
-    utils.read_from_file_v(fd, instrs.items);
+    nostd.read_from_file_v(fd, globals.items);
+    nostd.read_from_file_v(fd, instrs.items);
 
     return .{
         .instrs = instrs,
@@ -89,8 +89,8 @@ pub fn read_from_file(filepath: [:0]const u8) IR {
 }
 
 const std = @import("std");
-const utils = @import("utils.zig");
-const Compiler = @import("compiler.zig");
+const nostd = @import("nostd.zig");
+const Compiler = @import("Compiler.zig");
 
 pub const ByteList = std.ArrayList(u8);
 

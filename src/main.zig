@@ -1,6 +1,6 @@
 const std = @import("std");
-const utils = @import("utils.zig");
-const Compiler = @import("compiler.zig");
+const nostd = @import("nostd.zig");
+const Compiler = @import("Compiler.zig");
 
 pub fn main() void {
     Compiler.compile();

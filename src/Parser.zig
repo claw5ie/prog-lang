@@ -1428,10 +1428,10 @@ fn token_tag_to_unary_op_tag(op: Token.Tag) Ast.Expr.UnaryOp.Tag {
 }
 
 const std = @import("std");
-const utils = @import("utils.zig");
-const Compiler = @import("compiler.zig");
-const Lexer = @import("lexer.zig");
-const Ast = @import("ast.zig");
+const nostd = @import("nostd.zig");
+const Compiler = @import("Compiler.zig");
+const Lexer = @import("Lexer.zig");
+const Ast = @import("Ast.zig");
 
 const Token = Lexer.Token;
 

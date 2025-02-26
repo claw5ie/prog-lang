@@ -4,32 +4,32 @@ scope_bound: *Ast.Scope,
 is_in_loop: bool,
 interp: Interpreter,
 ast: *Ast,
-irgen: *IRGen,
+generator: *IRGenerator,
 c: *Compiler,
 
-const Typechecker = @This();
+const TypeChecker = @This();
 
-pub fn typecheck(c: *Compiler, ast: *Ast, irgen: *IRGen) void {
-    var typechecker = Typechecker{
+pub fn check(c: *Compiler, ast: *Ast, generator: *IRGenerator) void {
+    var typechecker = TypeChecker{
         .enum_type = null,
         .return_type = null,
         .scope_bound = &Ast.global_scope,
         .is_in_loop = false,
         .ast = ast,
-        .irgen = irgen,
-        .interp = Interpreter.init(irgen.ir),
+        .generator = generator,
+        .interp = Interpreter.init(generator.ir),
         .c = c,
     };
 
-    typecheck_top_level(&typechecker);
+    check_top_level(&typechecker);
 
     typechecker.interp.deinit();
 }
 
-fn typecheck_top_level(t: *Typechecker) void {
+fn check_top_level(t: *TypeChecker) void {
     var it = t.ast.globals.first;
     while (it) |node| {
-        typecheck_symbol(t, node.data);
+        check_symbol(t, node.data);
         it = node.next;
     }
 
@@ -70,13 +70,13 @@ fn typecheck_top_level(t: *Typechecker) void {
 }
 
 // Expression is not struct/union/array.
-fn compute_simple_expr(t: *Typechecker, expr: *Ast.Expr) u64 {
+fn compute_simple_expr(t: *TypeChecker, expr: *Ast.Expr) u64 {
     const op = compute_expr(t, expr);
     const address = t.interp.grab_value_from_operand(op, false);
     return t.interp.read(address, @intCast(expr.typ.data.byte_size), expr.typ.is_signed());
 }
 
-fn compute_expr_to_operand(t: *Typechecker, dst: IRE.Operand, expr: *Ast.Expr) void {
+fn compute_expr_to_operand(t: *TypeChecker, dst: IRE.Operand, expr: *Ast.Expr) void {
     std.debug.assert(dst.is_lvalue());
     const op = compute_expr(t, expr);
     const dst_address = t.interp.grab_value_from_operand(dst.addr_of().decode(), false);
@@ -84,37 +84,37 @@ fn compute_expr_to_operand(t: *Typechecker, dst: IRE.Operand, expr: *Ast.Expr) v
     t.interp.write_big(dst_address, src_address, expr.typ.data.byte_size);
 }
 
-fn compute_expr(t: *Typechecker, expr: *Ast.Expr) IRD.Operand {
+fn compute_expr(t: *TypeChecker, expr: *Ast.Expr) IRD.Operand {
     std.debug.assert(expr.flags.is_const);
 
-    var old_irgen = t.irgen.*;
+    var old_generator = t.generator.*;
 
-    const dst = t.irgen.grab_local_from_type(expr.typ.data);
+    const dst = t.generator.grab_local_from_type(expr.typ.data);
     std.debug.assert(dst.is_lvalue());
-    _ = t.irgen.generate_ir_expr(dst, expr);
-    t.irgen.generate_ir_instr0(.exit);
-    t.irgen.remove_labels();
+    _ = t.generator.generate_expr(dst, expr);
+    t.generator.generate_instr0(.exit);
+    t.generator.remove_labels();
     t.interp.reset();
     t.interp.interpret();
 
-    t.irgen.ir.instrs.clearRetainingCapacity();
+    t.generator.ir.instrs.clearRetainingCapacity();
 
-    old_irgen.labels = t.irgen.labels;
-    t.irgen.* = old_irgen;
+    old_generator.labels = t.generator.labels;
+    t.generator.* = old_generator;
 
     return dst.addr_of().decode();
 }
 
-fn typecheck_symbol_type(t: *Typechecker, symbol: *Ast.Symbol) void {
+fn check_symbol_type(t: *TypeChecker, symbol: *Ast.Symbol) void {
     switch (symbol.as) {
         .Variable => |Variable| {
             if (Variable.typ) |typ| {
-                typecheck_type(t, typ);
+                check_type(t, typ);
                 reject_void_type(t, typ);
             }
         },
         .Parameter => |Parameter| {
-            typecheck_type(t, Parameter.typ);
+            check_type(t, Parameter.typ);
             reject_void_type(t, Parameter.typ);
             if (Parameter.value) |value| {
                 t.c.report_error(value.line_info, "default values are not supported", .{});
@@ -122,10 +122,10 @@ fn typecheck_symbol_type(t: *Typechecker, symbol: *Ast.Symbol) void {
             }
         },
         .Procedure => |Procedure| {
-            typecheck_type(t, Procedure.typ);
+            check_type(t, Procedure.typ);
         },
         .Struct_Field => |Field| {
-            typecheck_type(t, Field.typ);
+            check_type(t, Field.typ);
             reject_void_type(t, Field.typ);
             if (Field.value) |value| {
                 t.c.report_error(value.line_info, "default values are not supported", .{});
@@ -133,7 +133,7 @@ fn typecheck_symbol_type(t: *Typechecker, symbol: *Ast.Symbol) void {
             }
         },
         .Union_Field => |Field| {
-            typecheck_type(t, Field.typ);
+            check_type(t, Field.typ);
             reject_void_type(t, Field.typ);
             if (Field.value) |value| {
                 t.c.report_error(value.line_info, "default values are not supported", .{});
@@ -147,7 +147,7 @@ fn typecheck_symbol_type(t: *Typechecker, symbol: *Ast.Symbol) void {
     }
 }
 
-fn typecheck_symbol(t: *Typechecker, symbol: *Ast.Symbol) void {
+fn check_symbol(t: *TypeChecker, symbol: *Ast.Symbol) void {
     switch (symbol.typechecking) {
         .None => symbol.typechecking = .Going,
         .Going => {
@@ -158,17 +158,17 @@ fn typecheck_symbol(t: *Typechecker, symbol: *Ast.Symbol) void {
     }
     defer symbol.typechecking = .Done;
 
-    typecheck_symbol_type(t, symbol);
+    check_symbol_type(t, symbol);
 
     const fns = struct {
-        pub fn compute_variable_initializer(_t: *Typechecker, _symbol: *Ast.Symbol) void {
+        pub fn compute_variable_initializer(_t: *TypeChecker, _symbol: *Ast.Symbol) void {
             if (_symbol.attributes.is_global or _symbol.attributes.is_const) {
                 const Variable = &_symbol.as.Variable;
                 const value = Variable.value.?;
 
                 // TODO: compute initializer always when it's constant.
                 if (value.flags.is_const) {
-                    const storage = _t.irgen.grab_static_variable_storage(Variable);
+                    const storage = _t.generator.grab_static_variable_storage(Variable);
                     compute_expr_to_operand(_t, storage, value);
                 } else {
                     _t.c.report_error(value.line_info, "expression is not a constant", .{});
@@ -182,7 +182,7 @@ fn typecheck_symbol(t: *Typechecker, symbol: *Ast.Symbol) void {
         .Variable => |*Variable| {
             if (Variable.typ) |typ| {
                 if (Variable.value) |value| {
-                    const value_type = typecheck_expr_only(t, value);
+                    const value_type = check_expr_only(t, value);
 
                     if (!safe_cast(t, value, value_type, typ)) {
                         t.c.report_error(value.line_info, "expected '{}', but got '{}'", .{ typ, value_type });
@@ -197,7 +197,7 @@ fn typecheck_symbol(t: *Typechecker, symbol: *Ast.Symbol) void {
                     Compiler.exit(1);
                 }
             } else if (Variable.value) |value| {
-                const value_type = typecheck_expr_only(t, value);
+                const value_type = check_expr_only(t, value);
                 reject_void_type(t, value_type);
 
                 Variable.typ = value_type;
@@ -218,14 +218,14 @@ fn typecheck_symbol(t: *Typechecker, symbol: *Ast.Symbol) void {
 
             var it = Procedure.block.first;
             while (it) |node| {
-                typecheck_stmt(t, node.data);
+                check_stmt(t, node.data);
                 it = node.next;
             }
 
             t.return_type = old_return_type;
         },
         .Type => |typ| {
-            typecheck_type(t, typ);
+            check_type(t, typ);
         },
         .Parameter,
         .Struct_Field,
@@ -235,7 +235,7 @@ fn typecheck_symbol(t: *Typechecker, symbol: *Ast.Symbol) void {
     }
 }
 
-fn unpack(t: *Typechecker, typ: *Ast.Type) void {
+fn unpack(t: *TypeChecker, typ: *Ast.Type) void {
     const old_data = typ.data;
     switch (old_data.stages.unpacking) {
         .None => old_data.stages.unpacking = .Going,
@@ -248,7 +248,7 @@ fn unpack(t: *Typechecker, typ: *Ast.Type) void {
     defer old_data.stages.unpacking = .Done;
 
     const fns = struct {
-        pub fn unpack_symbol(_t: *Typechecker, _typ: *Ast.Type, symbol: *Ast.Symbol) void {
+        pub fn unpack_symbol(_t: *TypeChecker, _typ: *Ast.Type, symbol: *Ast.Symbol) void {
             if (symbol.as != .Type) {
                 _t.c.report_error(_typ.line_info, "symbol '{s}' is not a type", .{symbol.key.name});
                 Compiler.exit(1);
@@ -308,7 +308,7 @@ fn unpack(t: *Typechecker, typ: *Ast.Type) void {
             }
         },
         .Type_Of => |expr| {
-            const expr_result = typecheck_expr(t, expr);
+            const expr_result = check_expr(t, expr);
             if (expr_result.tag == .Type) {
                 unpack(t, expr_result.typ);
             }
@@ -325,7 +325,7 @@ fn unpack(t: *Typechecker, typ: *Ast.Type) void {
     }
 }
 
-fn shallow_check(t: *Typechecker, typ: *Ast.Type) void {
+fn shallow_check(t: *TypeChecker, typ: *Ast.Type) void {
     unpack(t, typ);
 
     const data = typ.data;
@@ -369,7 +369,7 @@ fn shallow_check(t: *Typechecker, typ: *Ast.Type) void {
     }
 }
 
-fn void_array_check(t: *Typechecker, typ: *Ast.Type) void {
+fn void_array_check(t: *TypeChecker, typ: *Ast.Type) void {
     shallow_check(t, typ);
 
     const data = typ.data;
@@ -421,7 +421,7 @@ fn void_array_check(t: *Typechecker, typ: *Ast.Type) void {
 }
 
 // TODO: don't go through all stages when the top one is done.
-fn typecheck_type(t: *Typechecker, typ: *Ast.Type) void {
+fn check_type(t: *TypeChecker, typ: *Ast.Type) void {
     void_array_check(t, typ);
 
     const data = typ.data;
@@ -444,11 +444,11 @@ fn typecheck_type(t: *Typechecker, typ: *Ast.Type) void {
             var it = Struct.fields.first;
             while (it) |node| {
                 const symbol = node.data;
-                typecheck_symbol_type(t, symbol);
+                check_symbol_type(t, symbol);
 
                 const Field = &symbol.as.Struct_Field;
                 const field_alignment = Field.typ.data.alignment;
-                size = utils.align_u64(size, field_alignment);
+                size = nostd.align_u64(size, field_alignment);
                 Field.offset = size;
 
                 size += Field.typ.data.byte_size;
@@ -463,7 +463,7 @@ fn typecheck_type(t: *Typechecker, typ: *Ast.Type) void {
             // NOTE[check-fields-in-namespace]: should deduplicate?
             it = Struct.rest.first;
             while (it) |node| {
-                typecheck_symbol(t, node.data);
+                check_symbol(t, node.data);
                 it = node.next;
             }
         },
@@ -479,7 +479,7 @@ fn typecheck_type(t: *Typechecker, typ: *Ast.Type) void {
             var it = Union.fields.first;
             while (it) |node| {
                 const symbol = node.data;
-                typecheck_symbol_type(t, symbol);
+                check_symbol_type(t, symbol);
 
                 const Field = &node.data.as.Union_Field;
                 Field.offset = 0;
@@ -496,7 +496,7 @@ fn typecheck_type(t: *Typechecker, typ: *Ast.Type) void {
             // NOTE[check-fields-in-namespace].
             it = Union.rest.first;
             while (it) |node| {
-                typecheck_symbol(t, node.data);
+                check_symbol(t, node.data);
                 it = node.next;
             }
         },
@@ -520,7 +520,7 @@ fn typecheck_type(t: *Typechecker, typ: *Ast.Type) void {
                     const enum_field = &node.data.as.Enum_Field;
 
                     if (enum_field.value) |value| {
-                        const value_type = typecheck_expr_only(t, value);
+                        const value_type = check_expr_only(t, value);
                         const new_value_type = safe_cast_to_integer(t, value, value_type, .Both);
                         if (new_value_type == null) {
                             t.c.report_error(value.line_info, "expected integer, but got '{}'\n", .{value_type});
@@ -552,7 +552,7 @@ fn typecheck_type(t: *Typechecker, typ: *Ast.Type) void {
                 }
             }
 
-            const bits = utils.count_bits(max_value) + @intFromBool(is_signed);
+            const bits = nostd.count_bits(max_value) + @intFromBool(is_signed);
             if (bits > 64) {
                 t.c.report_error(typ.line_info, "enum can't be represented in <= 64 bits", .{});
                 Compiler.exit(1);
@@ -568,7 +568,7 @@ fn typecheck_type(t: *Typechecker, typ: *Ast.Type) void {
             // NOTE[check-fields-in-namespace].
             var it = Enum.rest.first;
             while (it) |node| {
-                typecheck_symbol(t, node.data);
+                check_symbol(t, node.data);
                 it = node.next;
             }
         },
@@ -579,16 +579,16 @@ fn typecheck_type(t: *Typechecker, typ: *Ast.Type) void {
             var it = Proc.params.first;
             while (it) |node| {
                 const symbol = node.data;
-                typecheck_symbol_type(t, symbol);
+                check_symbol_type(t, symbol);
 
                 it = node.next;
             }
-            typecheck_type(t, Proc.return_type);
+            check_type(t, Proc.return_type);
         },
         .Array => |*Array| {
-            typecheck_type(t, Array.subtype);
+            check_type(t, Array.subtype);
 
-            const size_type = typecheck_expr_only(t, Array.size);
+            const size_type = check_expr_only(t, Array.size);
             if (safe_cast_to_integer(t, Array.size, size_type, .Unsigned) == null) {
                 t.c.report_error(typ.line_info, "expected unsigned integer, but got '{}'", .{size_type});
                 Compiler.exit(1);
@@ -602,7 +602,7 @@ fn typecheck_type(t: *Typechecker, typ: *Ast.Type) void {
         .Pointer => |subtype| {
             std.debug.assert(data.byte_size == Ast.pointer_byte_size and
                 data.alignment == Ast.pointer_alignment);
-            typecheck_type(t, subtype);
+            check_type(t, subtype);
         },
         .Integer => {
             std.debug.assert(data.byte_size != 0);
@@ -622,18 +622,18 @@ fn typecheck_type(t: *Typechecker, typ: *Ast.Type) void {
     }
 }
 
-fn typecheck_stmt_list(t: *Typechecker, list: Ast.StmtList) void {
+fn check_stmt_list(t: *TypeChecker, list: Ast.StmtList) void {
     var it = list.first;
     while (it) |node| {
-        typecheck_stmt(t, node.data);
+        check_stmt(t, node.data);
         it = node.next;
     }
 }
 
-fn typecheck_stmt(t: *Typechecker, stmt: *Ast.Stmt) void {
+fn check_stmt(t: *TypeChecker, stmt: *Ast.Stmt) void {
     switch (stmt.as) {
         .Print => |expr| {
-            const expr_type = typecheck_expr_only(t, expr);
+            const expr_type = check_expr_only(t, expr);
             switch (expr_type.data.as) {
                 .Struct, .Union, .Proc, .Array, .Void => {
                     t.c.report_error(expr.line_info, "can't print value of type '{}'", .{expr.typ});
@@ -648,25 +648,25 @@ fn typecheck_stmt(t: *Typechecker, stmt: *Ast.Stmt) void {
             }
         },
         .Block => |block| {
-            typecheck_stmt_list(t, block);
+            check_stmt_list(t, block);
         },
         .If => |If| {
-            const condition_type = typecheck_expr_only(t, If.condition);
+            const condition_type = check_expr_only(t, If.condition);
             if (!safe_cast(t, If.condition, condition_type, Ast.bool_type)) {
                 t.c.report_error(If.condition.line_info, "expected 'bool', but got '{}'", .{condition_type});
                 Compiler.exit(1);
             }
 
             reject_symbol(t, If.true_branch);
-            typecheck_stmt(t, If.true_branch);
+            check_stmt(t, If.true_branch);
 
             if (If.false_branch) |false_branch| {
                 reject_symbol(t, false_branch);
-                typecheck_stmt(t, false_branch);
+                check_stmt(t, false_branch);
             }
         },
         .While, .Do_While => |While| {
-            const condition_type = typecheck_expr_only(t, While.condition);
+            const condition_type = check_expr_only(t, While.condition);
             if (!safe_cast(t, While.condition, condition_type, Ast.bool_type)) {
                 t.c.report_error(While.condition.line_info, "expected 'bool', but got '{}'", .{condition_type});
                 Compiler.exit(1);
@@ -676,7 +676,7 @@ fn typecheck_stmt(t: *Typechecker, stmt: *Ast.Stmt) void {
 
             reject_symbol(t, While.body);
             t.is_in_loop = true;
-            typecheck_stmt(t, While.body);
+            check_stmt(t, While.body);
             t.is_in_loop = old_is_in_loop;
         },
         .Break => {
@@ -692,7 +692,7 @@ fn typecheck_stmt(t: *Typechecker, stmt: *Ast.Stmt) void {
             }
         },
         .Switch => |Switch| {
-            const condition_type = typecheck_expr_only(t, Switch.condition);
+            const condition_type = check_expr_only(t, Switch.condition);
             const is_comparable = condition_type.compare().is_comparable;
 
             if (!is_comparable) {
@@ -706,7 +706,7 @@ fn typecheck_stmt(t: *Typechecker, stmt: *Ast.Stmt) void {
                 while (true) {
                     switch (Case.*) {
                         .Case => |case| {
-                            const value_type = typecheck_expr_only(t, case.value);
+                            const value_type = check_expr_only(t, case.value);
 
                             if (!safe_cast(t, case.value, value_type, condition_type)) {
                                 t.c.report_error(case.value.line_info, "mismatched types: '{}' and '{}'", .{ condition_type, value_type });
@@ -724,7 +724,7 @@ fn typecheck_stmt(t: *Typechecker, stmt: *Ast.Stmt) void {
                         },
                         .Stmt => |substmt| {
                             reject_symbol(t, substmt);
-                            typecheck_stmt(t, substmt);
+                            check_stmt(t, substmt);
                             break;
                         },
                     }
@@ -741,7 +741,7 @@ fn typecheck_stmt(t: *Typechecker, stmt: *Ast.Stmt) void {
                     t.c.report_error(expr.line_info, "unexpected expression here", .{});
                     Compiler.exit(1);
                 } else {
-                    const expr_type = typecheck_expr_only(t, expr);
+                    const expr_type = check_expr_only(t, expr);
 
                     if (!safe_cast(t, expr, expr_type, return_type)) {
                         t.c.report_error(expr.line_info, "mismatched types: '{}' and '{}'", .{ return_type, expr_type });
@@ -756,10 +756,10 @@ fn typecheck_stmt(t: *Typechecker, stmt: *Ast.Stmt) void {
             }
         },
         .Symbol => |symbol| {
-            typecheck_symbol(t, symbol);
+            check_symbol(t, symbol);
         },
         .Assign => |Assign| {
-            const lhs_type = typecheck_expr_only(t, Assign.lhs);
+            const lhs_type = check_expr_only(t, Assign.lhs);
 
             if (!Assign.lhs.flags.is_lvalue) {
                 t.c.report_error(Assign.lhs.line_info, "expression is not an lvalue", .{});
@@ -769,7 +769,7 @@ fn typecheck_stmt(t: *Typechecker, stmt: *Ast.Stmt) void {
                 Compiler.exit(1);
             }
 
-            const rhs_type = typecheck_expr_only(t, Assign.rhs);
+            const rhs_type = check_expr_only(t, Assign.rhs);
 
             if (!safe_cast(t, Assign.rhs, rhs_type, lhs_type)) {
                 t.c.report_error(stmt.line_info, "expected '{}', but got '{}'", .{ lhs_type, rhs_type });
@@ -777,13 +777,13 @@ fn typecheck_stmt(t: *Typechecker, stmt: *Ast.Stmt) void {
             }
         },
         .Expr => |expr| {
-            _ = typecheck_expr_only(t, expr);
+            _ = check_expr_only(t, expr);
         },
     }
 }
 
-fn typecheck_expr_only(t: *Typechecker, expr: *Ast.Expr) *Ast.Type {
-    const result = typecheck_expr(t, expr);
+fn check_expr_only(t: *TypeChecker, expr: *Ast.Expr) *Ast.Type {
+    const result = check_expr(t, expr);
     if (result.tag != .Value) {
         t.c.report_error(expr.line_info, "expected expression", .{});
         Compiler.exit(1);
@@ -792,7 +792,7 @@ fn typecheck_expr_only(t: *Typechecker, expr: *Ast.Expr) *Ast.Type {
 }
 
 // Types are typechecked lazily (only when used). 'cause if a type is not fully formed (like ambiguous pointer/array), we need to typecheck it from the top level.
-fn typecheck_expr(t: *Typechecker, expr: *Ast.Expr) TypecheckExprResult {
+fn check_expr(t: *TypeChecker, expr: *Ast.Expr) TypecheckExprResult {
     switch (expr.typechecking) {
         .None => expr.typechecking = .Going,
         .Going => {
@@ -804,14 +804,14 @@ fn typecheck_expr(t: *Typechecker, expr: *Ast.Expr) TypecheckExprResult {
     defer expr.typechecking = .Done;
 
     const fns = struct {
-        pub fn typecheck_expr_symbol(_t: *Typechecker, _expr: *Ast.Expr, symbol: *Ast.Symbol) TypecheckExprResult {
+        pub fn check_expr_symbol(_t: *TypeChecker, _expr: *Ast.Expr, symbol: *Ast.Symbol) TypecheckExprResult {
             _expr.as = .{ .Symbol = symbol };
             _expr.flags.is_const = symbol.attributes.is_const;
             _expr.flags.is_static = symbol.attributes.is_static;
 
             switch (symbol.as) {
                 .Variable => |*Variable| {
-                    typecheck_symbol(_t, symbol); // TODO: allow cyclic references when using #type_of/#alignment_of, etc.
+                    check_symbol(_t, symbol); // TODO: allow cyclic references when using #type_of/#alignment_of, etc.
 
                     _expr.flags.is_lvalue = true;
 
@@ -840,8 +840,8 @@ fn typecheck_expr(t: *Typechecker, expr: *Ast.Expr) TypecheckExprResult {
     const result: TypecheckExprResult = result: {
         switch (expr.as) {
             .Binary_Op => |*Binary_Op| {
-                const lhs_type = typecheck_expr_only(t, Binary_Op.lhs);
-                const rhs_type = typecheck_expr_only(t, Binary_Op.rhs);
+                const lhs_type = check_expr_only(t, Binary_Op.lhs);
+                const rhs_type = check_expr_only(t, Binary_Op.rhs);
                 const lhs_flags = lhs_type.compare();
                 const rhs_flags = rhs_type.compare();
 
@@ -961,7 +961,7 @@ fn typecheck_expr(t: *Typechecker, expr: *Ast.Expr) TypecheckExprResult {
                 }
             },
             .Unary_Op => |Unary_Op| {
-                const subexpr_type = typecheck_expr_only(t, Unary_Op.subexpr);
+                const subexpr_type = check_expr_only(t, Unary_Op.subexpr);
 
                 expr.flags.is_const = Unary_Op.subexpr.flags.is_const;
 
@@ -992,7 +992,7 @@ fn typecheck_expr(t: *Typechecker, expr: *Ast.Expr) TypecheckExprResult {
                 }
             },
             .Ref => |subexpr| {
-                const subexpr_type = typecheck_expr_only(t, subexpr);
+                const subexpr_type = check_expr_only(t, subexpr);
 
                 if (!subexpr.flags.is_lvalue) {
                     t.c.report_error(subexpr.line_info, "expression is not an lvalue", .{});
@@ -1021,7 +1021,7 @@ fn typecheck_expr(t: *Typechecker, expr: *Ast.Expr) TypecheckExprResult {
                 break :result .{ .typ = typ, .tag = .Value };
             },
             .Deref => |subexpr| {
-                const subexpr_result = typecheck_expr(t, subexpr);
+                const subexpr_result = check_expr(t, subexpr);
 
                 if (subexpr_result.tag == .Type) {
                     const data = t.ast.create(Ast.Type.SharedData);
@@ -1057,15 +1057,15 @@ fn typecheck_expr(t: *Typechecker, expr: *Ast.Expr) TypecheckExprResult {
                 }
             },
             .If => |If| {
-                const condition_type = typecheck_expr_only(t, If.condition);
+                const condition_type = check_expr_only(t, If.condition);
 
                 if (!safe_cast(t, If.condition, condition_type, Ast.bool_type)) {
                     t.c.report_error(If.condition.line_info, "expected 'bool', but got '{}'", .{condition_type});
                     Compiler.exit(1);
                 }
 
-                const true_branch_type = typecheck_expr_only(t, If.true_branch);
-                const false_branch_type = typecheck_expr_only(t, If.false_branch);
+                const true_branch_type = check_expr_only(t, If.true_branch);
+                const false_branch_type = check_expr_only(t, If.false_branch);
 
                 if (!symetric_safe_cast(t, If.true_branch, true_branch_type, If.false_branch, false_branch_type)) {
                     t.c.report_error(If.condition.line_info, "mismatched types: '{}' and '{}'", .{ true_branch_type, false_branch_type });
@@ -1079,14 +1079,14 @@ fn typecheck_expr(t: *Typechecker, expr: *Ast.Expr) TypecheckExprResult {
                 break :result .{ .typ = true_branch_type, .tag = .Value };
             },
             .Call => |Call| {
-                const subexpr_result = typecheck_expr(t, Call.subexpr);
+                const subexpr_result = check_expr(t, Call.subexpr);
 
                 if (subexpr_result.tag == .Type) {
                     const typ = subexpr_result.typ;
 
                     var is_const = false;
 
-                    typecheck_type(t, typ);
+                    check_type(t, typ);
                     switch (typ.data.as) {
                         .Struct, .Union => |Struct| {
                             is_const = true;
@@ -1099,7 +1099,7 @@ fn typecheck_expr(t: *Typechecker, expr: *Ast.Expr) TypecheckExprResult {
 
                                         switch (symbol.as) {
                                             .Struct_Field, .Union_Field => |Field| {
-                                                const rhs_type = typecheck_expr_only(t, Designator.rhs);
+                                                const rhs_type = check_expr_only(t, Designator.rhs);
                                                 if (!safe_cast(t, Designator.rhs, rhs_type, Field.typ)) {
                                                     t.c.report_error(Designator.rhs.line_info, "expected '{}', but got '{}'", .{ Field.typ, rhs_type });
                                                     Compiler.exit(1);
@@ -1137,7 +1137,7 @@ fn typecheck_expr(t: *Typechecker, expr: *Ast.Expr) TypecheckExprResult {
                                         Compiler.exit(1);
                                     },
                                     .Expr => |arg| {
-                                        const arg_type = typecheck_expr_only(t, arg);
+                                        const arg_type = check_expr_only(t, arg);
                                         if (!safe_cast(t, arg, arg_type, Array.subtype)) {
                                             t.c.report_error(arg.line_info, "expected '{}', but got '{}'", .{ Array.subtype, arg_type });
                                             Compiler.exit(1);
@@ -1166,7 +1166,7 @@ fn typecheck_expr(t: *Typechecker, expr: *Ast.Expr) TypecheckExprResult {
                                     Compiler.exit(1);
                                 },
                                 .Expr => |arg| {
-                                    const arg_type = typecheck_expr_only(t, arg);
+                                    const arg_type = check_expr_only(t, arg);
 
                                     if (!safe_cast(t, arg, arg_type, typ)) {
                                         t.c.report_error(expr.line_info, "expected '{}', but got '{}'", .{ typ, arg_type });
@@ -1225,7 +1225,7 @@ fn typecheck_expr(t: *Typechecker, expr: *Ast.Expr) TypecheckExprResult {
                                 Compiler.exit(1);
                             },
                             .Expr => |arg| {
-                                const arg_type = typecheck_expr_only(t, arg);
+                                const arg_type = check_expr_only(t, arg);
 
                                 if (!safe_cast(t, arg, arg_type, param_type)) {
                                     t.c.report_error(arg.line_info, "expected '{}', but got '{}'", .{ param_type, arg_type });
@@ -1243,7 +1243,7 @@ fn typecheck_expr(t: *Typechecker, expr: *Ast.Expr) TypecheckExprResult {
             },
             .Constructor => unreachable,
             .Subscript => |Subscript| {
-                const subexpr_result = typecheck_expr(t, Subscript.subexpr);
+                const subexpr_result = check_expr(t, Subscript.subexpr);
 
                 if (subexpr_result.tag == .Type) {
                     const data = t.ast.create(Ast.Type.SharedData);
@@ -1269,7 +1269,7 @@ fn typecheck_expr(t: *Typechecker, expr: *Ast.Expr) TypecheckExprResult {
                     break :result .{ .typ = &expr.as.Type, .tag = .Type };
                 } else {
                     const subexpr_type = subexpr_result.typ;
-                    const index_type = typecheck_expr_only(t, Subscript.index);
+                    const index_type = check_expr_only(t, Subscript.index);
 
                     if (safe_cast_to_integer(t, Subscript.index, index_type, .Both) == null) {
                         t.c.report_error(Subscript.subexpr.line_info, "expected integer, but got '{}'", .{index_type});
@@ -1298,10 +1298,10 @@ fn typecheck_expr(t: *Typechecker, expr: *Ast.Expr) TypecheckExprResult {
                 }
             },
             .Field => |Field| {
-                const subexpr_result = typecheck_expr(t, Field.subexpr);
+                const subexpr_result = check_expr(t, Field.subexpr);
 
                 if (subexpr_result.tag == .Type) {
-                    typecheck_type(t, subexpr_result.typ);
+                    check_type(t, subexpr_result.typ);
 
                     const scope: *Ast.Scope = switch (subexpr_result.typ.data.as) {
                         .Struct, .Union => |Struct| Struct.scope,
@@ -1337,7 +1337,7 @@ fn typecheck_expr(t: *Typechecker, expr: *Ast.Expr) TypecheckExprResult {
                             break :result .{ .typ = &expr.as.Type, .tag = .Type };
                         },
                         else => {
-                            break :result fns.typecheck_expr_symbol(t, expr, symbol);
+                            break :result fns.check_expr_symbol(t, expr, symbol);
                         },
                     }
                 } else {
@@ -1371,9 +1371,9 @@ fn typecheck_expr(t: *Typechecker, expr: *Ast.Expr) TypecheckExprResult {
                 }
             },
             .Byte_Size_Of => |subexpr| {
-                const subexpr_result = typecheck_expr(t, subexpr);
+                const subexpr_result = check_expr(t, subexpr);
                 if (subexpr_result.tag == .Type) {
-                    typecheck_type(t, subexpr_result.typ);
+                    check_type(t, subexpr_result.typ);
                 }
                 const byte_size = subexpr_result.typ.data.byte_size;
 
@@ -1383,9 +1383,9 @@ fn typecheck_expr(t: *Typechecker, expr: *Ast.Expr) TypecheckExprResult {
                 break :result .{ .typ = Ast.integer_type_from_u64(byte_size), .tag = .Value };
             },
             .Alignment_Of => |subexpr| {
-                const subexpr_result = typecheck_expr(t, subexpr);
+                const subexpr_result = check_expr(t, subexpr);
                 if (subexpr_result.tag == .Type) {
-                    typecheck_type(t, subexpr_result.typ);
+                    check_type(t, subexpr_result.typ);
                 }
                 const alignment = subexpr_result.typ.data.alignment.to_byte_size();
 
@@ -1395,8 +1395,8 @@ fn typecheck_expr(t: *Typechecker, expr: *Ast.Expr) TypecheckExprResult {
                 break :result .{ .typ = Ast.integer_type_from_u64(alignment), .tag = .Value };
             },
             .As => |As| {
-                typecheck_type(t, As.typ);
-                const expr_type = typecheck_expr_only(t, As.expr);
+                check_type(t, As.typ);
+                const expr_type = check_expr_only(t, As.expr);
                 if (!safe_cast(t, As.expr, expr_type, As.typ)) {
                     t.c.report_error(As.expr.line_info, "can't reinterpret '{}' as '{}'", .{ As.typ, expr_type });
                     Compiler.exit(1);
@@ -1405,8 +1405,8 @@ fn typecheck_expr(t: *Typechecker, expr: *Ast.Expr) TypecheckExprResult {
                 break :result .{ .typ = As.typ, .tag = .Value };
             },
             .Cast => |Cast| {
-                typecheck_type(t, Cast.typ);
-                const expr_type = typecheck_expr_only(t, Cast.expr);
+                check_type(t, Cast.typ);
+                const expr_type = check_expr_only(t, Cast.expr);
                 if (!can_unsafe_cast(t, Cast.expr, expr_type, Cast.typ)) {
                     t.c.report_error(Cast.expr.line_info, "can't cast '{}' to '{}'", .{ expr_type, Cast.typ });
                     Compiler.exit(1);
@@ -1438,9 +1438,9 @@ fn typecheck_expr(t: *Typechecker, expr: *Ast.Expr) TypecheckExprResult {
                 }, t.scope_bound, expr.line_info.offset);
 
                 if (has_symbol) |symbol| {
-                    typecheck_symbol_type(t, symbol);
+                    check_symbol_type(t, symbol);
 
-                    break :result fns.typecheck_expr_symbol(t, expr, symbol);
+                    break :result fns.check_expr_symbol(t, expr, symbol);
                 } else {
                     t.c.report_error(expr.line_info, "symbol '{s}' is not defined", .{Identifier.name});
                     Compiler.exit(1);
@@ -1454,7 +1454,7 @@ fn typecheck_expr(t: *Typechecker, expr: *Ast.Expr) TypecheckExprResult {
     return result;
 }
 
-fn resolve_identifier(t: *Typechecker, expr: *Ast.Expr, scope: *Ast.Scope) *Ast.Symbol {
+fn resolve_identifier(t: *TypeChecker, expr: *Ast.Expr, scope: *Ast.Scope) *Ast.Symbol {
     switch (expr.as) {
         .Identifier => |*Identifier| {
             Identifier.scope = scope;
@@ -1480,21 +1480,21 @@ fn resolve_identifier(t: *Typechecker, expr: *Ast.Expr, scope: *Ast.Scope) *Ast.
 }
 
 // TODO: line info is not properly reported.
-fn reject_void_type(t: *Typechecker, typ: *Ast.Type) void {
+fn reject_void_type(t: *TypeChecker, typ: *Ast.Type) void {
     if (typ.equal(Ast.void_type)) {
         t.c.report_error(typ.line_info, "unexpected 'void' type", .{});
         Compiler.exit(1);
     }
 }
 
-fn reject_symbol(t: *Typechecker, stmt: *Ast.Stmt) void {
+fn reject_symbol(t: *TypeChecker, stmt: *Ast.Stmt) void {
     if (stmt.as == .Symbol) {
         t.c.report_error(stmt.line_info, "unexpected symbol definition", .{});
         Compiler.exit(1);
     }
 }
 
-fn safe_cast_two_integers(t: *Typechecker, lhs: *Ast.Expr, lhs_type: *Ast.Type, rhs: *Ast.Expr, rhs_type: *Ast.Type) ?*Ast.Type {
+fn safe_cast_two_integers(t: *TypeChecker, lhs: *Ast.Expr, lhs_type: *Ast.Type, rhs: *Ast.Expr, rhs_type: *Ast.Type) ?*Ast.Type {
     const casted_lhs = safe_cast_to_integer(t, lhs, lhs_type, .Both);
     const casted_rhs = safe_cast_to_integer(t, rhs, rhs_type, .Both);
 
@@ -1531,7 +1531,7 @@ fn safe_cast_two_integers(t: *Typechecker, lhs: *Ast.Expr, lhs_type: *Ast.Type, 
     };
 
     const case: Case = case: {
-        const order = utils.compare(lInteger.bits, rInteger.bits);
+        const order = nostd.compare(lInteger.bits, rInteger.bits);
         const index = 3 * ((2 * @as(u8, @intFromBool(lInteger.is_signed))) + @intFromBool(rInteger.is_signed)) + @intFromEnum(order);
         break :case @enumFromInt(index);
     };
@@ -1608,7 +1608,7 @@ fn safe_cast_two_integers(t: *Typechecker, lhs: *Ast.Expr, lhs_type: *Ast.Type, 
     return casted;
 }
 
-fn safe_cast_to_integer(t: *Typechecker, expr: *Ast.Expr, expr_type: *Ast.Type, what_sign: Sign) ?*Ast.Type {
+fn safe_cast_to_integer(t: *TypeChecker, expr: *Ast.Expr, expr_type: *Ast.Type, what_sign: Sign) ?*Ast.Type {
     var should_cast = false;
     var typ: *Ast.Type = switch (expr_type.data.as) {
         .Struct,
@@ -1670,7 +1670,7 @@ fn safe_cast_to_integer(t: *Typechecker, expr: *Ast.Expr, expr_type: *Ast.Type, 
     return typ;
 }
 
-fn safe_cast(t: *Typechecker, expr: *Ast.Expr, expr_type: *Ast.Type, cast_to: *Ast.Type) bool {
+fn safe_cast(t: *TypeChecker, expr: *Ast.Expr, expr_type: *Ast.Type, cast_to: *Ast.Type) bool {
     if (expr_type.equal(cast_to)) {
         return true;
     }
@@ -1754,11 +1754,11 @@ fn safe_cast(t: *Typechecker, expr: *Ast.Expr, expr_type: *Ast.Type, cast_to: *A
     return can_cast;
 }
 
-fn symetric_safe_cast(t: *Typechecker, lhs: *Ast.Expr, lhs_type: *Ast.Type, rhs: *Ast.Expr, rhs_type: *Ast.Type) bool {
+fn symetric_safe_cast(t: *TypeChecker, lhs: *Ast.Expr, lhs_type: *Ast.Type, rhs: *Ast.Expr, rhs_type: *Ast.Type) bool {
     return safe_cast(t, lhs, lhs_type, rhs_type) or safe_cast(t, rhs, rhs_type, lhs_type);
 }
 
-fn can_unsafe_cast(t: *Typechecker, expr: *Ast.Expr, expr_type: *Ast.Type, cast_to: *Ast.Type) bool {
+fn can_unsafe_cast(t: *TypeChecker, expr: *Ast.Expr, expr_type: *Ast.Type, cast_to: *Ast.Type) bool {
     if (safe_cast(t, expr, expr_type, cast_to)) {
         return true;
     }
@@ -1783,8 +1783,8 @@ fn can_unsafe_cast(t: *Typechecker, expr: *Ast.Expr, expr_type: *Ast.Type, cast_
     return can_cast;
 }
 
-fn make_expr_pointer_mul_integer(t: *Typechecker, expr: *Ast.Expr, data: *Ast.Type.SharedData) *Ast.Expr {
-    const size = utils.align_u64(data.byte_size, data.alignment);
+fn make_expr_pointer_mul_integer(t: *TypeChecker, expr: *Ast.Expr, data: *Ast.Type.SharedData) *Ast.Expr {
+    const size = nostd.align_u64(data.byte_size, data.alignment);
     const rhs = t.ast.create(Ast.Expr);
     rhs.* = .{
         .line_info = expr.line_info,
@@ -1815,14 +1815,14 @@ fn make_expr_pointer_mul_integer(t: *Typechecker, expr: *Ast.Expr, data: *Ast.Ty
 }
 
 const std = @import("std");
-const utils = @import("utils.zig");
-const Compiler = @import("compiler.zig");
-const Ast = @import("ast.zig");
-const IR = @import("ir.zig");
-const IRGen = @import("ir-generator.zig");
-const Interpreter = @import("interpreter.zig");
+const nostd = @import("nostd.zig");
+const Compiler = @import("Compiler.zig");
+const Ast = @import("Ast.zig");
+const IR = @import("IR.zig");
+const IRGenerator = @import("IRGenerator.zig");
+const Interpreter = @import("Interpreter.zig");
 
-const Alignment = utils.Alignment;
+const Alignment = nostd.Alignment;
 const IRD = IR.Decoded;
 const IRE = IR.Encoded;
 

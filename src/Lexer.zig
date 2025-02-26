@@ -305,7 +305,7 @@ fn parse_token(l: *Lexer) Token {
 
         tok.as = as: {
             for (state.symbols) |symbol| {
-                if (utils.is_prefix(symbol.text, s.src)) {
+                if (nostd.is_prefix(symbol.text, s.src)) {
                     const count: u32 = @intCast(symbol.text.len);
                     s.at += count;
                     l.line_info.column += count;
@@ -429,8 +429,8 @@ const is_alnum = std.ascii.isAlphanumeric;
 const is_print = std.ascii.isPrint;
 
 const std = @import("std");
-const utils = @import("utils.zig");
-const Compiler = @import("compiler.zig");
+const nostd = @import("nostd.zig");
+const Compiler = @import("Compiler.zig");
 
 const LineInfo = Compiler.LineInfo;
 const Attributes = Compiler.Attributes;

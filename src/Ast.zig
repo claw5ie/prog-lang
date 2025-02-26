@@ -102,7 +102,7 @@ pub fn create(ast: *Ast, comptime T: type) *T {
 }
 
 pub fn integer_type_from_u64(value: u64) *Type {
-    const bits = utils.count_bits(value);
+    const bits = nostd.count_bits(value);
     return lookup_integer_type(bits, false);
 }
 
@@ -111,7 +111,7 @@ pub fn lookup_integer_type(bits: u8, is_signed: bool) *Type {
 
     const index = 65 * @as(u8, @intFromBool(is_signed)) + bits;
     if (integer_types[index] == null) {
-        const byte_size = @max(1, utils.round_to_next_pow2(bits) / 8);
+        const byte_size = @max(1, nostd.round_to_next_pow2(bits) / 8);
         const data = Compiler.gpa.create(Type.SharedData) catch {
             Compiler.exit(1);
         };
@@ -239,15 +239,15 @@ pub fn expr_to_type(ast: *Ast, expr: *Expr) *Type {
 }
 
 const std = @import("std");
-const utils = @import("utils.zig");
-const Compiler = @import("compiler.zig");
-const IR = @import("ir.zig");
+const nostd = @import("nostd.zig");
+const Compiler = @import("Compiler.zig");
+const IR = @import("IR.zig");
 
 const ArenaAllocator = std.heap.ArenaAllocator;
 const LineInfo = Compiler.LineInfo;
 const Stage = Compiler.Stage;
 
-pub const Alignment = utils.Alignment;
+pub const Alignment = nostd.Alignment;
 
 pub const Scope = struct {
     parent: ?*Scope,
