@@ -89,8 +89,8 @@ pub fn deinit(ast: *Ast) void {
     ast.arena.deinit();
     for (integer_types) |has_type| {
         if (has_type) |typ| {
-            Compiler.gpa.destroy(typ.data);
-            Compiler.gpa.destroy(typ);
+            nostd.general_allocator.destroy(typ.data);
+            nostd.general_allocator.destroy(typ);
         }
     }
 }
@@ -112,7 +112,7 @@ pub fn lookup_integer_type(bits: u8, is_signed: bool) *Type {
     const index = 65 * @as(u8, @intFromBool(is_signed)) + bits;
     if (integer_types[index] == null) {
         const byte_size = @max(1, nostd.round_to_next_pow2(bits) / 8);
-        const data = Compiler.gpa.create(Type.SharedData) catch {
+        const data = nostd.general_allocator.create(Type.SharedData) catch {
             Compiler.exit(1);
         };
         data.* = .{
@@ -130,7 +130,7 @@ pub fn lookup_integer_type(bits: u8, is_signed: bool) *Type {
             },
             .stages = default_stages_done,
         };
-        const typ = Compiler.gpa.create(Type) catch {
+        const typ = nostd.general_allocator.create(Type) catch {
             Compiler.exit(1);
         };
         typ.* = .{

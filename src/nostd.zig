@@ -1,18 +1,23 @@
-pub var stdout_buffer = std.io.bufferedWriter(std.io.getStdOut().writer());
-pub var stderr_buffer = std.io.bufferedWriter(std.io.getStdErr().writer());
+pub var general_purpose_allocator_context = std.heap.GeneralPurposeAllocator(.{}){};
+pub var general_allocator = general_purpose_allocator_context.allocator();
 
-pub var stdout = stdout_buffer.writer();
-pub var stderr = stderr_buffer.writer();
+pub const Allocator = std.mem.Allocator;
 
 pub fn todo(comptime text: []const u8) noreturn {
     @compileError(text);
 }
+
+var stdout_buffer = std.io.bufferedWriter(std.io.getStdOut().writer());
+var stdout = stdout_buffer.writer();
 
 pub fn oprint(comptime format: []const u8, args: anytype) void {
     stdout.print(format, args) catch {
         exit(1);
     };
 }
+
+var stderr_buffer = std.io.bufferedWriter(std.io.getStdErr().writer());
+var stderr = stderr_buffer.writer();
 
 pub fn eprint(comptime format: []const u8, args: anytype) void {
     stderr.print(format, args) catch {
@@ -28,96 +33,6 @@ pub fn exit(code: u8) noreturn {
         std.posix.exit(1);
     };
     std.posix.exit(code);
-}
-
-pub fn compare(lhs: anytype, rhs: @TypeOf(lhs)) Order {
-    return if (lhs < rhs) .Less else if (lhs > rhs) .Greater else .Equal;
-}
-
-pub fn left_shift(value: u64, offset: u64) u64 {
-    return if (offset < 64)
-        value << @as(u6, @intCast(offset))
-    else
-        0;
-}
-
-pub fn right_shift(value: u64, offset: u64) u64 {
-    return if (offset < 64)
-        value >> @as(u6, @intCast(offset))
-    else
-        0;
-}
-
-pub fn sign_extend(value: u64, bits: u8) u64 {
-    if (bits == 0 or bits == 64) {
-        return value;
-    }
-
-    const b: u6 = @intCast(bits);
-
-    if ((value >> (b - 1)) & 0x1 == 1) {
-        const ones = @as(u64, 0xFFFF_FFFF_FFFF_FFFF) << b;
-        return value | ones;
-    }
-
-    return value;
-}
-
-pub fn max_enum_value(comptime EnumType: type) @typeInfo(EnumType).Enum.tag_type {
-    const info = @typeInfo(EnumType).Enum;
-
-    var max: info.tag_type = std.math.minInt(info.tag_type);
-    for (info.fields) |field| {
-        max = @max(max, field.value);
-    }
-
-    return max;
-}
-
-pub fn align_u64(value: u64, alignment: Alignment) u64 {
-    return align_by_pow2(value, alignment.to_byte_size());
-}
-
-pub fn align_by_pow2(value: u64, alignment: u64) u64 {
-    std.debug.assert(round_to_next_pow2(alignment) == alignment);
-    const pow2_minus_one: u64 = alignment - 1;
-    var v = value;
-    v += pow2_minus_one;
-    v &= ~pow2_minus_one;
-    return v;
-}
-
-pub fn count_bits(value: u64) u8 {
-    const state = struct {
-        pub const b = [_]u64{ 0x2, 0xC, 0xF0, 0xFF00, 0xFFFF0000, 0xFFFFFFFF00000000 };
-        pub const s = [_]u6{ 1, 2, 4, 8, 16, 32 };
-    };
-
-    var v = value;
-    var i: u8 = 5;
-    var r: u8 = 0;
-    while (i > 0) {
-        i -= 1;
-        if ((v & state.b[i]) != 0) {
-            v >>= state.s[i];
-            r |= state.s[i];
-        }
-    }
-
-    return r + @intFromBool(v != 0);
-}
-
-pub fn round_to_next_pow2(value: u64) u64 {
-    var v = value;
-    v -%= 1;
-    v |= v >> 1;
-    v |= v >> 2;
-    v |= v >> 4;
-    v |= v >> 8;
-    v |= v >> 16;
-    v |= v >> 32;
-    v +%= 1;
-    return v;
 }
 
 pub fn read_entire_file(allocator: Allocator, filepath: []const u8) ![:0]u8 {
@@ -169,13 +84,148 @@ pub fn write_to_file_u64(fd: std.posix.fd_t, value: u64) void {
     write_to_file_v(fd, view);
 }
 
+pub fn compare(lhs: anytype, rhs: @TypeOf(lhs)) Order {
+    return if (lhs < rhs) .Less else if (lhs > rhs) .Greater else .Equal;
+}
+
+pub fn left_shift(value: u64, offset: u64) u64 {
+    return if (offset < 64)
+        value << @as(u6, @intCast(offset))
+    else
+        0;
+}
+
+pub fn right_shift(value: u64, offset: u64) u64 {
+    return if (offset < 64)
+        value >> @as(u6, @intCast(offset))
+    else
+        0;
+}
+
+pub fn max_enum_value(comptime EnumType: type) @typeInfo(EnumType).Enum.tag_type {
+    const info = @typeInfo(EnumType).Enum;
+
+    var max: info.tag_type = std.math.minInt(info.tag_type);
+    for (info.fields) |field| {
+        max = @max(max, field.value);
+    }
+
+    return max;
+}
+
+pub fn sign_extend(value: u64, bits: u8) u64 {
+    if (bits == 0 or bits == 64) {
+        return value;
+    }
+
+    const b: u6 = @intCast(bits);
+
+    if ((value >> (b - 1)) & 0x1 == 1) {
+        const ones = @as(u64, 0xFFFF_FFFF_FFFF_FFFF) << b;
+        return value | ones;
+    }
+
+    return value;
+}
+
+pub fn align_u64(value: u64, alignment: Alignment) u64 {
+    return align_by_pow2(value, alignment.to_byte_size());
+}
+
+pub fn align_by_pow2(value: u64, alignment: u64) u64 {
+    std.debug.assert(round_to_next_pow2(alignment) == alignment);
+    const pow2_minus_one: u64 = alignment - 1;
+    var v = value;
+    v += pow2_minus_one;
+    v &= ~pow2_minus_one;
+    return v;
+}
+
+pub fn count_bits(value: u64) u8 {
+    const state = struct {
+        pub const b = [_]u64{ 0x2, 0xC, 0xF0, 0xFF00, 0xFFFF0000, 0xFFFFFFFF00000000 };
+        pub const s = [_]u6{ 1, 2, 4, 8, 16, 32 };
+    };
+
+    var v = value;
+    var i: u8 = 5;
+    var r: u8 = 0;
+    while (i > 0) {
+        i -= 1;
+        if ((v & state.b[i]) != 0) {
+            v >>= state.s[i];
+            r |= state.s[i];
+        }
+    }
+
+    return r + @intFromBool(v != 0);
+}
+
+pub fn round_to_next_pow2(value: u64) u64 {
+    var v = value;
+    v -%= 1;
+    v |= v >> 1;
+    v |= v >> 2;
+    v |= v >> 4;
+    v |= v >> 8;
+    v |= v >> 16;
+    v |= v >> 32;
+    v +%= 1;
+    return v;
+}
+
 pub fn is_prefix(prefix: []const u8, rest: []const u8) bool {
     return prefix.len <= rest.len and std.mem.eql(u8, prefix, rest[0..prefix.len]);
 }
 
-const std = @import("std");
+pub const StringPool = struct {
+    map: HashMap,
 
-const Allocator = std.mem.Allocator;
+    pub fn init(allocator: Allocator) StringPool {
+        return .{ .map = HashMap.init(allocator) };
+    }
+
+    pub fn deinit(pool: *StringPool) void {
+        var it = pool.map.valueIterator();
+        while (it.next()) |value_ptr| {
+            pool.map.allocator.free(value_ptr.*);
+        }
+        pool.map.deinit();
+    }
+
+    pub fn insert(pool: *StringPool, string: []const u8) []const u8 {
+        const insert_result = pool.map.getOrPut(string) catch {
+            exit(1);
+        };
+
+        if (!insert_result.found_existing) {
+            const value = pool.map.allocator.alloc(u8, string.len) catch {
+                exit(1);
+            };
+            @memcpy(value, string);
+            insert_result.key_ptr.* = value;
+            insert_result.value_ptr.* = value;
+        }
+
+        return insert_result.value_ptr.*;
+    }
+
+    pub const Key = []const u8;
+    pub const Value = []u8;
+
+    pub const Context = struct {
+        pub fn hash(_: Context, key: Key) u64 {
+            const MurMur = std.hash.Murmur2_64;
+            return MurMur.hash(key);
+        }
+
+        pub fn eql(_: Context, k0: Key, k1: Key) bool {
+            return std.mem.eql(u8, k0, k1);
+        }
+    };
+
+    pub const HashMap = std.HashMap(Key, Value, Context, 80);
+};
 
 pub const Alignment = enum(u2) {
     BYTE = 0,
@@ -193,3 +243,5 @@ pub const Order = enum(u2) {
     Greater = 1,
     Equal = 2,
 };
+
+const std = @import("std");

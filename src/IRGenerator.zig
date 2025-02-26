@@ -12,7 +12,7 @@ ir: *IR,
 const IRGenerator = @This();
 
 pub fn init(ast: *Ast, ir: *IR) IRGenerator {
-    var labels = IRGenerator.LabelMap.init(Compiler.gpa);
+    var labels = IRGenerator.LabelMap.init(nostd.general_allocator);
     labels.resize(256) catch {
         Compiler.exit(1);
     };

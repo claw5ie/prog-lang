@@ -5,10 +5,10 @@ const IR = @This();
 
 pub fn init() IR {
     return .{
-        .instrs = ByteList.initCapacity(Compiler.gpa, 4 * 1024) catch {
+        .instrs = ByteList.initCapacity(nostd.general_allocator, 4 * 1024) catch {
             Compiler.exit(1);
         },
-        .globals = ByteList.initCapacity(Compiler.gpa, 4 * 1024) catch {
+        .globals = ByteList.initCapacity(nostd.general_allocator, 4 * 1024) catch {
             Compiler.exit(1);
         },
     };
@@ -69,8 +69,8 @@ pub fn read_from_file(filepath: [:0]const u8) IR {
     std.debug.assert(magic_number == Compiler.magic_number_value);
     const globals_byte_count = nostd.read_from_file_u64(fd);
     const instrs_byte_count = nostd.read_from_file_u64(fd);
-    var globals = ByteList.init(Compiler.gpa);
-    var instrs = ByteList.init(Compiler.gpa);
+    var globals = ByteList.init(nostd.general_allocator);
+    var instrs = ByteList.init(nostd.general_allocator);
 
     globals.resize(globals_byte_count) catch {
         Compiler.exit(1);

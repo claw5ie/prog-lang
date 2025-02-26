@@ -11,7 +11,7 @@ pub const STACK_SIZE = 4 * 1024 * 1024;
 const UNUSED_SPACE_SIZE = 1024;
 
 pub fn init(ir: *IR) Interpreter {
-    const stack = Compiler.gpa.alloc(u8, STACK_SIZE) catch {
+    const stack = nostd.general_allocator.alloc(u8, STACK_SIZE) catch {
         Compiler.exit(1);
     };
 
@@ -27,7 +27,7 @@ pub fn init(ir: *IR) Interpreter {
 }
 
 pub fn deinit(interp: *Interpreter) void {
-    Compiler.gpa.free(interp.stack);
+    nostd.general_allocator.free(interp.stack);
 }
 
 pub fn init_vtable(ir: *IR) Vtable {

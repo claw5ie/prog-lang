@@ -6,22 +6,21 @@ had_error: bool,
 
 const Compiler = @This();
 
+pub const StringPool = nostd.StringPool;
+
 pub const magic_number_string: []const u8 = "PROGLANG";
 pub const magic_number_value: u64 = magic_number_value: {
     const ptr: *const u64 = @alignCast(@ptrCast(magic_number_string.ptr));
     break :magic_number_value ptr.*;
 };
 
-pub var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
-pub var gpa = general_purpose_allocator.allocator();
-
 fn init() Compiler {
-    const source_code = Compiler.gpa.allocSentinel(u8, 0, 0) catch {
+    const source_code = nostd.general_allocator.allocSentinel(u8, 0, 0) catch {
         Compiler.exit(1);
     };
     return .{
-        .symbol_table = SymbolTable.init(gpa),
-        .string_pool = StringPool.init(gpa),
+        .symbol_table = SymbolTable.init(nostd.general_allocator),
+        .string_pool = StringPool.init(nostd.general_allocator),
         .filepath = &[0:0]u8{},
         .source_code = source_code,
         .had_error = false,
@@ -31,7 +30,7 @@ fn init() Compiler {
 fn deinit(c: *Compiler) void {
     c.symbol_table.deinit();
     c.string_pool.deinit();
-    gpa.free(c.source_code);
+    nostd.general_allocator.free(c.source_code);
 }
 
 pub fn compile() void {
@@ -55,9 +54,9 @@ pub fn compile() void {
                 }
             };
 
-            Compiler.gpa.free(c.source_code);
+            nostd.general_allocator.free(c.source_code);
             c.filepath = input_filepath;
-            c.source_code = nostd.read_entire_file(Compiler.gpa, input_filepath) catch {
+            c.source_code = nostd.read_entire_file(nostd.general_allocator, input_filepath) catch {
                 Compiler.eprint("error: failed to read from a file '{s}'\n", .{input_filepath});
                 Compiler.exit(1);
             };
@@ -305,55 +304,6 @@ pub const SymbolTable = struct {
 
         pub fn eql(_: Context, k0: Key, k1: Key) bool {
             return k0.scope == k1.scope and std.mem.eql(u8, k0.name, k1.name);
-        }
-    };
-
-    pub const HashMap = std.HashMap(Key, Value, Context, 80);
-};
-
-pub const StringPool = struct {
-    map: HashMap,
-
-    pub fn init(allocator: Allocator) StringPool {
-        return .{ .map = HashMap.init(allocator) };
-    }
-
-    pub fn deinit(pool: *StringPool) void {
-        var it = pool.map.valueIterator();
-        while (it.next()) |value_ptr| {
-            pool.map.allocator.free(value_ptr.*);
-        }
-        pool.map.deinit();
-    }
-
-    pub fn insert(pool: *StringPool, string: []const u8) []const u8 {
-        const insert_result = pool.map.getOrPut(string) catch {
-            exit(1);
-        };
-
-        if (!insert_result.found_existing) {
-            const value = pool.map.allocator.alloc(u8, string.len) catch {
-                exit(1);
-            };
-            @memcpy(value, string);
-            insert_result.key_ptr.* = value;
-            insert_result.value_ptr.* = value;
-        }
-
-        return insert_result.value_ptr.*;
-    }
-
-    pub const Key = []const u8;
-    pub const Value = []u8;
-
-    pub const Context = struct {
-        pub fn hash(_: Context, key: Key) u64 {
-            const MurMur = std.hash.Murmur2_64;
-            return MurMur.hash(key);
-        }
-
-        pub fn eql(_: Context, k0: Key, k1: Key) bool {
-            return std.mem.eql(u8, k0, k1);
         }
     };
 
