@@ -36,7 +36,7 @@ fn parse_top_level(p: *Parser) void {
                 p.ast.globals.append(node);
             },
             else => {
-                p.c.report_error(stmt.line_info, "expected symbol definition", .{});
+                p.c.report_error(stmt.position, "expected symbol definition", .{});
             },
         }
     }
@@ -44,7 +44,7 @@ fn parse_top_level(p: *Parser) void {
     std.debug.assert(p.current_scope == &Ast.global_scope);
 
     if (p.c.had_error) {
-        Compiler.exit(1);
+        exit(1);
     }
 }
 
@@ -59,7 +59,7 @@ fn parse_stmt(p: *Parser) *Ast.Stmt {
 
             const stmt = p.ast.create(Ast.Stmt);
             stmt.* = .{
-                .line_info = tok.line_info,
+                .position = tok.position,
                 .as = .{ .Print = expr },
             };
 
@@ -74,7 +74,7 @@ fn parse_stmt(p: *Parser) *Ast.Stmt {
 
             const stmt = p.ast.create(Ast.Stmt);
             stmt.* = .{
-                .line_info = tok.line_info,
+                .position = tok.position,
                 .as = .{ .Block = block },
             };
 
@@ -94,7 +94,7 @@ fn parse_stmt(p: *Parser) *Ast.Stmt {
 
             const stmt = p.ast.create(Ast.Stmt);
             stmt.* = .{
-                .line_info = tok.line_info,
+                .position = tok.position,
                 .as = .{ .If = .{
                     .condition = condition,
                     .true_branch = true_branch,
@@ -113,7 +113,7 @@ fn parse_stmt(p: *Parser) *Ast.Stmt {
 
             const stmt = p.ast.create(Ast.Stmt);
             stmt.* = .{
-                .line_info = tok.line_info,
+                .position = tok.position,
                 .as = .{ .While = .{
                     .condition = condition,
                     .body = body,
@@ -130,7 +130,7 @@ fn parse_stmt(p: *Parser) *Ast.Stmt {
 
             const stmt = p.ast.create(Ast.Stmt);
             stmt.* = .{
-                .line_info = tok.line_info,
+                .position = tok.position,
                 .as = .{ .Do_While = .{
                     .condition = condition,
                     .body = body,
@@ -144,7 +144,7 @@ fn parse_stmt(p: *Parser) *Ast.Stmt {
 
             const stmt = p.ast.create(Ast.Stmt);
             stmt.* = .{
-                .line_info = tok.line_info,
+                .position = tok.position,
                 .as = .Break,
             };
 
@@ -155,7 +155,7 @@ fn parse_stmt(p: *Parser) *Ast.Stmt {
 
             const stmt = p.ast.create(Ast.Stmt);
             stmt.* = .{
-                .line_info = tok.line_info,
+                .position = tok.position,
                 .as = .Continue,
             };
 
@@ -172,7 +172,7 @@ fn parse_stmt(p: *Parser) *Ast.Stmt {
 
             const stmt = p.ast.create(Ast.Stmt);
             stmt.* = .{
-                .line_info = tok.line_info,
+                .position = tok.position,
                 .as = .{ .Switch = .{
                     .condition = condition,
                     .cases = cases,
@@ -188,7 +188,7 @@ fn parse_stmt(p: *Parser) *Ast.Stmt {
 
                 const stmt = p.ast.create(Ast.Stmt);
                 stmt.* = .{
-                    .line_info = tok.line_info,
+                    .position = tok.position,
                     .as = .{ .Return = null },
                 };
 
@@ -200,7 +200,7 @@ fn parse_stmt(p: *Parser) *Ast.Stmt {
 
             const stmt = p.ast.create(Ast.Stmt);
             stmt.* = .{
-                .line_info = tok.line_info,
+                .position = tok.position,
                 .as = .{ .Return = expr },
             };
 
@@ -229,14 +229,14 @@ fn parse_stmt(p: *Parser) *Ast.Stmt {
 
                     const stmt = p.ast.create(Ast.Stmt);
                     stmt.* = .{
-                        .line_info = tok.line_info,
+                        .position = tok.position,
                         .as = .{ .Symbol = symbol },
                     };
                     return stmt;
                 },
                 .Expr => {
                     if (!result.attributes.is_empty()) {
-                        p.c.report_error(tok.line_info, "unexpected attributes", .{});
+                        p.c.report_error(tok.position, "unexpected attributes", .{});
                     }
 
                     const expr = result.pattern;
@@ -248,7 +248,7 @@ fn parse_stmt(p: *Parser) *Ast.Stmt {
 
                             const stmt = p.ast.create(Ast.Stmt);
                             stmt.* = .{
-                                .line_info = tok.line_info,
+                                .position = tok.position,
                                 .as = .{ .Assign = .{
                                     .lhs = expr,
                                     .rhs = rhs,
@@ -261,7 +261,7 @@ fn parse_stmt(p: *Parser) *Ast.Stmt {
                             p.lexer.expect(.Semicolon);
                             const stmt = p.ast.create(Ast.Stmt);
                             stmt.* = .{
-                                .line_info = tok.line_info,
+                                .position = tok.position,
                                 .as = .{ .Expr = expr },
                             };
                             return stmt;
@@ -355,8 +355,8 @@ fn parse_stmt_list(p: *Parser) Ast.StmtList {
 }
 
 fn try_parse_symbol(p: *Parser) ParseSymbolResult {
-    const line_info = p.lexer.grab_line_info();
-    var attributes = Compiler.Attributes{};
+    const position = p.lexer.grab_position();
+    var attributes = Token.Attributes{};
 
     if (p.lexer.peek() == .Attribute) {
         attributes = p.lexer.grab().as.Attribute;
@@ -364,8 +364,8 @@ fn try_parse_symbol(p: *Parser) ParseSymbolResult {
     }
 
     if (attributes.is_const and attributes.is_static) {
-        p.c.report_error(line_info, "'#const' and '#static' are mutually exclusive", .{});
-        Compiler.exit(1);
+        p.c.report_error(position, "'#const' and '#static' are mutually exclusive", .{});
+        exit(1);
     }
 
     var is_type = false;
@@ -403,8 +403,8 @@ fn try_parse_symbol(p: *Parser) ParseSymbolResult {
                             p.current_scope = old_current_scope;
                         },
                         else => {
-                            p.c.report_error(p.lexer.grab_line_info(), "unexpected procedure body", .{});
-                            Compiler.exit(1);
+                            p.c.report_error(p.lexer.grab_position(), "unexpected procedure body", .{});
+                            exit(1);
                         },
                     }
                 },
@@ -425,20 +425,20 @@ fn try_parse_symbol(p: *Parser) ParseSymbolResult {
                 tag = .Type;
             },
             .Symbol_Without_Type => {
-                p.c.report_error(pattern.line_info, "missing type after expression", .{});
-                Compiler.exit(1);
+                p.c.report_error(pattern.position, "missing type after expression", .{});
+                exit(1);
             },
             .Symbol_With_Type_And_Value => {
-                p.c.report_error(value.?.line_info, "value expression", .{});
-                Compiler.exit(1);
+                p.c.report_error(value.?.position, "value expression", .{});
+                exit(1);
             },
             .Procedure => {
-                p.c.report_error(value.?.line_info, "expected type definition, not procedure", .{});
-                Compiler.exit(1);
+                p.c.report_error(value.?.position, "expected type definition, not procedure", .{});
+                exit(1);
             },
             .Expr => {
-                p.c.report_error(pattern.line_info, "missing type after expression", .{});
-                Compiler.exit(1);
+                p.c.report_error(pattern.position, "missing type after expression", .{});
+                exit(1);
             },
             .Type => unreachable,
         }
@@ -506,17 +506,17 @@ fn insert_symbol(p: *Parser, result: ParseSymbolResult, how_to_parse: HowToParse
                     .name = Identifier.name,
                     .scope = Identifier.scope,
                 };
-                const insert_result = p.c.symbol_table.insert(key);
+                const insert_result = p.ast.symbol_table.insert(key);
 
                 if (insert_result.found_existing) {
-                    p.c.report_error(result.pattern.line_info, "symbol '{s}' is defined already", .{key.name});
-                    p.c.report_note(insert_result.value_ptr.*.line_info, "first defined here", .{});
-                    Compiler.exit(1);
+                    p.c.report_error(result.pattern.position, "symbol '{s}' is defined already", .{key.name});
+                    p.c.report_note(insert_result.value_ptr.*.position, "first defined here", .{});
+                    exit(1);
                 }
 
                 const symbol = p.ast.create(Ast.Symbol);
                 symbol.* = .{
-                    .line_info = result.pattern.line_info,
+                    .position = result.pattern.position,
                     .as = undefined,
                     .key = key,
                     .typechecking = .None,
@@ -527,8 +527,8 @@ fn insert_symbol(p: *Parser, result: ParseSymbolResult, how_to_parse: HowToParse
                 break :symbol symbol;
             },
             else => {
-                p.c.report_error(result.pattern.line_info, "expected identifier", .{});
-                Compiler.exit(1);
+                p.c.report_error(result.pattern.position, "expected identifier", .{});
+                exit(1);
             },
         }
     };
@@ -545,8 +545,8 @@ fn insert_symbol(p: *Parser, result: ParseSymbolResult, how_to_parse: HowToParse
 
                         switch (container_type) {
                             .Struct, .Union => {
-                                p.c.report_error(result.pattern.line_info, "expected type after pattern", .{});
-                                Compiler.exit(1);
+                                p.c.report_error(result.pattern.position, "expected type after pattern", .{});
+                                exit(1);
                             },
                             .Enum => break :symbol_tag .Enum_Field,
                         }
@@ -562,8 +562,8 @@ fn insert_symbol(p: *Parser, result: ParseSymbolResult, how_to_parse: HowToParse
                             .Struct => break :symbol_tag .Struct_Field,
                             .Union => break :symbol_tag .Union_Field,
                             .Enum => {
-                                p.c.report_error(result.typ.?.line_info, "unexpected type", .{});
-                                Compiler.exit(1);
+                                p.c.report_error(result.typ.?.position, "unexpected type", .{});
+                                exit(1);
                             },
                         }
                     },
@@ -571,8 +571,8 @@ fn insert_symbol(p: *Parser, result: ParseSymbolResult, how_to_parse: HowToParse
                     .Expr => {
                         switch (container_type) {
                             .Struct, .Union => {
-                                p.c.report_error(result.pattern.line_info, "expected type after pattern", .{});
-                                Compiler.exit(1);
+                                p.c.report_error(result.pattern.position, "expected type after pattern", .{});
+                                exit(1);
                             },
                             .Enum => break :symbol_tag .Enum_Field,
                         }
@@ -585,20 +585,20 @@ fn insert_symbol(p: *Parser, result: ParseSymbolResult, how_to_parse: HowToParse
                     .Symbol_With_Type_And_Value,
                     => break :symbol_tag .Parameter,
                     .Type => {
-                        p.c.report_error(result.pattern.line_info, "unexpected type", .{});
-                        Compiler.exit(1);
+                        p.c.report_error(result.pattern.position, "unexpected type", .{});
+                        exit(1);
                     },
                     .Symbol_Without_Type => {
-                        p.c.report_error(result.pattern.line_info, "expected type after pattern", .{});
-                        Compiler.exit(1);
+                        p.c.report_error(result.pattern.position, "expected type after pattern", .{});
+                        exit(1);
                     },
                     .Procedure => {
-                        p.c.report_error(result.pattern.line_info, "unexpected procedure", .{});
-                        Compiler.exit(1);
+                        p.c.report_error(result.pattern.position, "unexpected procedure", .{});
+                        exit(1);
                     },
                     .Expr => {
-                        p.c.report_error(result.pattern.line_info, "unexpected expression", .{});
-                        Compiler.exit(1);
+                        p.c.report_error(result.pattern.position, "unexpected expression", .{});
+                        exit(1);
                     },
                 }
             },
@@ -634,8 +634,8 @@ fn insert_symbol(p: *Parser, result: ParseSymbolResult, how_to_parse: HowToParse
             },
             .Parameter => {
                 if (!symbol.attributes.is_empty()) {
-                    p.c.report_error(result.pattern.line_info, "unexpected attributes for parameter", .{});
-                    Compiler.exit(1);
+                    p.c.report_error(result.pattern.position, "unexpected attributes for parameter", .{});
+                    exit(1);
                 }
 
                 break :as .{ .Parameter = .{
@@ -646,8 +646,8 @@ fn insert_symbol(p: *Parser, result: ParseSymbolResult, how_to_parse: HowToParse
             },
             .Procedure => {
                 if (symbol.attributes.is_static) {
-                    p.c.report_error(result.pattern.line_info, "procedures can't be static", .{});
-                    Compiler.exit(1);
+                    p.c.report_error(result.pattern.position, "procedures can't be static", .{});
+                    exit(1);
                 }
 
                 symbol.attributes.is_const = true;
@@ -684,8 +684,8 @@ fn insert_symbol(p: *Parser, result: ParseSymbolResult, how_to_parse: HowToParse
                 p.lexer.expect(.Semicolon);
 
                 if (!symbol.attributes.is_empty()) {
-                    p.c.report_error(result.pattern.line_info, "unexpected attributes for a type", .{});
-                    Compiler.exit(1);
+                    p.c.report_error(result.pattern.position, "unexpected attributes for a type", .{});
+                    exit(1);
                 }
 
                 break :as .{ .Type = result.typ.? };
@@ -712,15 +712,15 @@ fn parse_expr_prec(p: *Parser, min_prec: i32) *Ast.Expr {
 
     while (curr_prec < prev_prec and curr_prec >= min_prec) {
         while (true) {
-            const line_info = p.lexer.grab_line_info();
+            const position = p.lexer.grab_position();
             p.lexer.advance();
 
             const rhs = parse_expr_prec(p, curr_prec + 1);
             const new_lhs = p.ast.create(Ast.Expr);
             new_lhs.* = .{
-                .line_info = lhs.line_info,
+                .position = lhs.position,
                 .as = .{ .Binary_Op = .{
-                    .line_info = line_info,
+                    .position = position,
                     .lhs = lhs,
                     .rhs = rhs,
                     .tag = token_tag_to_binary_op_tag(op),
@@ -752,17 +752,17 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                 const subsubexpr = parse_expr_highest_prec(p);
                 const subexpr = p.ast.create(Ast.Expr);
                 subexpr.* = .{
-                    .line_info = tok.line_info,
+                    .position = tok.position,
                     .as = .{ .Ref = subsubexpr },
                     .typ = Ast.void_type,
                     .flags = .{},
                     .typechecking = .None,
                 };
-                subexpr.line_info.column += 1;
-                subexpr.line_info.offset += 1;
+                subexpr.position.column += 1;
+                subexpr.position.offset += 1;
                 const expr = p.ast.create(Ast.Expr);
                 expr.* = .{
-                    .line_info = tok.line_info,
+                    .position = tok.position,
                     .as = .{ .Ref = subexpr },
                     .typ = Ast.void_type,
                     .flags = .{},
@@ -774,7 +774,7 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                 const subexpr = parse_expr_highest_prec(p);
                 const expr = p.ast.create(Ast.Expr);
                 expr.* = .{
-                    .line_info = subexpr.line_info,
+                    .position = subexpr.position,
                     .as = .{ .Unary_Op = .{
                         .subexpr = subexpr,
                         .tag = token_tag_to_unary_op_tag(tok.as),
@@ -789,7 +789,7 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                 const subexpr = parse_expr_highest_prec(p);
                 const expr = p.ast.create(Ast.Expr);
                 expr.* = .{
-                    .line_info = subexpr.line_info,
+                    .position = subexpr.position,
                     .as = .{ .Ref = subexpr },
                     .typ = Ast.void_type,
                     .flags = .{},
@@ -799,7 +799,7 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
             },
             .Open_Paren => {
                 const expr = parse_expr(p);
-                expr.line_info = tok.line_info;
+                expr.position = tok.position;
                 p.lexer.expect(.Close_Paren);
                 break :base expr;
             },
@@ -814,7 +814,7 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
 
                 const expr = p.ast.create(Ast.Expr);
                 expr.* = .{
-                    .line_info = tok.line_info,
+                    .position = tok.position,
                     .as = .{ .If = .{
                         .condition = condition,
                         .true_branch = true_branch,
@@ -830,7 +830,7 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
             .Boolean => |value| {
                 const expr = p.ast.create(Ast.Expr);
                 expr.* = .{
-                    .line_info = tok.line_info,
+                    .position = tok.position,
                     .as = .{ .Boolean = value },
                     .typ = Ast.bool_type,
                     .flags = .{},
@@ -841,7 +841,7 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
             .Null => {
                 const expr = p.ast.create(Ast.Expr);
                 expr.* = .{
-                    .line_info = tok.line_info,
+                    .position = tok.position,
                     .as = .Null,
                     .typ = Ast.void_pointer_type,
                     .flags = .{},
@@ -852,7 +852,7 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
             .Identifier => |name| {
                 const expr = p.ast.create(Ast.Expr);
                 expr.* = .{
-                    .line_info = tok.line_info,
+                    .position = tok.position,
                     .as = .{ .Identifier = .{
                         .name = name,
                         .scope = p.current_scope,
@@ -867,7 +867,7 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                 const typ = Ast.integer_type_from_u64(value);
                 const expr = p.ast.create(Ast.Expr);
                 expr.* = .{
-                    .line_info = tok.line_info,
+                    .position = tok.position,
                     .as = .{ .Integer = value },
                     .typ = typ,
                     .flags = .{},
@@ -883,7 +883,7 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                     1 => {
                         const expr = p.ast.create(Ast.Expr);
                         expr.* = .{
-                            .line_info = tok.line_info,
+                            .position = tok.position,
                             .as = .{ .Byte_Size_Of = exprs[0] },
                             .typ = Ast.void_type,
                             .flags = .{},
@@ -892,8 +892,8 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                         break :base expr;
                     },
                     else => {
-                        p.c.report_error(tok.line_info, "expected 1 argument, but got {}", .{count});
-                        Compiler.exit(1);
+                        p.c.report_error(tok.position, "expected 1 argument, but got {}", .{count});
+                        exit(1);
                     },
                 }
             },
@@ -905,7 +905,7 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                     1 => {
                         const expr = p.ast.create(Ast.Expr);
                         expr.* = .{
-                            .line_info = tok.line_info,
+                            .position = tok.position,
                             .as = .{ .Alignment_Of = exprs[0] },
                             .typ = Ast.void_type,
                             .flags = .{},
@@ -914,8 +914,8 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                         break :base expr;
                     },
                     else => {
-                        p.c.report_error(tok.line_info, "expected 1 argument, but got {}", .{count});
-                        Compiler.exit(1);
+                        p.c.report_error(tok.position, "expected 1 argument, but got {}", .{count});
+                        exit(1);
                     },
                 }
             },
@@ -928,7 +928,7 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                         const typ = p.ast.expr_to_type(exprs[0]);
                         const expr = p.ast.create(Ast.Expr);
                         expr.* = .{
-                            .line_info = tok.line_info,
+                            .position = tok.position,
                             .as = .{ .As = .{
                                 .typ = typ,
                                 .expr = exprs[1],
@@ -940,8 +940,8 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                         break :base expr;
                     },
                     else => {
-                        p.c.report_error(tok.line_info, "expected 2 arguments, but got {}", .{count});
-                        Compiler.exit(1);
+                        p.c.report_error(tok.position, "expected 2 arguments, but got {}", .{count});
+                        exit(1);
                     },
                 }
             },
@@ -954,7 +954,7 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                         const typ = p.ast.expr_to_type(exprs[0]);
                         const expr = p.ast.create(Ast.Expr);
                         expr.* = .{
-                            .line_info = tok.line_info,
+                            .position = tok.position,
                             .as = .{ .Cast = .{
                                 .typ = typ,
                                 .expr = exprs[1],
@@ -966,8 +966,8 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                         break :base expr;
                     },
                     else => {
-                        p.c.report_error(tok.line_info, "expected 2 arguments, but got {}", .{count});
-                        Compiler.exit(1);
+                        p.c.report_error(tok.position, "expected 2 arguments, but got {}", .{count});
+                        exit(1);
                     },
                 }
             },
@@ -995,9 +995,9 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                 };
                 const expr = p.ast.create(Ast.Expr);
                 expr.* = .{
-                    .line_info = tok.line_info,
+                    .position = tok.position,
                     .as = .{ .Type = .{
-                        .line_info = tok.line_info,
+                        .position = tok.position,
                         .data = data,
                         .symbol = null,
                     } },
@@ -1038,9 +1038,9 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                 };
                 const expr = p.ast.create(Ast.Expr);
                 expr.* = .{
-                    .line_info = tok.line_info,
+                    .position = tok.position,
                     .as = .{ .Type = .{
-                        .line_info = tok.line_info,
+                        .position = tok.position,
                         .data = data,
                         .symbol = null,
                     } },
@@ -1082,9 +1082,9 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                 };
                 const expr = p.ast.create(Ast.Expr);
                 expr.* = .{
-                    .line_info = tok.line_info,
+                    .position = tok.position,
                     .as = .{ .Type = .{
-                        .line_info = tok.line_info,
+                        .position = tok.position,
                         .data = data,
                         .symbol = null,
                     } },
@@ -1123,9 +1123,9 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                 };
                 const expr = p.ast.create(Ast.Expr);
                 expr.* = .{
-                    .line_info = tok.line_info,
+                    .position = tok.position,
                     .as = .{ .Type = .{
-                        .line_info = tok.line_info,
+                        .position = tok.position,
                         .data = data,
                         .symbol = null,
                     } },
@@ -1139,9 +1139,9 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                 const typ = Ast.lookup_integer_type(Integer_Type.bits, Integer_Type.is_signed);
                 const expr = p.ast.create(Ast.Expr);
                 expr.* = .{
-                    .line_info = tok.line_info,
+                    .position = tok.position,
                     .as = .{ .Type = .{
-                        .line_info = tok.line_info,
+                        .position = tok.position,
                         .data = typ.data,
                         .symbol = null,
                     } },
@@ -1154,9 +1154,9 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
             .Bool_Type => {
                 const expr = p.ast.create(Ast.Expr);
                 expr.* = .{
-                    .line_info = tok.line_info,
+                    .position = tok.position,
                     .as = .{ .Type = .{
-                        .line_info = tok.line_info,
+                        .position = tok.position,
                         .data = Ast.bool_type.data,
                         .symbol = null,
                     } },
@@ -1169,9 +1169,9 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
             .Void_Type => {
                 const expr = p.ast.create(Ast.Expr);
                 expr.* = .{
-                    .line_info = tok.line_info,
+                    .position = tok.position,
                     .as = .{ .Type = .{
-                        .line_info = tok.line_info,
+                        .position = tok.position,
                         .data = Ast.void_type.data,
                         .symbol = null,
                     } },
@@ -1195,9 +1195,9 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                         };
                         const expr = p.ast.create(Ast.Expr);
                         expr.* = .{
-                            .line_info = tok.line_info,
+                            .position = tok.position,
                             .as = .{ .Type = .{
-                                .line_info = tok.line_info,
+                                .position = tok.position,
                                 .data = data,
                                 .symbol = null,
                             } },
@@ -1208,14 +1208,14 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                         break :base expr;
                     },
                     else => {
-                        p.c.report_error(tok.line_info, "expected 1 arguments, but got {}", .{count});
-                        Compiler.exit(1);
+                        p.c.report_error(tok.position, "expected 1 arguments, but got {}", .{count});
+                        exit(1);
                     },
                 }
             },
             else => {
-                p.c.report_error(tok.line_info, "token doesn't start an expression or a type", .{});
-                Compiler.exit(1);
+                p.c.report_error(tok.position, "token doesn't start an expression or a type", .{});
+                exit(1);
             },
         }
     };
@@ -1227,7 +1227,7 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
 
                 const new_base = p.ast.create(Ast.Expr);
                 new_base.* = .{
-                    .line_info = base.line_info,
+                    .position = base.position,
                     .as = .{ .Call = .{
                         .subexpr = base,
                         .args = args,
@@ -1245,7 +1245,7 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
 
                 const new_base = p.ast.create(Ast.Expr);
                 new_base.* = .{
-                    .line_info = base.line_info,
+                    .position = base.position,
                     .as = .{ .Subscript = .{
                         .subexpr = base,
                         .index = index,
@@ -1261,7 +1261,7 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
 
                 const new_base = p.ast.create(Ast.Expr);
                 new_base.* = .{
-                    .line_info = base.line_info,
+                    .position = base.position,
                     .as = .{ .Deref = base },
                     .typ = Ast.void_type,
                     .flags = .{},
@@ -1277,7 +1277,7 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
 
                 const field = p.ast.create(Ast.Expr);
                 field.* = .{
-                    .line_info = id.line_info,
+                    .position = id.position,
                     .as = .{ .Identifier = .{
                         .name = id.as.Identifier,
                         .scope = p.current_scope,
@@ -1288,7 +1288,7 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                 };
                 const new_base = p.ast.create(Ast.Expr);
                 new_base.* = .{
-                    .line_info = base.line_info,
+                    .position = base.position,
                     .as = .{ .Field = .{
                         .subexpr = base,
                         .field = field,
@@ -1427,6 +1427,8 @@ fn token_tag_to_unary_op_tag(op: Token.Tag) Ast.Expr.UnaryOp.Tag {
     };
 }
 
+const exit = nostd.exit;
+
 const std = @import("std");
 const nostd = @import("nostd.zig");
 const Compiler = @import("Compiler.zig");
@@ -1436,7 +1438,7 @@ const Ast = @import("Ast.zig");
 const Token = Lexer.Token;
 
 const ParseSymbolResult = struct {
-    attributes: Compiler.Attributes,
+    attributes: Token.Attributes,
     pattern: *Ast.Expr,
     typ: ?*Ast.Type,
     value: ?*Ast.Expr,

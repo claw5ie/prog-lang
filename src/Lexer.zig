@@ -1,6 +1,6 @@
 buffer: [TOKEN_BUFFER_COUNT]Token = [1]Token{
     .{
-        .line_info = .{
+        .position = .{
             .line = 1,
             .column = 1,
             .offset = 0,
@@ -10,7 +10,7 @@ buffer: [TOKEN_BUFFER_COUNT]Token = [1]Token{
 } ** TOKEN_BUFFER_COUNT,
 token_start: u8 = 0,
 token_count: u8 = 0,
-line_info: LineInfo = .{
+position: FilePosition = .{
     .line = 1,
     .column = 1,
     .offset = 0,
@@ -35,8 +35,8 @@ pub fn grab(l: *Lexer) Token {
     return grab_by_ptr(l, 0).*;
 }
 
-pub fn grab_line_info(l: *Lexer) LineInfo {
-    return grab_by_ptr(l, 0).line_info;
+pub fn grab_position(l: *Lexer) FilePosition {
+    return grab_by_ptr(l, 0).position;
 }
 
 pub fn peek_ahead(l: *Lexer, index: u8) Token.Tag {
@@ -60,8 +60,8 @@ pub fn advance(l: *Lexer) void {
 pub fn expect(l: *Lexer, expected: Token.Tag) void {
     if (peek(l) != expected) {
         const tok = grab(l);
-        l.c.report_error(tok.line_info, "expected {s}", .{token_tag_to_text(expected)});
-        Compiler.exit(1);
+        l.c.report_error(tok.position, "expected {s}", .{token_tag_to_text(expected)});
+        exit(1);
     }
     advance(l);
 }
@@ -74,12 +74,12 @@ fn grab_by_ptr(l: *Lexer, index: u8) *Token {
     return &l.buffer[(l.token_start + index) % TOKEN_BUFFER_COUNT];
 }
 
-fn advance_line_info(l: *Lexer) void {
-    l.line_info.column += 1;
-    l.line_info.offset += 1;
-    if (l.c.source_code[l.line_info.offset - 1] == '\n') {
-        l.line_info.line += 1;
-        l.line_info.column = 1;
+fn advance_position(l: *Lexer) void {
+    l.position.column += 1;
+    l.position.offset += 1;
+    if (l.c.source_code[l.position.offset - 1] == '\n') {
+        l.position.line += 1;
+        l.position.column = 1;
     }
 }
 
@@ -95,12 +95,12 @@ fn parse_token(l: *Lexer) Token {
         pub fn _advance(s: *State) void {
             s.at += 1;
             s.ch = s.src[s.at];
-            advance_line_info(s.l);
+            advance_position(s.l);
         }
     };
 
     var s: State = s: {
-        const src = l.c.source_code[l.line_info.offset..];
+        const src = l.c.source_code[l.position.offset..];
         break :s .{
             .src = src,
             .at = 0,
@@ -127,7 +127,7 @@ fn parse_token(l: *Lexer) Token {
     s.at = 0;
 
     var tok = Token{
-        .line_info = l.line_info,
+        .position = l.position,
         .as = .End_Of_File,
     };
 
@@ -141,8 +141,8 @@ fn parse_token(l: *Lexer) Token {
 
         const text = s.src[0..s.at];
         const value = std.fmt.parseInt(u64, text, 10) catch {
-            l.c.report_error(tok.line_info, "integer literal '{s}' is too big (> 64 bits).", .{text});
-            Compiler.exit(1);
+            l.c.report_error(tok.position, "integer literal '{s}' is too big (> 64 bits).", .{text});
+            exit(1);
         };
 
         tok.as = .{ .Integer = value };
@@ -258,12 +258,12 @@ fn parse_token(l: *Lexer) Token {
                 }
             }
 
-            l.c.report_error(tok.line_info, "invalid keyword '{s}'\n", .{text});
-            Compiler.exit(1);
+            l.c.report_error(tok.position, "invalid keyword '{s}'\n", .{text});
+            exit(1);
         };
     } else if (!is_print(s.ch)) {
-        l.c.report_error(tok.line_info, "non-printable character with code '{}'\n", .{s.ch});
-        Compiler.exit(1);
+        l.c.report_error(tok.position, "non-printable character with code '{}'\n", .{s.ch});
+        exit(1);
     } else {
         const Symbol = struct {
             text: []const u8,
@@ -308,14 +308,14 @@ fn parse_token(l: *Lexer) Token {
                 if (nostd.is_prefix(symbol.text, s.src)) {
                     const count: u32 = @intCast(symbol.text.len);
                     s.at += count;
-                    l.line_info.column += count;
-                    l.line_info.offset += count;
+                    l.position.column += count;
+                    l.position.offset += count;
                     break :as symbol.as;
                 }
             }
 
-            l.c.report_error(tok.line_info, "unrecognized character '{c}'\n", .{s.ch});
-            Compiler.exit(1);
+            l.c.report_error(tok.position, "unrecognized character '{c}'\n", .{s.ch});
+            exit(1);
         };
     }
 
@@ -428,15 +428,16 @@ const is_alpha = std.ascii.isAlphabetic;
 const is_alnum = std.ascii.isAlphanumeric;
 const is_print = std.ascii.isPrint;
 
+const exit = nostd.exit;
+
 const std = @import("std");
 const nostd = @import("nostd.zig");
 const Compiler = @import("Compiler.zig");
 
-const LineInfo = Compiler.LineInfo;
-const Attributes = Compiler.Attributes;
+const FilePosition = Compiler.FilePosition;
 
 pub const Token = struct {
-    line_info: LineInfo,
+    position: FilePosition,
     as: As,
 
     pub const Tag = enum {
@@ -574,5 +575,22 @@ pub const Token = struct {
     pub const IntegerType = struct {
         bits: u8,
         is_signed: bool,
+    };
+
+    pub const Attributes = packed struct {
+        is_const: bool = false,
+        is_static: bool = false,
+        is_global: bool = false,
+
+        pub fn is_empty(attr: Attributes) bool {
+            const ptr: *const u8 = @ptrCast(&attr);
+            return ptr.* == 0;
+        }
+
+        pub fn combine(self: *Attributes, other: Attributes) void {
+            const d: *u8 = @ptrCast(self);
+            const s: *const u8 = @ptrCast(&other);
+            d.* |= s.*;
+        }
     };
 };

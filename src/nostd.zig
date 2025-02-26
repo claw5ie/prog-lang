@@ -25,8 +25,12 @@ pub fn eprint(comptime format: []const u8, args: anytype) void {
     };
 }
 
-pub fn exit_error(comptime format: []const u8, args: anytype) noreturn {
+pub fn report_error(comptime format: []const u8, args: anytype) void {
     eprint("error: " ++ format ++ "\n", args);
+}
+
+pub fn report_fatal_error(comptime format: []const u8, args: anytype) noreturn {
+    report_error(format, args);
     exit(1);
 }
 
@@ -45,13 +49,13 @@ pub fn read_entire_file(allocator: Allocator, filepath: []const u8) File.OpenErr
     const file = try std.fs.cwd().openFile(filepath, .{});
     defer file.close();
     const stats = file.stat() catch {
-        exit_error("{s}: failed to stat the file", .{filepath});
+        report_fatal_error("{s}: failed to stat the file", .{filepath});
     };
     const text = allocator.allocSentinel(u8, stats.size, 0) catch {
-        exit_error("{s}: failed to allocate {} bytes", .{ filepath, stats.size + 1 });
+        report_fatal_error("{s}: failed to allocate {} bytes", .{ filepath, stats.size + 1 });
     };
     const bytes_read = file.read(text) catch {
-        exit_error("{s}: failed to read {} bytes", .{ filepath, stats.size });
+        report_fatal_error("{s}: failed to read {} bytes", .{ filepath, stats.size });
     };
     std.debug.assert(bytes_read == text.len);
 
@@ -60,7 +64,7 @@ pub fn read_entire_file(allocator: Allocator, filepath: []const u8) File.OpenErr
 
 pub fn read_from_file(file: File, buffer: []u8) void {
     const bytes_read = file.read(buffer) catch {
-        exit_error("failed to read {} bytes", .{buffer.len});
+        report_fatal_error("failed to read {} bytes", .{buffer.len});
     };
     std.debug.assert(bytes_read == buffer.len);
 }
@@ -76,7 +80,7 @@ pub fn read_u64_from_file(file: File) u64 {
 
 pub fn write_to_file(file: File, bytes: []const u8) void {
     const bytes_written = file.write(bytes) catch {
-        exit_error("failed to write {} bytes", .{bytes.len});
+        report_fatal_error("failed to write {} bytes", .{bytes.len});
     };
     std.debug.assert(bytes_written == bytes.len);
 }
@@ -245,6 +249,12 @@ pub const Alignment = enum(u2) {
     pub inline fn to_byte_size(alignment: Alignment) u8 {
         return @as(u8, 1) << @intFromEnum(alignment);
     }
+};
+
+pub const FilePosition = struct {
+    line: u32,
+    column: u32,
+    offset: usize,
 };
 
 const std = @import("std");

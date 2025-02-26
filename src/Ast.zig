@@ -2,6 +2,7 @@ globals: SymbolList,
 local_procedures: SymbolList,
 namespaces: TypeList,
 main: ?*Symbol,
+symbol_table: SymbolTable,
 arena: ArenaAllocator,
 c: *Compiler,
 
@@ -55,17 +56,17 @@ pub fn init(c: *Compiler) Ast {
         };
 
         pub var s_void_pointer_type = Type{
-            .line_info = .{ .line = 1, .column = 1, .offset = 0 },
+            .position = .{ .line = 1, .column = 1, .offset = 0 },
             .data = &s_void_pointer_type_data,
             .symbol = null,
         };
         pub var s_bool_type = Type{
-            .line_info = .{ .line = 1, .column = 1, .offset = 0 },
+            .position = .{ .line = 1, .column = 1, .offset = 0 },
             .data = &s_bool_type_data,
             .symbol = null,
         };
         pub var s_void_type = Type{
-            .line_info = .{ .line = 1, .column = 1, .offset = 0 },
+            .position = .{ .line = 1, .column = 1, .offset = 0 },
             .data = &s_void_type_data,
             .symbol = null,
         };
@@ -80,6 +81,7 @@ pub fn init(c: *Compiler) Ast {
         .local_procedures = .{},
         .namespaces = .{},
         .main = null,
+        .symbol_table = SymbolTable.init(nostd.general_allocator),
         .arena = ArenaAllocator.init(std.heap.page_allocator),
         .c = c,
     };
@@ -93,11 +95,12 @@ pub fn deinit(ast: *Ast) void {
             nostd.general_allocator.destroy(typ);
         }
     }
+    ast.symbol_table.deinit();
 }
 
 pub fn create(ast: *Ast, comptime T: type) *T {
     return ast.arena.allocator().create(T) catch {
-        Compiler.exit(1);
+        exit(1);
     };
 }
 
@@ -113,7 +116,7 @@ pub fn lookup_integer_type(bits: u8, is_signed: bool) *Type {
     if (integer_types[index] == null) {
         const byte_size = @max(1, nostd.round_to_next_pow2(bits) / 8);
         const data = nostd.general_allocator.create(Type.SharedData) catch {
-            Compiler.exit(1);
+            exit(1);
         };
         data.* = .{
             .as = .{ .Integer = .{
@@ -131,10 +134,10 @@ pub fn lookup_integer_type(bits: u8, is_signed: bool) *Type {
             .stages = default_stages_done,
         };
         const typ = nostd.general_allocator.create(Type) catch {
-            Compiler.exit(1);
+            exit(1);
         };
         typ.* = .{
-            .line_info = .{ .line = 1, .column = 1, .offset = 0 },
+            .position = .{ .line = 1, .column = 1, .offset = 0 },
             .data = data,
             .symbol = null,
         };
@@ -143,6 +146,49 @@ pub fn lookup_integer_type(bits: u8, is_signed: bool) *Type {
     }
 
     return integer_types[index].?;
+}
+
+pub fn find_symbol_in_scope(ast: *Ast, key: Symbol.Key, skip_local_variables: bool, offset: usize) ?*Ast.Symbol {
+    const has_symbol = ast.symbol_table.find(key);
+
+    if (has_symbol) |symbol| {
+        switch (symbol.as) {
+            .Variable, .Parameter => {
+                if (symbol.attributes.is_const or symbol.attributes.is_static or (symbol.position.offset < offset and !skip_local_variables)) {
+                    return symbol;
+                }
+            },
+            .Procedure,
+            .Struct_Field,
+            .Union_Field,
+            .Enum_Field,
+            .Type,
+            => return symbol,
+        }
+    }
+
+    return null;
+}
+
+pub fn find_symbol(ast: *Ast, key: Ast.Symbol.Key, offset: usize) ?*Ast.Symbol {
+    return find_symbol_with_scope_bound(ast, key, &Ast.global_scope, offset);
+}
+
+pub fn find_symbol_with_scope_bound(ast: *Ast, key: Ast.Symbol.Key, scope_bound: *Ast.Scope, offset: usize) ?*Ast.Symbol {
+    var skip_local_variables = false;
+    var k = key;
+    while (true) {
+        const has_symbol = find_symbol_in_scope(ast, k, skip_local_variables, offset);
+        if (has_symbol) |symbol| {
+            return symbol;
+        } else if (k.scope.parent) |parent| {
+            skip_local_variables = skip_local_variables or k.scope == scope_bound;
+            k.scope = parent;
+        } else {
+            break;
+        }
+    }
+    return null;
 }
 
 // Assume 'expr' is heap allocated and can be reused.
@@ -159,7 +205,7 @@ pub fn expr_to_type(ast: *Ast, expr: *Expr) *Type {
                 .stages = default_stages_none,
             };
             expr.as = .{ .Type = .{
-                .line_info = expr.line_info,
+                .position = expr.position,
                 .data = data,
                 .symbol = null,
             } };
@@ -180,7 +226,7 @@ pub fn expr_to_type(ast: *Ast, expr: *Expr) *Type {
                 .stages = default_stages_none,
             };
             expr.as = .{ .Type = .{
-                .line_info = expr.line_info,
+                .position = expr.position,
                 .data = data,
                 .symbol = null,
             } };
@@ -202,7 +248,7 @@ pub fn expr_to_type(ast: *Ast, expr: *Expr) *Type {
                 .stages = default_stages_none,
             };
             expr.as = .{ .Type = .{
-                .line_info = expr.line_info,
+                .position = expr.position,
                 .data = data,
                 .symbol = null,
             } };
@@ -224,7 +270,7 @@ pub fn expr_to_type(ast: *Ast, expr: *Expr) *Type {
                 .stages = default_stages_none,
             };
             expr.as = .{ .Type = .{
-                .line_info = expr.line_info,
+                .position = expr.position,
                 .data = data,
                 .symbol = null,
             } };
@@ -232,19 +278,23 @@ pub fn expr_to_type(ast: *Ast, expr: *Expr) *Type {
             return &expr.as.Type;
         },
         else => {
-            ast.c.report_error(expr.line_info, "expected expression, not a type", .{});
-            Compiler.exit(1);
+            ast.c.report_error(expr.position, "expected expression, not a type", .{});
+            exit(1);
         },
     }
 }
+
+const exit = nostd.exit;
 
 const std = @import("std");
 const nostd = @import("nostd.zig");
 const Compiler = @import("Compiler.zig");
 const IR = @import("IR.zig");
 
+pub const Allocator = std.mem.Allocator;
+
 const ArenaAllocator = std.heap.ArenaAllocator;
-const LineInfo = Compiler.LineInfo;
+const FilePosition = Compiler.FilePosition;
 const Stage = Compiler.Stage;
 
 pub const Alignment = nostd.Alignment;
@@ -254,7 +304,7 @@ pub const Scope = struct {
 };
 
 pub const Type = struct {
-    line_info: LineInfo,
+    position: FilePosition,
     data: *SharedData,
     symbol: ?*Symbol,
 
@@ -514,7 +564,7 @@ pub const Type = struct {
 pub const TypeList = std.DoublyLinkedList(*Type);
 
 pub const Expr = struct {
-    line_info: LineInfo,
+    position: FilePosition,
     as: As,
     typ: *Type,
     flags: Flags,
@@ -543,7 +593,7 @@ pub const Expr = struct {
     };
 
     pub const BinaryOp = struct {
-        line_info: LineInfo,
+        position: FilePosition,
         lhs: *Expr,
         rhs: *Expr,
         tag: Tag,
@@ -630,7 +680,7 @@ pub const ExprListNode = union(enum) {
 pub const ExprList = std.DoublyLinkedList(*ExprListNode);
 
 pub const Stmt = struct {
-    line_info: LineInfo,
+    position: FilePosition,
     as: As,
 
     pub const As = union(enum) {
@@ -684,7 +734,7 @@ pub const Stmt = struct {
 pub const StmtList = std.DoublyLinkedList(*Stmt);
 
 pub const Symbol = struct {
-    line_info: LineInfo,
+    position: FilePosition,
     as: As,
     key: Key,
     typechecking: Stage,
@@ -749,7 +799,51 @@ pub const Symbol = struct {
         scope: *Scope,
     };
 
-    pub const Attributes = Compiler.Attributes;
+    pub const Attributes = @import("Lexer.zig").Token.Attributes;
 };
 
 pub const SymbolList = std.DoublyLinkedList(*Symbol);
+
+pub const SymbolTable = struct {
+    map: HashMap,
+
+    pub inline fn init(allocator: Allocator) SymbolTable {
+        return .{ .map = HashMap.init(allocator) };
+    }
+
+    pub fn deinit(table: *SymbolTable) void {
+        table.map.deinit();
+    }
+
+    pub fn insert(table: *SymbolTable, key: Key) InsertResult {
+        return table.map.getOrPut(key) catch {
+            nostd.exit(1);
+        };
+    }
+
+    pub inline fn find(table: *SymbolTable, key: Key) ?Value {
+        return table.map.get(key);
+    }
+
+    pub const Key = Ast.Symbol.Key;
+    pub const Value = *Ast.Symbol;
+
+    pub const InsertResult = HashMap.GetOrPutResult;
+
+    pub const Context = struct {
+        pub fn hash(_: Context, key: Key) u64 {
+            const MurMur = std.hash.Murmur2_64;
+
+            const h0 = MurMur.hash(key.name);
+            const h1 = MurMur.hashUint64(@intFromPtr(key.scope));
+
+            return h0 +% 33 *% h1;
+        }
+
+        pub fn eql(_: Context, k0: Key, k1: Key) bool {
+            return k0.scope == k1.scope and std.mem.eql(u8, k0.name, k1.name);
+        }
+    };
+
+    pub const HashMap = std.HashMap(Key, Value, Context, 80);
+};

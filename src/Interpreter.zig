@@ -12,7 +12,7 @@ const UNUSED_SPACE_SIZE = 1024;
 
 pub fn init(ir: *IR) Interpreter {
     const stack = nostd.general_allocator.alloc(u8, STACK_SIZE) catch {
-        Compiler.exit(1);
+        exit(1);
     };
 
     const vtable = init_vtable(ir);
@@ -60,8 +60,7 @@ fn interpret_top_level(interp: *Interpreter) void {
     while (true) {
         const segment, const tag = segment_from_vtable(interp, ip);
         if (tag != .Instructions) {
-            Compiler.eprint("error: can't read instructions from {s} section\n", .{tag.to_string()});
-            Compiler.exit(1);
+            report_fatal_error("can't read instructions from {s} section", .{tag.to_string()});
         }
         const instr, const count = IRD.decode_instr(segment);
         ip += count;
@@ -70,19 +69,19 @@ fn interpret_top_level(interp: *Interpreter) void {
             .exit => break,
             .printp => {
                 const value = grab_u64_from_operand(interp, instr.ops[0]);
-                Compiler.oprint("0x{x}\n", .{value});
+                oprint("0x{x}\n", .{value});
             },
             .printi => {
                 const value = grab_i64_from_operand(interp, instr.ops[0]);
-                Compiler.oprint("{}\n", .{value});
+                oprint("{}\n", .{value});
             },
             .printu => {
                 const value = grab_u64_from_operand(interp, instr.ops[0]);
-                Compiler.oprint("{}\n", .{value});
+                oprint("{}\n", .{value});
             },
             .printb => {
                 const value = grab_u64_from_operand(interp, instr.ops[0]);
-                Compiler.oprint("{s}\n", .{if (value != 0) "true" else "false"});
+                oprint("{s}\n", .{if (value != 0) "true" else "false"});
             },
             .ue,
             .une,
@@ -241,8 +240,7 @@ fn interpret_top_level(interp: *Interpreter) void {
                 const bits = grab_u64_from_operand(interp, instr.ops[2]);
 
                 if (bits > 64) {
-                    Compiler.eprint("error: can't extend more than 64 bits\n", .{});
-                    Compiler.exit(1);
+                    report_fatal_error("can't extend more than 64 bits", .{});
                 }
 
                 src = nostd.sign_extend(src, @intCast(bits));
@@ -348,8 +346,7 @@ fn grab_value_from_tmp(interp: *Interpreter, tmp: IRD.Tmp, is_signed: bool) u64 
 fn segment_from_vtable(interp: *Interpreter, address: u64) struct { []u8, Vtable.SegmentTag } {
     const vtable = &interp.vtable;
     if (address < vtable.start_instr) {
-        Compiler.eprint("error: can't read/write from/to unused space\n", .{});
-        Compiler.exit(1);
+        report_fatal_error("can't read/write from/to unused space", .{});
     } else if (address < vtable.start_global) {
         const off = address - vtable.start_instr;
         return .{ interp.ir.instrs.items[off..], .Instructions };
@@ -360,8 +357,7 @@ fn segment_from_vtable(interp: *Interpreter, address: u64) struct { []u8, Vtable
         const off = address - vtable.start_stack;
         return .{ interp.stack[off..], .Stack };
     } else {
-        Compiler.eprint("error: address '{}' outside of address space ({})\n", .{ address, vtable.end });
-        Compiler.exit(1);
+        report_fatal_error("address '{}' outside of address space ({})", .{ address, vtable.end });
     }
 }
 
@@ -438,8 +434,7 @@ fn check_bounds(segment: []u8, tag: Vtable.SegmentTag, size: u64, for_writing: b
     if (for_writing) {
         switch (tag) {
             .Instructions => {
-                Compiler.eprint("error: can't write to instruction segment\n", .{});
-                Compiler.exit(1);
+                report_fatal_error("can't write to instruction segment", .{});
             },
             .Globals,
             .Stack,
@@ -448,8 +443,7 @@ fn check_bounds(segment: []u8, tag: Vtable.SegmentTag, size: u64, for_writing: b
     }
 
     if (segment.len < size) {
-        Compiler.eprint("error: memory out of bounds: can't read {} bytes at {s} segment\n", .{ size, tag.to_string() });
-        Compiler.exit(1);
+        report_fatal_error("memory out of bounds: can't read {} bytes at {s} segment", .{ size, tag.to_string() });
     }
 }
 
@@ -459,6 +453,11 @@ inline fn inc_u_by_i(value: u64, offset: i59) u64 {
     else
         value - @as(u64, @intCast(-offset));
 }
+
+const oprint = nostd.oprint;
+const eprint = nostd.eprint;
+const report_fatal_error = nostd.report_fatal_error;
+const exit = nostd.exit;
 
 const std = @import("std");
 const nostd = @import("nostd.zig");

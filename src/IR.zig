@@ -6,10 +6,10 @@ const IR = @This();
 pub fn init() IR {
     return .{
         .instrs = ByteList.initCapacity(nostd.general_allocator, 4 * 1024) catch {
-            Compiler.exit(1);
+            exit(1);
         },
         .globals = ByteList.initCapacity(nostd.general_allocator, 4 * 1024) catch {
-            Compiler.exit(1);
+            exit(1);
         },
     };
 }
@@ -20,7 +20,7 @@ pub fn deinit(ir: *IR) void {
 }
 
 pub fn print(ir: *IR) void {
-    Compiler.oprint("globals byte count: {}\n" ++
+    oprint("globals byte count: {}\n" ++
         "instruction byte count: {}\n" ++
         "\n", .{
         ir.globals.items.len,
@@ -31,14 +31,14 @@ pub fn print(ir: *IR) void {
     var ip: usize = 0;
     while (ip < instrs.len) {
         const instr, const count = Decoded.decode_instr(instrs[ip..]);
-        Compiler.oprint("{:>4}  {}\n", .{ ip, instr });
+        oprint("{:>4}  {}\n", .{ ip, instr });
         ip += count;
     }
 }
 
 pub fn write_to_file(ir: *IR, filepath: [:0]const u8) void {
     const file = std.fs.cwd().createFile(filepath, .{}) catch {
-        exit_error("{s}: couldn't open the file", .{filepath});
+        report_fatal_error("{s}: couldn't open the file", .{filepath});
     };
     defer file.close();
 
@@ -51,7 +51,7 @@ pub fn write_to_file(ir: *IR, filepath: [:0]const u8) void {
 
 pub fn read_from_file(filepath: [:0]const u8) IR {
     const file = std.fs.cwd().openFile(filepath, .{}) catch {
-        exit_error("{s}: couldn't open the file", .{filepath});
+        report_fatal_error("{s}: couldn't open the file", .{filepath});
     };
     defer file.close();
 
@@ -78,7 +78,10 @@ pub fn read_from_file(filepath: [:0]const u8) IR {
     };
 }
 
-const exit_error = nostd.exit_error;
+const oprint = nostd.oprint;
+const eprint = nostd.eprint;
+const exit = nostd.exit;
+const report_fatal_error = nostd.report_fatal_error;
 
 const std = @import("std");
 const nostd = @import("nostd.zig");

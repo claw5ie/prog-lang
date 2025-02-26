@@ -14,7 +14,7 @@ const IRGenerator = @This();
 pub fn init(ast: *Ast, ir: *IR) IRGenerator {
     var labels = IRGenerator.LabelMap.init(nostd.general_allocator);
     labels.resize(256) catch {
-        Compiler.exit(1);
+        exit(1);
     };
 
     return .{
@@ -806,7 +806,7 @@ fn generate_label(generator: *IRGenerator, label: IRE.Label) void {
     if (capacity < label) {
         capacity = label + capacity / 2 + 1;
         labels.resize(capacity) catch {
-            Compiler.exit(1);
+            exit(1);
         };
     }
 
@@ -1074,12 +1074,12 @@ fn write_instr_at(generator: *IRGenerator, index: usize, instr: IRD.Instr) void 
 fn write_instr_bytes_at(generator: *IRGenerator, index: usize, bytes: []const u8) void {
     if (index == generator.ir.instrs.items.len) {
         generator.ir.instrs.insertSlice(index, bytes) catch {
-            Compiler.exit(1);
+            exit(1);
         };
     } else {
         std.debug.assert(index + bytes.len <= generator.ir.instrs.items.len);
         generator.ir.instrs.replaceRange(index, bytes.len, bytes) catch {
-            Compiler.exit(1);
+            exit(1);
         };
     }
 }
@@ -1149,7 +1149,7 @@ pub fn grab_global(generator: *IRGenerator, byte_size: u64, alignment: Alignment
 
     generator.next_global = new_offset + byte_size;
     generator.ir.globals.appendNTimes(0xAA, byte_size + (new_offset - old_offset)) catch {
-        Compiler.exit(1);
+        exit(1);
     };
 
     return .{ .Tmp = .{
@@ -1195,6 +1195,8 @@ pub fn grab_procedure_labels(generator: *IRGenerator, procedure: *Ast.Symbol.Pro
         return labels;
     }
 }
+
+const exit = nostd.exit;
 
 const std = @import("std");
 const nostd = @import("nostd.zig");
