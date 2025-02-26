@@ -832,7 +832,7 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
 
                 break :base expr;
             },
-            .Boolean => |value| {
+            .Boolean_Literal => |value| {
                 const expr = p.ast.create(Ast.Expr);
                 expr.* = .{
                     .position = tok.position,
@@ -843,7 +843,7 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                 };
                 break :base expr;
             },
-            .Null => {
+            .Null_Literal => {
                 const expr = p.ast.create(Ast.Expr);
                 expr.* = .{
                     .position = tok.position,
@@ -868,7 +868,7 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                 };
                 break :base expr;
             },
-            .Integer => |value| {
+            .Integer_Literal => |value| {
                 const typ = Ast.integer_type_from_u64(value);
                 const expr = p.ast.create(Ast.Expr);
                 expr.* = .{

@@ -30,9 +30,9 @@ const Keyword = struct {
 };
 
 pub const keywords = [_]Keyword{
-    Keyword.make_with_custom_text("false", .{ .Boolean = false }),
-    Keyword.make_with_custom_text("true", .{ .Boolean = true }),
-    Keyword.make(.Null),
+    Keyword.make_with_custom_text("false", .{ .Boolean_Literal = false }),
+    Keyword.make_with_custom_text("true", .{ .Boolean_Literal = true }),
+    Keyword.make(.Null_Literal),
 
     Keyword.make(.Struct),
     Keyword.make(.Union),
@@ -228,7 +228,7 @@ fn parse_token(lexer: *Lexer) Token {
 
         return .{
             .position = position,
-            .as = .{ .Integer = value },
+            .as = .{ .Integer_Literal = value },
         };
     } else if (is_alpha(current) or current == '_') {
         while (true) {
@@ -369,6 +369,42 @@ pub const Token = struct {
     as: As,
 
     pub const Tag = enum {
+        End_Of_File,
+
+        Attributes,
+
+        Alias,
+
+        Struct,
+        Union,
+        Enum,
+        Proc,
+        Integer_Type,
+        Boolean_Type,
+        Void_Type,
+        Type_Of,
+
+        Byte_Size_Of,
+        Alignment_Of,
+        As,
+        Cast,
+        Integer_Literal,
+        Boolean_Literal,
+        Null_Literal,
+        Identifier,
+
+        Left_Parenthesis,
+        Right_Parenthesis,
+
+        Reference,
+        Not,
+
+        Dereference,
+        Dot,
+
+        Left_Bracket,
+        Right_Bracket,
+
         Or,
         And,
         Double_Equal,
@@ -383,40 +419,6 @@ pub const Token = struct {
         Slash,
         Percent_Sign,
 
-        Reference,
-        Dereference,
-        Not,
-        Left_Parenthesis,
-        Right_Parenthesis,
-        Left_Brace,
-        Right_Brace,
-        Left_Bracket,
-        Right_Bracket,
-        Colon,
-        Semicolon,
-        Dot,
-        Comma,
-        Equal,
-
-        Byte_Size_Of,
-        Alignment_Of,
-        As,
-        Cast,
-        Boolean,
-        Integer,
-        Identifier,
-        Null,
-
-        Struct,
-        Union,
-        Enum,
-        Proc,
-        Integer_Type,
-        Boolean_Type,
-        Void_Type,
-        Type_Of,
-
-        Attributes,
         Print,
         If,
         Then,
@@ -427,13 +429,53 @@ pub const Token = struct {
         Continue,
         Switch,
         Return,
-        Alias,
         Case,
 
-        End_Of_File,
+        Left_Brace,
+        Right_Brace,
+
+        Colon,
+        Semicolon,
+        Comma,
+        Equal,
 
         pub fn to_quoted_text(tag: Tag) []const u8 {
             return switch (tag) {
+                .End_Of_File => "end-of-file",
+
+                .Attributes => "'attributes'",
+
+                .Alias => "'alias'",
+                .Struct => "'struct'",
+                .Union => "'union'",
+                .Enum => "'enum'",
+                .Proc => "'proc'",
+                .Integer_Type => "integer type",
+                .Boolean_Type => "'bool'",
+                .Void_Type => "'void'",
+                .Type_Of => "'#type_of'",
+
+                .Byte_Size_Of => "'#byte_size_of'",
+                .Alignment_Of => "'#alignment_of'",
+                .As => "'#as'",
+                .Cast => "'#cast'",
+                .Integer_Literal => "integer literal",
+                .Boolean_Literal => "boolean literal",
+                .Null_Literal => "'null'",
+                .Identifier => "identifier",
+
+                .Left_Parenthesis => "'('",
+                .Right_Parenthesis => "')'",
+
+                .Reference => "'&'",
+                .Not => "'!'",
+
+                .Dereference => "'^'",
+                .Dot => "'.'",
+
+                .Left_Bracket => "'['",
+                .Right_Bracket => "']'",
+
                 .Or => "'||'",
                 .And => "'&&'",
                 .Double_Equal => "'=='",
@@ -448,40 +490,6 @@ pub const Token = struct {
                 .Slash => "'/'",
                 .Percent_Sign => "'%'",
 
-                .Reference => "'&'",
-                .Dereference => "'^'",
-                .Not => "'!'",
-                .Left_Parenthesis => "'('",
-                .Right_Parenthesis => "')'",
-                .Left_Brace => "'{'",
-                .Right_Brace => "'}'",
-                .Left_Bracket => "'['",
-                .Right_Bracket => "']'",
-                .Colon => "':'",
-                .Semicolon => "';'",
-                .Dot => "'.'",
-                .Comma => "','",
-                .Equal => "'='",
-
-                .Byte_Size_Of => "'#byte_size_of'",
-                .Alignment_Of => "'#alignment_of'",
-                .As => "'#as'",
-                .Cast => "'#cast'",
-                .Boolean => "boolean literal",
-                .Integer => "integer literal",
-                .Identifier => "identifier",
-                .Null => "'null'",
-
-                .Struct => "'struct'",
-                .Union => "'union'",
-                .Enum => "'enum'",
-                .Proc => "'proc'",
-                .Integer_Type => "integer type",
-                .Boolean_Type => "'bool'",
-                .Void_Type => "'void'",
-                .Type_Of => "'#type_of'",
-
-                .Attributes => "'attributes'",
                 .Print => "'#print'",
                 .If => "'if'",
                 .Then => "'then'",
@@ -492,10 +500,15 @@ pub const Token = struct {
                 .Continue => "'continue'",
                 .Switch => "'switch'",
                 .Return => "'return'",
-                .Alias => "'alias'",
                 .Case => "'case'",
 
-                .End_Of_File => "end-of-file",
+                .Left_Brace => "'{'",
+                .Right_Brace => "'}'",
+
+                .Colon => "':'",
+                .Semicolon => "';'",
+                .Comma => "','",
+                .Equal => "'='",
             };
         }
 
@@ -512,6 +525,42 @@ pub const Token = struct {
     };
 
     pub const As = union(Tag) {
+        End_Of_File: void,
+
+        Attributes: Attributes,
+
+        Alias: void,
+
+        Struct: void,
+        Union: void,
+        Enum: void,
+        Proc: void,
+        Integer_Type: IntegerType,
+        Boolean_Type: void,
+        Void_Type: void,
+        Type_Of: void,
+
+        Byte_Size_Of: void,
+        Alignment_Of: void,
+        As: void,
+        Cast: void,
+        Integer_Literal: u64,
+        Boolean_Literal: bool,
+        Null_Literal: void,
+        Identifier: []const u8,
+
+        Left_Parenthesis: void,
+        Right_Parenthesis: void,
+
+        Reference: void,
+        Not: void,
+
+        Dereference: void,
+        Dot: void,
+
+        Left_Bracket: void,
+        Right_Bracket: void,
+
         Or: void,
         And: void,
         Double_Equal: void,
@@ -526,40 +575,6 @@ pub const Token = struct {
         Slash: void,
         Percent_Sign: void,
 
-        Reference: void,
-        Dereference: void,
-        Not: void,
-        Left_Parenthesis: void,
-        Right_Parenthesis: void,
-        Left_Brace: void,
-        Right_Brace: void,
-        Left_Bracket: void,
-        Right_Bracket: void,
-        Colon: void,
-        Semicolon: void,
-        Dot: void,
-        Comma: void,
-        Equal: void,
-
-        Byte_Size_Of: void,
-        Alignment_Of: void,
-        As: void,
-        Cast: void,
-        Boolean: bool,
-        Integer: u64,
-        Identifier: []const u8,
-        Null: void,
-
-        Struct: void,
-        Union: void,
-        Enum: void,
-        Proc: void,
-        Integer_Type: Token.IntegerType,
-        Boolean_Type: void,
-        Void_Type: void,
-        Type_Of: void,
-
-        Attributes: Attributes,
         Print: void,
         If: void,
         Then: void,
@@ -570,10 +585,15 @@ pub const Token = struct {
         Continue: void,
         Switch: void,
         Return: void,
-        Alias: void,
         Case: void,
 
-        End_Of_File: void,
+        Left_Brace: void,
+        Right_Brace: void,
+
+        Colon: void,
+        Semicolon: void,
+        Comma: void,
+        Equal: void,
     };
 
     pub const IntegerType = struct {
