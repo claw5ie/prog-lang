@@ -5,8 +5,6 @@ c: *Compiler,
 
 const Parser = @This();
 
-const LOWEST_PREC: i32 = std.math.minInt(i32) + 1;
-
 pub fn init(c: *Compiler, ast: *Ast) Parser {
     return .{
         .current_scope = &Ast.global_scope,
@@ -20,728 +18,20 @@ pub fn init(c: *Compiler, ast: *Ast) Parser {
 
 pub fn deinit(_: *Parser) void {}
 
-pub fn parse(p: *Parser) void {
-    parse_top_level(p);
-}
-
-fn parse_top_level(p: *Parser) void {
-    while (p.lexer.peek() != .End_Of_File) {
-        const stmt = parse_stmt(p);
-        switch (stmt.as) {
-            .Symbol => |symbol| {
-                const node = p.ast.create(Ast.SymbolList.Node);
-                node.* = .{
-                    .data = symbol,
-                };
-                p.ast.globals.append(node);
-            },
-            else => {
-                p.c.report_error(stmt.position, "expected symbol definition", .{});
-            },
-        }
-    }
-
-    std.debug.assert(p.current_scope == &Ast.global_scope);
-
-    if (p.c.had_error) {
-        exit(1);
-    }
-}
-
-fn parse_stmt(p: *Parser) *Ast.Stmt {
-    const tok = p.lexer.grab();
-    p.lexer.advance();
-
-    switch (tok.as) {
-        .Print => {
-            const expr = parse_expr(p);
-            p.lexer.expect(.Semicolon);
-
-            const stmt = p.ast.create(Ast.Stmt);
-            stmt.* = .{
-                .position = tok.position,
-                .as = .{ .Print = expr },
-            };
-
-            return stmt;
-        },
-        .Left_Brace => {
-            p.lexer.putback(tok);
-
-            push_scope(p);
-            const block = parse_stmt_list(p);
-            pop_scope(p);
-
-            const stmt = p.ast.create(Ast.Stmt);
-            stmt.* = .{
-                .position = tok.position,
-                .as = .{ .Block = block },
-            };
-
-            return stmt;
-        },
-        .If => {
-            const condition = parse_expr(p);
-            if (p.lexer.peek() == .Then) {
-                p.lexer.advance();
-            }
-            const true_branch = parse_stmt(p);
-            var false_branch: ?*Ast.Stmt = null;
-            if (p.lexer.peek() == .Else) {
-                p.lexer.advance();
-                false_branch = parse_stmt(p);
-            }
-
-            const stmt = p.ast.create(Ast.Stmt);
-            stmt.* = .{
-                .position = tok.position,
-                .as = .{ .If = .{
-                    .condition = condition,
-                    .true_branch = true_branch,
-                    .false_branch = false_branch,
-                } },
-            };
-
-            return stmt;
-        },
-        .While => {
-            const condition = parse_expr(p);
-            if (p.lexer.peek() == .Do) {
-                p.lexer.advance();
-            }
-            const body = parse_stmt(p);
-
-            const stmt = p.ast.create(Ast.Stmt);
-            stmt.* = .{
-                .position = tok.position,
-                .as = .{ .While = .{
-                    .condition = condition,
-                    .body = body,
-                } },
-            };
-
-            return stmt;
-        },
-        .Do => {
-            const body = parse_stmt(p);
-            p.lexer.expect(.While);
-            const condition = parse_expr(p);
-            p.lexer.expect(.Semicolon);
-
-            const stmt = p.ast.create(Ast.Stmt);
-            stmt.* = .{
-                .position = tok.position,
-                .as = .{ .Do_While = .{
-                    .condition = condition,
-                    .body = body,
-                } },
-            };
-
-            return stmt;
-        },
-        .Break => {
-            p.lexer.expect(.Semicolon);
-
-            const stmt = p.ast.create(Ast.Stmt);
-            stmt.* = .{
-                .position = tok.position,
-                .as = .Break,
-            };
-
-            return stmt;
-        },
-        .Continue => {
-            p.lexer.expect(.Semicolon);
-
-            const stmt = p.ast.create(Ast.Stmt);
-            stmt.* = .{
-                .position = tok.position,
-                .as = .Continue,
-            };
-
-            return stmt;
-        },
-        .Switch => {
-            const condition = parse_expr(p);
-            const cases = parse_stmt_switch(p);
-            var default_case: ?*Ast.Stmt = null;
-            if (p.lexer.peek() == .Else) {
-                p.lexer.advance();
-                default_case = parse_stmt(p);
-            }
-
-            const stmt = p.ast.create(Ast.Stmt);
-            stmt.* = .{
-                .position = tok.position,
-                .as = .{ .Switch = .{
-                    .condition = condition,
-                    .cases = cases,
-                    .default_case = default_case,
-                } },
-            };
-
-            return stmt;
-        },
-        .Return => {
-            if (p.lexer.peek() == .Semicolon) {
-                p.lexer.advance();
-
-                const stmt = p.ast.create(Ast.Stmt);
-                stmt.* = .{
-                    .position = tok.position,
-                    .as = .{ .Return = null },
-                };
-
-                return stmt;
-            }
-
-            const expr = parse_expr(p);
-            p.lexer.expect(.Semicolon);
-
-            const stmt = p.ast.create(Ast.Stmt);
-            stmt.* = .{
-                .position = tok.position,
-                .as = .{ .Return = expr },
-            };
-
-            return stmt;
-        },
-        else => {
-            p.lexer.putback(tok);
-
-            const result = try_parse_symbol(p);
-            switch (result.tag) {
-                .Type,
-                .Symbol_Without_Type,
-                .Symbol_With_Type,
-                .Symbol_With_Type_And_Value,
-                .Procedure,
-                => {
-                    const symbol = insert_symbol(p, result, .Parsing_Statement);
-
-                    if (symbol.as == .Procedure) {
-                        const node = p.ast.create(Ast.SymbolList.Node);
-                        node.* = .{
-                            .data = symbol,
-                        };
-                        p.ast.local_procedures.append(node);
-                    }
-
-                    const stmt = p.ast.create(Ast.Stmt);
-                    stmt.* = .{
-                        .position = tok.position,
-                        .as = .{ .Symbol = symbol },
-                    };
-                    return stmt;
-                },
-                .Expr => {
-                    if (!result.attributes.is_empty()) {
-                        p.c.report_error(tok.position, "unexpected attributes", .{});
-                    }
-
-                    const expr = result.pattern;
-                    switch (p.lexer.peek()) {
-                        .Equal => {
-                            p.lexer.advance();
-                            const rhs = parse_expr(p);
-                            p.lexer.expect(.Semicolon);
-
-                            const stmt = p.ast.create(Ast.Stmt);
-                            stmt.* = .{
-                                .position = tok.position,
-                                .as = .{ .Assign = .{
-                                    .lhs = expr,
-                                    .rhs = rhs,
-                                } },
-                            };
-
-                            return stmt;
-                        },
-                        else => {
-                            p.lexer.expect(.Semicolon);
-                            const stmt = p.ast.create(Ast.Stmt);
-                            stmt.* = .{
-                                .position = tok.position,
-                                .as = .{ .Expr = expr },
-                            };
-                            return stmt;
-                        },
-                    }
-                },
-            }
-        },
-    }
-}
-
-fn parse_stmt_switch(p: *Parser) Ast.Stmt.Switch.CaseList {
-    p.lexer.expect(.Left_Brace);
-    push_scope(p);
-
-    var list = Ast.Stmt.Switch.CaseList{};
-
-    var tt = p.lexer.peek();
-    while (tt != .End_Of_File and tt != .Right_Brace) {
-        const case = parse_switch_case(p);
-
-        {
-            const node = p.ast.create(Ast.Stmt.Switch.CaseList.Node);
-            node.* = .{
-                .data = case,
-            };
-            list.append(node);
-        }
-
-        tt = p.lexer.peek();
-    }
-
-    p.lexer.expect(.Right_Brace);
-    pop_scope(p);
-
-    return list;
-}
-
-fn parse_switch_case(p: *Parser) *Ast.Stmt.Switch.Case {
-    switch (p.lexer.peek()) {
-        .Case => {
-            p.lexer.advance();
-            const value = parse_expr(p);
-            if (p.lexer.peek() == .Then) {
-                p.lexer.advance();
-            }
-            const subcase = parse_switch_case(p);
-
-            const case = p.ast.create(Ast.Stmt.Switch.Case);
-            case.* = .{ .Case = .{
-                .value = value,
-                .subcase = subcase,
-            } };
-
-            return case;
-        },
-        else => {
-            const stmt = parse_stmt(p);
-
-            const case = p.ast.create(Ast.Stmt.Switch.Case);
-            case.* = .{ .Stmt = stmt };
-
-            return case;
-        },
-    }
-}
-
-fn parse_stmt_list(p: *Parser) Ast.StmtList {
-    p.lexer.expect(.Left_Brace);
-
-    var list = Ast.StmtList{};
-
-    var tt = p.lexer.peek();
-    while (tt != .End_Of_File and tt != .Right_Brace) {
-        const stmt = parse_stmt(p);
-
-        {
-            const node = p.ast.create(Ast.StmtList.Node);
-            node.* = .{
-                .data = stmt,
-            };
-            list.append(node);
-        }
-
-        tt = p.lexer.peek();
-    }
-
-    p.lexer.expect(.Right_Brace);
-
-    return list;
-}
-
-fn try_parse_symbol(p: *Parser) ParseSymbolResult {
-    const position = p.lexer.grab().position;
-    var attributes = Token.Attributes{};
-
-    if (p.lexer.peek() == .Attributes) {
-        attributes = p.lexer.grab().as.Attributes;
-        p.lexer.advance();
-    }
-
-    if (attributes.is_const and attributes.is_static) {
-        p.c.report_error(position, "'#const' and '#static' are mutually exclusive", .{});
-        exit(1);
-    }
-
-    var is_type = false;
-
-    if (p.lexer.peek() == .Alias) {
-        p.lexer.advance();
-        is_type = true;
-    }
-
-    const pattern = parse_expr(p);
-    var typ: ?*Ast.Type = null;
-    var value: ?*Ast.Expr = null;
-    var block: Ast.StmtList = .{};
-    var tag: ParseSymbolResult.Tag = .Expr;
-
-    switch (p.lexer.peek()) {
-        .Colon => {
-            if (p.lexer.peek_at(1) == .Equal) {
-                p.lexer.advance();
-                tag = .Symbol_Without_Type;
-                p.lexer.advance();
-                value = parse_expr(p);
-            } else {
-                tag = .Symbol_With_Type;
-                p.lexer.advance();
-                typ = parse_type(p);
-                switch (p.lexer.peek()) {
-                    .Left_Brace => {
-                        switch (typ.?.data.as) {
-                            .Proc => |Proc| {
-                                tag = .Procedure;
-                                const old_current_scope = p.current_scope;
-
-                                p.current_scope = Proc.scope;
-                                block = parse_stmt_list(p);
-                                p.current_scope = old_current_scope;
-                            },
-                            else => {
-                                p.c.report_error(p.lexer.grab().position, "unexpected procedure body", .{});
-                                exit(1);
-                            },
-                        }
-                    },
-                    .Equal => {
-                        tag = .Symbol_With_Type_And_Value;
-                        p.lexer.advance();
-                        value = parse_expr(p);
-                    },
-                    else => {},
-                }
-            }
-        },
-        else => {},
-    }
-
-    if (is_type) {
-        switch (tag) {
-            .Symbol_With_Type => {
-                tag = .Type;
-            },
-            .Symbol_Without_Type => {
-                p.c.report_error(pattern.position, "missing type after expression", .{});
-                exit(1);
-            },
-            .Symbol_With_Type_And_Value => {
-                p.c.report_error(value.?.position, "value expression", .{});
-                exit(1);
-            },
-            .Procedure => {
-                p.c.report_error(value.?.position, "expected type definition, not procedure", .{});
-                exit(1);
-            },
-            .Expr => {
-                p.c.report_error(pattern.position, "missing type after expression", .{});
-                exit(1);
-            },
-            .Type => unreachable,
-        }
-    }
-
-    return .{
-        .attributes = attributes,
-        .pattern = pattern,
-        .typ = typ,
-        .value = value,
-        .block = block,
-        .tag = tag,
+fn push_scope(p: *Parser) void {
+    const scope = p.ast.create(Ast.Scope);
+    scope.* = .{
+        .parent = p.current_scope,
     };
+    p.current_scope = scope;
 }
 
-fn parse_symbol(p: *Parser, how_to_parse: HowToParseSymbol) *Ast.Symbol {
-    const result = try_parse_symbol(p);
-    const symbol = insert_symbol(p, result, how_to_parse);
-    return symbol;
-}
-
-fn parse_symbol_list(p: *Parser, fields: *Ast.SymbolList, rest: ?*Ast.SymbolList, how_to_parse: HowToParseSymbol) void {
-    var tt = p.lexer.peek();
-    while (tt != .End_Of_File and tt != .Right_Parenthesis and tt != .Right_Brace) {
-        const symbol = parse_symbol(p, how_to_parse);
-        var expect_comma = false;
-
-        {
-            const node = p.ast.create(Ast.SymbolList.Node);
-            node.* = .{
-                .data = symbol,
-            };
-
-            switch (symbol.as) {
-                .Struct_Field,
-                .Union_Field,
-                .Enum_Field,
-                .Parameter,
-                => {
-                    expect_comma = true;
-                    fields.append(node);
-                },
-                .Variable,
-                .Procedure,
-                .Type,
-                => {
-                    rest.?.append(node);
-                },
-            }
-        }
-
-        tt = p.lexer.peek();
-        if (expect_comma and tt != .End_Of_File and tt != .Right_Parenthesis and tt != .Right_Brace) {
-            p.lexer.expect(.Comma);
-            tt = p.lexer.peek();
-        }
-    }
-}
-
-fn insert_symbol(p: *Parser, result: ParseSymbolResult, how_to_parse: HowToParseSymbol) *Ast.Symbol {
-    const symbol: *Ast.Symbol = symbol: {
-        switch (result.pattern.as) {
-            .Identifier => |Identifier| {
-                const key = Ast.Symbol.Key{
-                    .name = Identifier.name,
-                    .scope = Identifier.scope,
-                };
-                const insert_result = p.ast.symbol_table.insert(key);
-
-                if (insert_result.found_existing) {
-                    p.c.report_error(result.pattern.position, "symbol '{s}' is defined already", .{key.name});
-                    p.c.report_note(insert_result.value_ptr.*.position, "first defined here", .{});
-                    exit(1);
-                }
-
-                const symbol = p.ast.create(Ast.Symbol);
-                symbol.* = .{
-                    .position = result.pattern.position,
-                    .as = undefined,
-                    .key = key,
-                    .typechecking = .None,
-                    .attributes = result.attributes,
-                };
-                insert_result.value_ptr.* = symbol;
-
-                break :symbol symbol;
-            },
-            else => {
-                p.c.report_error(result.pattern.position, "expected identifier", .{});
-                exit(1);
-            },
-        }
-    };
-
-    const symbol_tag: Ast.Symbol.Tag = symbol_tag: {
-        switch (how_to_parse) {
-            .Parsing_Container => |container_type| {
-                switch (result.tag) {
-                    .Type => break :symbol_tag .Type,
-                    .Symbol_Without_Type => {
-                        if (!result.attributes.is_empty()) {
-                            break :symbol_tag .Variable;
-                        }
-
-                        switch (container_type) {
-                            .Struct, .Union => {
-                                p.c.report_error(result.pattern.position, "expected type after pattern", .{});
-                                exit(1);
-                            },
-                            .Enum => break :symbol_tag .Enum_Field,
-                        }
-                    },
-                    .Symbol_With_Type,
-                    .Symbol_With_Type_And_Value,
-                    => {
-                        if (!result.attributes.is_empty()) {
-                            break :symbol_tag .Variable;
-                        }
-
-                        switch (container_type) {
-                            .Struct => break :symbol_tag .Struct_Field,
-                            .Union => break :symbol_tag .Union_Field,
-                            .Enum => {
-                                p.c.report_error(result.typ.?.position, "unexpected type", .{});
-                                exit(1);
-                            },
-                        }
-                    },
-                    .Procedure => break :symbol_tag .Procedure,
-                    .Expr => {
-                        switch (container_type) {
-                            .Struct, .Union => {
-                                p.c.report_error(result.pattern.position, "expected type after pattern", .{});
-                                exit(1);
-                            },
-                            .Enum => break :symbol_tag .Enum_Field,
-                        }
-                    },
-                }
-            },
-            .Parsing_Procedure => {
-                switch (result.tag) {
-                    .Symbol_With_Type,
-                    .Symbol_With_Type_And_Value,
-                    => break :symbol_tag .Parameter,
-                    .Type => {
-                        p.c.report_error(result.pattern.position, "unexpected type", .{});
-                        exit(1);
-                    },
-                    .Symbol_Without_Type => {
-                        p.c.report_error(result.pattern.position, "expected type after pattern", .{});
-                        exit(1);
-                    },
-                    .Procedure => {
-                        p.c.report_error(result.pattern.position, "unexpected procedure", .{});
-                        exit(1);
-                    },
-                    .Expr => {
-                        p.c.report_error(result.pattern.position, "unexpected expression", .{});
-                        exit(1);
-                    },
-                }
-            },
-            .Parsing_Statement => {
-                switch (result.tag) {
-                    .Type => break :symbol_tag .Type,
-                    .Symbol_Without_Type,
-                    .Symbol_With_Type,
-                    .Symbol_With_Type_And_Value,
-                    => break :symbol_tag .Variable,
-                    .Procedure => break :symbol_tag .Procedure,
-                    .Expr => unreachable,
-                }
-            },
-        }
-    };
-
-    symbol.as = as: {
-        switch (symbol_tag) {
-            .Variable => {
-                p.lexer.expect(.Semicolon);
-
-                const is_global = symbol.key.scope == &Ast.global_scope or how_to_parse == .Parsing_Container;
-                const is_static = is_global and !symbol.attributes.is_const;
-
-                symbol.attributes.is_static = symbol.attributes.is_static or is_static;
-                symbol.attributes.is_global = is_global;
-                break :as .{ .Variable = .{
-                    .typ = result.typ,
-                    .value = result.value,
-                    .storage = null,
-                } };
-            },
-            .Parameter => {
-                if (!symbol.attributes.is_empty()) {
-                    p.c.report_error(result.pattern.position, "unexpected attributes for parameter", .{});
-                    exit(1);
-                }
-
-                break :as .{ .Parameter = .{
-                    .typ = result.typ.?,
-                    .value = result.value,
-                    .storage = null,
-                } };
-            },
-            .Procedure => {
-                if (symbol.attributes.is_static) {
-                    p.c.report_error(result.pattern.position, "procedures can't be static", .{});
-                    exit(1);
-                }
-
-                symbol.attributes.is_const = true;
-                break :as .{ .Procedure = .{
-                    .typ = result.typ.?,
-                    .block = result.block,
-                    .labels = null,
-                } };
-            },
-            .Struct_Field => {
-                std.debug.assert(symbol.attributes.is_empty());
-                break :as .{ .Struct_Field = .{
-                    .typ = result.typ.?,
-                    .value = result.value,
-                    .offset = 0,
-                } };
-            },
-            .Union_Field => {
-                std.debug.assert(symbol.attributes.is_empty());
-                break :as .{ .Union_Field = .{
-                    .typ = result.typ.?,
-                    .value = result.value,
-                    .offset = 0,
-                } };
-            },
-            .Enum_Field => {
-                symbol.attributes.is_const = true;
-                break :as .{ .Enum_Field = .{
-                    .value = result.value,
-                    .computed_value = 0,
-                } };
-            },
-            .Type => {
-                p.lexer.expect(.Semicolon);
-
-                if (!symbol.attributes.is_empty()) {
-                    p.c.report_error(result.pattern.position, "unexpected attributes for a type", .{});
-                    exit(1);
-                }
-
-                break :as .{ .Type = result.typ.? };
-            },
-        }
-    };
-
-    return symbol;
+fn pop_scope(p: *Parser) void {
+    p.current_scope = p.current_scope.parent.?;
 }
 
 fn parse_type(p: *Parser) *Ast.Type {
     return p.ast.expr_to_type(parse_expr(p));
-}
-
-fn parse_expr(p: *Parser) *Ast.Expr {
-    return parse_expr_prec(p, LOWEST_PREC);
-}
-
-fn parse_expr_prec(p: *Parser, min_prec: i32) *Ast.Expr {
-    var lhs = parse_expr_highest_prec(p);
-    var op = p.lexer.peek();
-    var prev_prec: i32 = std.math.maxInt(i32);
-    var curr_prec: i32 = prec_of_op(op);
-
-    while (curr_prec < prev_prec and curr_prec >= min_prec) {
-        while (true) {
-            const position = p.lexer.grab().position;
-            p.lexer.advance();
-
-            const rhs = parse_expr_prec(p, curr_prec + 1);
-            const new_lhs = p.ast.create(Ast.Expr);
-            new_lhs.* = .{
-                .position = lhs.position,
-                .as = .{ .Binary_Op = .{
-                    .position = position,
-                    .lhs = lhs,
-                    .rhs = rhs,
-                    .tag = token_tag_to_binary_op_tag(op),
-                } },
-                .typ = Ast.void_type,
-                .flags = .{},
-                .typechecking = .None,
-            };
-            lhs = new_lhs;
-
-            op = p.lexer.peek();
-            if (curr_prec != prec_of_op(op)) break;
-        }
-
-        prev_prec = curr_prec;
-        curr_prec = prec_of_op(op);
-    }
-
-    return lhs;
 }
 
 fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
@@ -782,7 +72,12 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                     .position = subexpr.position,
                     .as = .{ .Unary_Op = .{
                         .subexpr = subexpr,
-                        .tag = token_tag_to_unary_op_tag(tok.as),
+                        .tag = switch (tok.as) {
+                            .Plus => .Pos,
+                            .Minus => .Neg,
+                            .Not => .Not,
+                            else => unreachable,
+                        },
                     } },
                     .typ = Ast.void_type,
                     .flags = .{},
@@ -1311,6 +606,88 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
     return base;
 }
 
+const LOWEST_PREC: i32 = std.math.minInt(i32) + 1;
+
+fn prec_of_op(op: Token.Tag) i32 {
+    return switch (op) {
+        .Or => 0,
+        .And => 1,
+        .Double_Equal,
+        .Not_Equal,
+        => 2,
+        .Less_Than,
+        .Less_Equal,
+        .Greater_Than,
+        .Greater_Equal,
+        => 3,
+        .Plus,
+        .Minus,
+        => 4,
+        .Asterisk,
+        .Slash,
+        .Percent_Sign,
+        => 5,
+        else => LOWEST_PREC - 1,
+    };
+}
+
+fn parse_expr_prec(p: *Parser, min_prec: i32) *Ast.Expr {
+    var lhs = parse_expr_highest_prec(p);
+    var op = p.lexer.peek();
+    var prev_prec: i32 = std.math.maxInt(i32);
+    var curr_prec: i32 = prec_of_op(op);
+
+    while (curr_prec < prev_prec and curr_prec >= min_prec) {
+        while (true) {
+            const position = p.lexer.grab().position;
+            p.lexer.advance();
+
+            const rhs = parse_expr_prec(p, curr_prec + 1);
+            const new_lhs = p.ast.create(Ast.Expr);
+            new_lhs.* = .{
+                .position = lhs.position,
+                .as = .{ .Binary_Op = .{
+                    .position = position,
+                    .lhs = lhs,
+                    .rhs = rhs,
+                    .tag = switch (op) {
+                        .Or => .Or,
+                        .And => .And,
+                        .Double_Equal => .Eq,
+                        .Not_Equal => .Neq,
+                        .Less_Than => .Lt,
+                        .Less_Equal => .Leq,
+                        .Greater_Than => .Gt,
+                        .Greater_Equal => .Geq,
+                        .Plus => .Add,
+                        .Minus => .Sub,
+                        .Asterisk => .Mul,
+                        .Slash => .Div,
+                        .Percent_Sign => .Mod,
+                        else => unreachable,
+                    },
+                } },
+                .typ = Ast.void_type,
+                .flags = .{},
+                .typechecking = .None,
+            };
+            lhs = new_lhs;
+
+            op = p.lexer.peek();
+            if (curr_prec != prec_of_op(op)) break;
+        }
+
+        prev_prec = curr_prec;
+        curr_prec = prec_of_op(op);
+    }
+
+    return lhs;
+}
+
+fn parse_expr(p: *Parser) *Ast.Expr {
+    return parse_expr_prec(p, LOWEST_PREC);
+}
+
 fn parse_fixed_size_expr_list(p: *Parser, dst: []*Ast.Expr) usize {
     p.lexer.expect(.Left_Parenthesis);
 
@@ -1380,78 +757,519 @@ fn parse_expr_list(p: *Parser) Ast.ExprList {
     return list;
 }
 
-fn push_scope(p: *Parser) void {
-    const scope = p.ast.create(Ast.Scope);
-    scope.* = .{
-        .parent = p.current_scope,
+fn parse_stmt_switch(p: *Parser) Ast.Stmt.Switch.CaseList {
+    p.lexer.expect(.Left_Brace);
+    push_scope(p);
+
+    var list = Ast.Stmt.Switch.CaseList{};
+
+    var tt = p.lexer.peek();
+    while (tt != .End_Of_File and tt != .Right_Brace) {
+        const case = parse_switch_case(p);
+
+        {
+            const node = p.ast.create(Ast.Stmt.Switch.CaseList.Node);
+            node.* = .{
+                .data = case,
+            };
+            list.append(node);
+        }
+
+        tt = p.lexer.peek();
+    }
+
+    p.lexer.expect(.Right_Brace);
+    pop_scope(p);
+
+    return list;
+}
+
+fn parse_switch_case(p: *Parser) *Ast.Stmt.Switch.Case {
+    switch (p.lexer.peek()) {
+        .Case => {
+            p.lexer.advance();
+            const value = parse_expr(p);
+            if (p.lexer.peek() == .Then) {
+                p.lexer.advance();
+            }
+            const subcase = parse_switch_case(p);
+
+            const case = p.ast.create(Ast.Stmt.Switch.Case);
+            case.* = .{ .Case = .{
+                .value = value,
+                .subcase = subcase,
+            } };
+
+            return case;
+        },
+        else => {
+            const stmt = parse_stmt(p);
+
+            const case = p.ast.create(Ast.Stmt.Switch.Case);
+            case.* = .{ .Stmt = stmt };
+
+            return case;
+        },
+    }
+}
+
+fn parse_stmt(p: *Parser) *Ast.Stmt {
+    const tok = p.lexer.grab();
+    p.lexer.advance();
+
+    switch (tok.as) {
+        .Print => {
+            const expr = parse_expr(p);
+            p.lexer.expect(.Semicolon);
+
+            const stmt = p.ast.create(Ast.Stmt);
+            stmt.* = .{
+                .position = tok.position,
+                .as = .{ .Print = expr },
+            };
+
+            return stmt;
+        },
+        .Left_Brace => {
+            p.lexer.putback(tok);
+
+            push_scope(p);
+            const block = parse_stmt_list(p);
+            pop_scope(p);
+
+            const stmt = p.ast.create(Ast.Stmt);
+            stmt.* = .{
+                .position = tok.position,
+                .as = .{ .Block = block },
+            };
+
+            return stmt;
+        },
+        .If => {
+            const condition = parse_expr(p);
+            if (p.lexer.peek() == .Then) {
+                p.lexer.advance();
+            }
+            const true_branch = parse_stmt(p);
+            var false_branch: ?*Ast.Stmt = null;
+            if (p.lexer.peek() == .Else) {
+                p.lexer.advance();
+                false_branch = parse_stmt(p);
+            }
+
+            const stmt = p.ast.create(Ast.Stmt);
+            stmt.* = .{
+                .position = tok.position,
+                .as = .{ .If = .{
+                    .condition = condition,
+                    .true_branch = true_branch,
+                    .false_branch = false_branch,
+                } },
+            };
+
+            return stmt;
+        },
+        .While => {
+            const condition = parse_expr(p);
+            if (p.lexer.peek() == .Do) {
+                p.lexer.advance();
+            }
+            const body = parse_stmt(p);
+
+            const stmt = p.ast.create(Ast.Stmt);
+            stmt.* = .{
+                .position = tok.position,
+                .as = .{ .While = .{
+                    .condition = condition,
+                    .body = body,
+                } },
+            };
+
+            return stmt;
+        },
+        .Do => {
+            const body = parse_stmt(p);
+            p.lexer.expect(.While);
+            const condition = parse_expr(p);
+            p.lexer.expect(.Semicolon);
+
+            const stmt = p.ast.create(Ast.Stmt);
+            stmt.* = .{
+                .position = tok.position,
+                .as = .{ .Do_While = .{
+                    .condition = condition,
+                    .body = body,
+                } },
+            };
+
+            return stmt;
+        },
+        .Break => {
+            p.lexer.expect(.Semicolon);
+
+            const stmt = p.ast.create(Ast.Stmt);
+            stmt.* = .{
+                .position = tok.position,
+                .as = .Break,
+            };
+
+            return stmt;
+        },
+        .Continue => {
+            p.lexer.expect(.Semicolon);
+
+            const stmt = p.ast.create(Ast.Stmt);
+            stmt.* = .{
+                .position = tok.position,
+                .as = .Continue,
+            };
+
+            return stmt;
+        },
+        .Switch => {
+            const condition = parse_expr(p);
+            const cases = parse_stmt_switch(p);
+            var default_case: ?*Ast.Stmt = null;
+            if (p.lexer.peek() == .Else) {
+                p.lexer.advance();
+                default_case = parse_stmt(p);
+            }
+
+            const stmt = p.ast.create(Ast.Stmt);
+            stmt.* = .{
+                .position = tok.position,
+                .as = .{ .Switch = .{
+                    .condition = condition,
+                    .cases = cases,
+                    .default_case = default_case,
+                } },
+            };
+
+            return stmt;
+        },
+        .Return => {
+            if (p.lexer.peek() == .Semicolon) {
+                p.lexer.advance();
+
+                const stmt = p.ast.create(Ast.Stmt);
+                stmt.* = .{
+                    .position = tok.position,
+                    .as = .{ .Return = null },
+                };
+
+                return stmt;
+            }
+
+            const expr = parse_expr(p);
+            p.lexer.expect(.Semicolon);
+
+            const stmt = p.ast.create(Ast.Stmt);
+            stmt.* = .{
+                .position = tok.position,
+                .as = .{ .Return = expr },
+            };
+
+            return stmt;
+        },
+        else => {
+            p.lexer.putback(tok);
+
+            const result = try_parse_symbol(p);
+            switch (result.tag) {
+                .Type,
+                .Symbol_Without_Type,
+                .Symbol_With_Type,
+                .Symbol_With_Type_And_Value,
+                .Procedure,
+                => {
+                    const symbol = insert_symbol(p, result, .Parsing_Statement);
+
+                    if (symbol.as == .Procedure) {
+                        const node = p.ast.create(Ast.SymbolList.Node);
+                        node.* = .{
+                            .data = symbol,
+                        };
+                        p.ast.local_procedures.append(node);
+                    }
+
+                    const stmt = p.ast.create(Ast.Stmt);
+                    stmt.* = .{
+                        .position = tok.position,
+                        .as = .{ .Symbol = symbol },
+                    };
+                    return stmt;
+                },
+                .Expr => {
+                    if (!result.attributes.is_empty()) {
+                        p.c.report_error(tok.position, "unexpected attributes", .{});
+                    }
+
+                    const expr = result.pattern;
+                    switch (p.lexer.peek()) {
+                        .Equal => {
+                            p.lexer.advance();
+                            const rhs = parse_expr(p);
+                            p.lexer.expect(.Semicolon);
+
+                            const stmt = p.ast.create(Ast.Stmt);
+                            stmt.* = .{
+                                .position = tok.position,
+                                .as = .{ .Assign = .{
+                                    .lhs = expr,
+                                    .rhs = rhs,
+                                } },
+                            };
+
+                            return stmt;
+                        },
+                        else => {
+                            p.lexer.expect(.Semicolon);
+                            const stmt = p.ast.create(Ast.Stmt);
+                            stmt.* = .{
+                                .position = tok.position,
+                                .as = .{ .Expr = expr },
+                            };
+                            return stmt;
+                        },
+                    }
+                },
+            }
+        },
+    }
+}
+
+fn parse_stmt_list(p: *Parser) Ast.StmtList {
+    p.lexer.expect(.Left_Brace);
+
+    var list = Ast.StmtList{};
+
+    var tt = p.lexer.peek();
+    while (tt != .End_Of_File and tt != .Right_Brace) {
+        const stmt = parse_stmt(p);
+
+        {
+            const node = p.ast.create(Ast.StmtList.Node);
+            node.* = .{
+                .data = stmt,
+            };
+            list.append(node);
+        }
+
+        tt = p.lexer.peek();
+    }
+
+    p.lexer.expect(.Right_Brace);
+
+    return list;
+}
+
+const HowToParseSymbol = union(enum) {
+    Parsing_Container: enum {
+        Struct,
+        Union,
+        Enum,
+    },
+    Parsing_Procedure: void,
+    Parsing_Statement: void,
+};
+
+fn insert_symbol(p: *Parser, result: ParseSymbolResult, how_to_parse: HowToParseSymbol) *Ast.Symbol {
+    const symbol: *Ast.Symbol = symbol: {
+        switch (result.pattern.as) {
+            .Identifier => |Identifier| {
+                const key = Ast.Symbol.Key{
+                    .name = Identifier.name,
+                    .scope = Identifier.scope,
+                };
+                const insert_result = p.ast.symbol_table.insert(key);
+
+                if (insert_result.found_existing) {
+                    p.c.report_error(result.pattern.position, "symbol '{s}' is defined already", .{key.name});
+                    p.c.report_note(insert_result.value_ptr.*.position, "first defined here", .{});
+                    exit(1);
+                }
+
+                const symbol = p.ast.create(Ast.Symbol);
+                symbol.* = .{
+                    .position = result.pattern.position,
+                    .as = undefined,
+                    .key = key,
+                    .typechecking = .None,
+                    .attributes = result.attributes,
+                };
+                insert_result.value_ptr.* = symbol;
+
+                break :symbol symbol;
+            },
+            else => {
+                p.c.report_error(result.pattern.position, "expected identifier", .{});
+                exit(1);
+            },
+        }
     };
-    p.current_scope = scope;
-}
 
-fn pop_scope(p: *Parser) void {
-    p.current_scope = p.current_scope.parent.?;
-}
+    const symbol_tag: Ast.Symbol.Tag = symbol_tag: {
+        switch (how_to_parse) {
+            .Parsing_Container => |container_type| {
+                switch (result.tag) {
+                    .Type => break :symbol_tag .Type,
+                    .Symbol_Without_Type => {
+                        if (!result.attributes.is_empty()) {
+                            break :symbol_tag .Variable;
+                        }
 
-fn prec_of_op(op: Token.Tag) i32 {
-    return switch (op) {
-        .Or => 0,
-        .And => 1,
-        .Double_Equal,
-        .Not_Equal,
-        => 2,
-        .Less_Than,
-        .Less_Equal,
-        .Greater_Than,
-        .Greater_Equal,
-        => 3,
-        .Plus,
-        .Minus,
-        => 4,
-        .Asterisk,
-        .Slash,
-        .Percent_Sign,
-        => 5,
-        else => LOWEST_PREC - 1,
+                        switch (container_type) {
+                            .Struct, .Union => {
+                                p.c.report_error(result.pattern.position, "expected type after pattern", .{});
+                                exit(1);
+                            },
+                            .Enum => break :symbol_tag .Enum_Field,
+                        }
+                    },
+                    .Symbol_With_Type,
+                    .Symbol_With_Type_And_Value,
+                    => {
+                        if (!result.attributes.is_empty()) {
+                            break :symbol_tag .Variable;
+                        }
+
+                        switch (container_type) {
+                            .Struct => break :symbol_tag .Struct_Field,
+                            .Union => break :symbol_tag .Union_Field,
+                            .Enum => {
+                                p.c.report_error(result.typ.?.position, "unexpected type", .{});
+                                exit(1);
+                            },
+                        }
+                    },
+                    .Procedure => break :symbol_tag .Procedure,
+                    .Expr => {
+                        switch (container_type) {
+                            .Struct, .Union => {
+                                p.c.report_error(result.pattern.position, "expected type after pattern", .{});
+                                exit(1);
+                            },
+                            .Enum => break :symbol_tag .Enum_Field,
+                        }
+                    },
+                }
+            },
+            .Parsing_Procedure => {
+                switch (result.tag) {
+                    .Symbol_With_Type,
+                    .Symbol_With_Type_And_Value,
+                    => break :symbol_tag .Parameter,
+                    .Type => {
+                        p.c.report_error(result.pattern.position, "unexpected type", .{});
+                        exit(1);
+                    },
+                    .Symbol_Without_Type => {
+                        p.c.report_error(result.pattern.position, "expected type after pattern", .{});
+                        exit(1);
+                    },
+                    .Procedure => {
+                        p.c.report_error(result.pattern.position, "unexpected procedure", .{});
+                        exit(1);
+                    },
+                    .Expr => {
+                        p.c.report_error(result.pattern.position, "unexpected expression", .{});
+                        exit(1);
+                    },
+                }
+            },
+            .Parsing_Statement => {
+                switch (result.tag) {
+                    .Type => break :symbol_tag .Type,
+                    .Symbol_Without_Type,
+                    .Symbol_With_Type,
+                    .Symbol_With_Type_And_Value,
+                    => break :symbol_tag .Variable,
+                    .Procedure => break :symbol_tag .Procedure,
+                    .Expr => unreachable,
+                }
+            },
+        }
     };
-}
 
-fn token_tag_to_binary_op_tag(op: Token.Tag) Ast.Expr.BinaryOp.Tag {
-    return switch (op) {
-        .Or => .Or,
-        .And => .And,
-        .Double_Equal => .Eq,
-        .Not_Equal => .Neq,
-        .Less_Than => .Lt,
-        .Less_Equal => .Leq,
-        .Greater_Than => .Gt,
-        .Greater_Equal => .Geq,
-        .Plus => .Add,
-        .Minus => .Sub,
-        .Asterisk => .Mul,
-        .Slash => .Div,
-        .Percent_Sign => .Mod,
-        else => unreachable,
+    symbol.as = as: {
+        switch (symbol_tag) {
+            .Variable => {
+                p.lexer.expect(.Semicolon);
+
+                const is_global = symbol.key.scope == &Ast.global_scope or how_to_parse == .Parsing_Container;
+                const is_static = is_global and !symbol.attributes.is_const;
+
+                symbol.attributes.is_static = symbol.attributes.is_static or is_static;
+                symbol.attributes.is_global = is_global;
+                break :as .{ .Variable = .{
+                    .typ = result.typ,
+                    .value = result.value,
+                    .storage = null,
+                } };
+            },
+            .Parameter => {
+                if (!symbol.attributes.is_empty()) {
+                    p.c.report_error(result.pattern.position, "unexpected attributes for parameter", .{});
+                    exit(1);
+                }
+
+                break :as .{ .Parameter = .{
+                    .typ = result.typ.?,
+                    .value = result.value,
+                    .storage = null,
+                } };
+            },
+            .Procedure => {
+                if (symbol.attributes.is_static) {
+                    p.c.report_error(result.pattern.position, "procedures can't be static", .{});
+                    exit(1);
+                }
+
+                symbol.attributes.is_const = true;
+                break :as .{ .Procedure = .{
+                    .typ = result.typ.?,
+                    .block = result.block,
+                    .labels = null,
+                } };
+            },
+            .Struct_Field => {
+                std.debug.assert(symbol.attributes.is_empty());
+                break :as .{ .Struct_Field = .{
+                    .typ = result.typ.?,
+                    .value = result.value,
+                    .offset = 0,
+                } };
+            },
+            .Union_Field => {
+                std.debug.assert(symbol.attributes.is_empty());
+                break :as .{ .Union_Field = .{
+                    .typ = result.typ.?,
+                    .value = result.value,
+                    .offset = 0,
+                } };
+            },
+            .Enum_Field => {
+                symbol.attributes.is_const = true;
+                break :as .{ .Enum_Field = .{
+                    .value = result.value,
+                    .computed_value = 0,
+                } };
+            },
+            .Type => {
+                p.lexer.expect(.Semicolon);
+
+                if (!symbol.attributes.is_empty()) {
+                    p.c.report_error(result.pattern.position, "unexpected attributes for a type", .{});
+                    exit(1);
+                }
+
+                break :as .{ .Type = result.typ.? };
+            },
+        }
     };
+
+    return symbol;
 }
-
-fn token_tag_to_unary_op_tag(op: Token.Tag) Ast.Expr.UnaryOp.Tag {
-    return switch (op) {
-        .Plus => .Pos,
-        .Minus => .Neg,
-        .Not => .Not,
-        else => unreachable,
-    };
-}
-
-const exit = nostd.exit;
-
-const std = @import("std");
-const nostd = @import("nostd.zig");
-const Compiler = @import("Compiler.zig");
-const Lexer = @import("Lexer.zig");
-const Ast = @import("Ast.zig");
-
-const Token = Lexer.Token;
 
 const ParseSymbolResult = struct {
     attributes: Token.Attributes,
@@ -1471,12 +1289,186 @@ const ParseSymbolResult = struct {
     };
 };
 
-const HowToParseSymbol = union(enum) {
-    Parsing_Container: enum {
-        Struct,
-        Union,
-        Enum,
-    },
-    Parsing_Procedure: void,
-    Parsing_Statement: void,
-};
+fn try_parse_symbol(p: *Parser) ParseSymbolResult {
+    const position = p.lexer.grab().position;
+    var attributes = Token.Attributes{};
+
+    if (p.lexer.peek() == .Attributes) {
+        attributes = p.lexer.grab().as.Attributes;
+        p.lexer.advance();
+    }
+
+    if (attributes.is_const and attributes.is_static) {
+        p.c.report_error(position, "'#const' and '#static' are mutually exclusive", .{});
+        exit(1);
+    }
+
+    var is_type = false;
+
+    if (p.lexer.peek() == .Alias) {
+        p.lexer.advance();
+        is_type = true;
+    }
+
+    const pattern = parse_expr(p);
+    var typ: ?*Ast.Type = null;
+    var value: ?*Ast.Expr = null;
+    var block: Ast.StmtList = .{};
+    var tag: ParseSymbolResult.Tag = .Expr;
+
+    switch (p.lexer.peek()) {
+        .Colon => {
+            if (p.lexer.peek_at(1) == .Equal) {
+                p.lexer.advance();
+                tag = .Symbol_Without_Type;
+                p.lexer.advance();
+                value = parse_expr(p);
+            } else {
+                tag = .Symbol_With_Type;
+                p.lexer.advance();
+                typ = parse_type(p);
+                switch (p.lexer.peek()) {
+                    .Left_Brace => {
+                        switch (typ.?.data.as) {
+                            .Proc => |Proc| {
+                                tag = .Procedure;
+                                const old_current_scope = p.current_scope;
+
+                                p.current_scope = Proc.scope;
+                                block = parse_stmt_list(p);
+                                p.current_scope = old_current_scope;
+                            },
+                            else => {
+                                p.c.report_error(p.lexer.grab().position, "unexpected procedure body", .{});
+                                exit(1);
+                            },
+                        }
+                    },
+                    .Equal => {
+                        tag = .Symbol_With_Type_And_Value;
+                        p.lexer.advance();
+                        value = parse_expr(p);
+                    },
+                    else => {},
+                }
+            }
+        },
+        else => {},
+    }
+
+    if (is_type) {
+        switch (tag) {
+            .Symbol_With_Type => {
+                tag = .Type;
+            },
+            .Symbol_Without_Type => {
+                p.c.report_error(pattern.position, "missing type after expression", .{});
+                exit(1);
+            },
+            .Symbol_With_Type_And_Value => {
+                p.c.report_error(value.?.position, "value expression", .{});
+                exit(1);
+            },
+            .Procedure => {
+                p.c.report_error(value.?.position, "expected type definition, not procedure", .{});
+                exit(1);
+            },
+            .Expr => {
+                p.c.report_error(pattern.position, "missing type after expression", .{});
+                exit(1);
+            },
+            .Type => unreachable,
+        }
+    }
+
+    return .{
+        .attributes = attributes,
+        .pattern = pattern,
+        .typ = typ,
+        .value = value,
+        .block = block,
+        .tag = tag,
+    };
+}
+
+fn parse_symbol(p: *Parser, how_to_parse: HowToParseSymbol) *Ast.Symbol {
+    const result = try_parse_symbol(p);
+    const symbol = insert_symbol(p, result, how_to_parse);
+    return symbol;
+}
+
+fn parse_symbol_list(p: *Parser, fields: *Ast.SymbolList, rest: ?*Ast.SymbolList, how_to_parse: HowToParseSymbol) void {
+    var tt = p.lexer.peek();
+    while (tt != .End_Of_File and tt != .Right_Parenthesis and tt != .Right_Brace) {
+        const symbol = parse_symbol(p, how_to_parse);
+        var expect_comma = false;
+
+        {
+            const node = p.ast.create(Ast.SymbolList.Node);
+            node.* = .{
+                .data = symbol,
+            };
+
+            switch (symbol.as) {
+                .Struct_Field,
+                .Union_Field,
+                .Enum_Field,
+                .Parameter,
+                => {
+                    expect_comma = true;
+                    fields.append(node);
+                },
+                .Variable,
+                .Procedure,
+                .Type,
+                => {
+                    rest.?.append(node);
+                },
+            }
+        }
+
+        tt = p.lexer.peek();
+        if (expect_comma and tt != .End_Of_File and tt != .Right_Parenthesis and tt != .Right_Brace) {
+            p.lexer.expect(.Comma);
+            tt = p.lexer.peek();
+        }
+    }
+}
+
+fn parse_top_level(p: *Parser) void {
+    while (p.lexer.peek() != .End_Of_File) {
+        const stmt = parse_stmt(p);
+        switch (stmt.as) {
+            .Symbol => |symbol| {
+                const node = p.ast.create(Ast.SymbolList.Node);
+                node.* = .{
+                    .data = symbol,
+                };
+                p.ast.globals.append(node);
+            },
+            else => {
+                p.c.report_error(stmt.position, "expected symbol definition", .{});
+            },
+        }
+    }
+
+    std.debug.assert(p.current_scope == &Ast.global_scope);
+
+    if (p.c.had_error) {
+        exit(1);
+    }
+}
+
+pub fn parse(p: *Parser) void {
+    parse_top_level(p);
+}
+
+const exit = nostd.exit;
+
+const Token = Lexer.Token;
+
+const std = @import("std");
+const nostd = @import("nostd.zig");
+const Compiler = @import("Compiler.zig");
+const Lexer = @import("Lexer.zig");
+const Ast = @import("Ast.zig");
