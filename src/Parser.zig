@@ -65,491 +65,493 @@ fn parse_type(parser: *Parser) *Ast.Type {
     return parser.ast.expression_to_type(parse_expression(parser));
 }
 
+fn parse_base_expression(parser: *Parser) *Ast.Expression {
+    const token = grab(parser);
+    advance(parser);
+
+    switch (token.as) {
+        .And => {
+            const subsubexpression = parse_expression_highest_prec(parser);
+            const subexpression = parser.ast.create(Ast.Expression);
+            subexpression.* = .{
+                .position = token.position,
+                .as = .{ .Ref = subsubexpression },
+                .typ = Ast.void_type,
+                .flags = .{},
+                .typechecking = .None,
+            };
+            subexpression.position.column += 1;
+            subexpression.position.offset += 1;
+            const expression = parser.ast.create(Ast.Expression);
+            expression.* = .{
+                .position = token.position,
+                .as = .{ .Ref = subexpression },
+                .typ = Ast.void_type,
+                .flags = .{},
+                .typechecking = .None,
+            };
+            return expression;
+        },
+        .Plus,
+        .Minus,
+        .Not,
+        => {
+            const subexpression = parse_expression_highest_prec(parser);
+            const expression = parser.ast.create(Ast.Expression);
+            expression.* = .{
+                .position = subexpression.position,
+                .as = .{ .Unary_Op = .{
+                    .subexpression = subexpression,
+                    .tag = switch (token.as) {
+                        .Plus => .Pos,
+                        .Minus => .Neg,
+                        .Not => .Not,
+                        else => unreachable,
+                    },
+                } },
+                .typ = Ast.void_type,
+                .flags = .{},
+                .typechecking = .None,
+            };
+            return expression;
+        },
+        .Reference => {
+            const subexpression = parse_expression_highest_prec(parser);
+            const expression = parser.ast.create(Ast.Expression);
+            expression.* = .{
+                .position = subexpression.position,
+                .as = .{ .Ref = subexpression },
+                .typ = Ast.void_type,
+                .flags = .{},
+                .typechecking = .None,
+            };
+            return expression;
+        },
+        .Left_Parenthesis => {
+            const expression = parse_expression(parser);
+            expression.position = token.position;
+            expect(parser, .Right_Parenthesis);
+            return expression;
+        },
+        .If => {
+            const condition = parse_expression(parser);
+            if (peek(parser) == .Then) {
+                advance(parser);
+            }
+            const true_branch = parse_expression(parser);
+            expect(parser, .Else);
+            const false_branch = parse_expression(parser);
+
+            const expression = parser.ast.create(Ast.Expression);
+            expression.* = .{
+                .position = token.position,
+                .as = .{ .If = .{
+                    .condition = condition,
+                    .true_branch = true_branch,
+                    .false_branch = false_branch,
+                } },
+                .typ = Ast.void_type,
+                .flags = .{},
+                .typechecking = .None,
+            };
+
+            return expression;
+        },
+        .Boolean_Literal => |value| {
+            const expression = parser.ast.create(Ast.Expression);
+            expression.* = .{
+                .position = token.position,
+                .as = .{ .Boolean = value },
+                .typ = Ast.bool_type,
+                .flags = .{},
+                .typechecking = .None,
+            };
+            return expression;
+        },
+        .Null_Literal => {
+            const expression = parser.ast.create(Ast.Expression);
+            expression.* = .{
+                .position = token.position,
+                .as = .Null,
+                .typ = Ast.void_pointer_type,
+                .flags = .{},
+                .typechecking = .None,
+            };
+            return expression;
+        },
+        .Identifier => |name| {
+            const expression = parser.ast.create(Ast.Expression);
+            expression.* = .{
+                .position = token.position,
+                .as = .{ .Identifier = .{
+                    .name = name,
+                    .scope = parser.current_scope,
+                } },
+                .typ = Ast.void_type,
+                .flags = .{},
+                .typechecking = .None,
+            };
+            return expression;
+        },
+        .Integer_Literal => |value| {
+            const typ = Ast.integer_type_from_u64(value);
+            const expression = parser.ast.create(Ast.Expression);
+            expression.* = .{
+                .position = token.position,
+                .as = .{ .Integer = value },
+                .typ = typ,
+                .flags = .{},
+                .typechecking = .None,
+            };
+            return expression;
+        },
+        .Byte_Size_Of => {
+            var expressions: [1]*Ast.Expression = undefined;
+            const count = parse_fixed_size_expression_list(parser, &expressions);
+
+            switch (count) {
+                1 => {
+                    const expression = parser.ast.create(Ast.Expression);
+                    expression.* = .{
+                        .position = token.position,
+                        .as = .{ .Byte_Size_Of = expressions[0] },
+                        .typ = Ast.void_type,
+                        .flags = .{},
+                        .typechecking = .None,
+                    };
+                    return expression;
+                },
+                else => {
+                    parser.c.report_error(token.position, "expected 1 argument, but got {}", .{count});
+                    exit(1);
+                },
+            }
+        },
+        .Alignment_Of => {
+            var expressions: [1]*Ast.Expression = undefined;
+            const count = parse_fixed_size_expression_list(parser, &expressions);
+
+            switch (count) {
+                1 => {
+                    const expression = parser.ast.create(Ast.Expression);
+                    expression.* = .{
+                        .position = token.position,
+                        .as = .{ .Alignment_Of = expressions[0] },
+                        .typ = Ast.void_type,
+                        .flags = .{},
+                        .typechecking = .None,
+                    };
+                    return expression;
+                },
+                else => {
+                    parser.c.report_error(token.position, "expected 1 argument, but got {}", .{count});
+                    exit(1);
+                },
+            }
+        },
+        .As => {
+            var expressions: [2]*Ast.Expression = undefined;
+            const count = parse_fixed_size_expression_list(parser, &expressions);
+
+            switch (count) {
+                2 => {
+                    const typ = parser.ast.expression_to_type(expressions[0]);
+                    const expression = parser.ast.create(Ast.Expression);
+                    expression.* = .{
+                        .position = token.position,
+                        .as = .{ .As = .{
+                            .typ = typ,
+                            .expression = expressions[1],
+                        } },
+                        .typ = typ,
+                        .flags = .{},
+                        .typechecking = .None,
+                    };
+                    return expression;
+                },
+                else => {
+                    parser.c.report_error(token.position, "expected 2 arguments, but got {}", .{count});
+                    exit(1);
+                },
+            }
+        },
+        .Cast => {
+            var expressions: [2]*Ast.Expression = undefined;
+            const count = parse_fixed_size_expression_list(parser, &expressions);
+
+            switch (count) {
+                2 => {
+                    const typ = parser.ast.expression_to_type(expressions[0]);
+                    const expression = parser.ast.create(Ast.Expression);
+                    expression.* = .{
+                        .position = token.position,
+                        .as = .{ .Cast = .{
+                            .typ = typ,
+                            .expression = expressions[1],
+                        } },
+                        .typ = typ,
+                        .flags = .{},
+                        .typechecking = .None,
+                    };
+                    return expression;
+                },
+                else => {
+                    parser.c.report_error(token.position, "expected 2 arguments, but got {}", .{count});
+                    exit(1);
+                },
+            }
+        },
+        .Struct => {
+            expect(parser, .Left_Brace);
+            push_scope(parser);
+            const scope = parser.current_scope;
+            const fields = parser.ast.create(Ast.SymbolList);
+            const rest = parser.ast.create(Ast.SymbolList);
+            fields.* = .{};
+            rest.* = .{};
+            parse_symbol_list(parser, fields, rest, .{ .Parsing_Container = .Struct });
+            pop_scope(parser);
+            expect(parser, .Right_Brace);
+            const data = parser.ast.create(Ast.Type.SharedData);
+            data.* = .{
+                .as = .{ .Struct = .{
+                    .fields = fields,
+                    .rest = rest,
+                    .scope = scope,
+                } },
+                .byte_size = 0,
+                .alignment = .Byte,
+                .stages = Ast.default_stages_none,
+            };
+            const expression = parser.ast.create(Ast.Expression);
+            expression.* = .{
+                .position = token.position,
+                .as = .{ .Type = .{
+                    .position = token.position,
+                    .data = data,
+                    .symbol = null,
+                } },
+                .typ = Ast.void_type,
+                .flags = .{},
+                .typechecking = .None,
+            };
+            {
+                const node = parser.ast.create(Ast.TypeList.Node);
+                node.* = .{
+                    .data = &expression.as.Type,
+                };
+                parser.ast.namespaces.append(node);
+            }
+            return expression;
+        },
+        .Union => {
+            expect(parser, .Left_Brace);
+            push_scope(parser);
+            const scope = parser.current_scope;
+            const fields = parser.ast.create(Ast.SymbolList);
+            const rest = parser.ast.create(Ast.SymbolList);
+            fields.* = .{};
+            rest.* = .{};
+            parse_symbol_list(parser, fields, rest, .{ .Parsing_Container = .Union });
+            pop_scope(parser);
+            expect(parser, .Right_Brace);
+            const data = parser.ast.create(Ast.Type.SharedData);
+            data.* = .{
+                .as = .{ .Union = .{
+                    .fields = fields,
+                    .rest = rest,
+                    .scope = scope,
+                } },
+                .byte_size = 0,
+                .alignment = .Byte,
+                .stages = Ast.default_stages_none,
+            };
+            const expression = parser.ast.create(Ast.Expression);
+            expression.* = .{
+                .position = token.position,
+                .as = .{ .Type = .{
+                    .position = token.position,
+                    .data = data,
+                    .symbol = null,
+                } },
+                .typ = Ast.void_type,
+                .flags = .{},
+                .typechecking = .None,
+            };
+            {
+                const node = parser.ast.create(Ast.TypeList.Node);
+                node.* = .{
+                    .data = &expression.as.Type,
+                };
+                parser.ast.namespaces.append(node);
+            }
+            return expression;
+        },
+        .Enum => {
+            expect(parser, .Left_Brace);
+            push_scope(parser);
+            const scope = parser.current_scope;
+            const fields = parser.ast.create(Ast.SymbolList);
+            const rest = parser.ast.create(Ast.SymbolList);
+            fields.* = .{};
+            rest.* = .{};
+            parse_symbol_list(parser, fields, rest, .{ .Parsing_Container = .Enum });
+            pop_scope(parser);
+            expect(parser, .Right_Brace);
+            const data = parser.ast.create(Ast.Type.SharedData);
+            data.* = .{
+                .as = .{ .Enum = .{
+                    .fields = fields,
+                    .rest = rest,
+                    .integer_type = Ast.lookup_integer_type(0, false),
+                    .scope = scope,
+                } },
+                .byte_size = 0,
+                .alignment = .Byte,
+                .stages = Ast.default_stages_none,
+            };
+            const expression = parser.ast.create(Ast.Expression);
+            expression.* = .{
+                .position = token.position,
+                .as = .{ .Type = .{
+                    .position = token.position,
+                    .data = data,
+                    .symbol = null,
+                } },
+                .typ = Ast.void_type,
+                .flags = .{},
+                .typechecking = .None,
+            };
+            {
+                const node = parser.ast.create(Ast.TypeList.Node);
+                node.* = .{
+                    .data = &expression.as.Type,
+                };
+                parser.ast.namespaces.append(node);
+            }
+            return expression;
+        },
+        .Proc => {
+            expect(parser, .Left_Parenthesis);
+            push_scope(parser);
+            const scope = parser.current_scope;
+            var params = Ast.SymbolList{};
+            parse_symbol_list(parser, &params, null, .Parsing_Procedure);
+            pop_scope(parser);
+            expect(parser, .Right_Parenthesis);
+            const return_type = parse_type(parser);
+            const data = parser.ast.create(Ast.Type.SharedData);
+            data.* = .{
+                .as = .{ .Proc = .{
+                    .params = params,
+                    .return_type = return_type,
+                    .scope = scope,
+                } },
+                .byte_size = Ast.pointer_byte_size,
+                .alignment = Ast.pointer_alignment,
+                .stages = Ast.default_stages_none,
+            };
+            const expression = parser.ast.create(Ast.Expression);
+            expression.* = .{
+                .position = token.position,
+                .as = .{ .Type = .{
+                    .position = token.position,
+                    .data = data,
+                    .symbol = null,
+                } },
+                .typ = Ast.void_type,
+                .flags = .{},
+                .typechecking = .None,
+            };
+            return expression;
+        },
+        .Integer_Type => |Integer_Type| {
+            const typ = Ast.lookup_integer_type(Integer_Type.bits, Integer_Type.is_signed);
+            const expression = parser.ast.create(Ast.Expression);
+            expression.* = .{
+                .position = token.position,
+                .as = .{ .Type = .{
+                    .position = token.position,
+                    .data = typ.data,
+                    .symbol = null,
+                } },
+                .typ = Ast.void_type,
+                .flags = .{},
+                .typechecking = .None,
+            };
+            return expression;
+        },
+        .Boolean_Type => {
+            const expression = parser.ast.create(Ast.Expression);
+            expression.* = .{
+                .position = token.position,
+                .as = .{ .Type = .{
+                    .position = token.position,
+                    .data = Ast.bool_type.data,
+                    .symbol = null,
+                } },
+                .typ = Ast.void_type,
+                .flags = .{},
+                .typechecking = .None,
+            };
+            return expression;
+        },
+        .Void_Type => {
+            const expression = parser.ast.create(Ast.Expression);
+            expression.* = .{
+                .position = token.position,
+                .as = .{ .Type = .{
+                    .position = token.position,
+                    .data = Ast.void_type.data,
+                    .symbol = null,
+                } },
+                .typ = Ast.void_type,
+                .flags = .{},
+                .typechecking = .None,
+            };
+            return expression;
+        },
+        .Type_Of => {
+            var expressions: [1]*Ast.Expression = undefined;
+            const count = parse_fixed_size_expression_list(parser, &expressions);
+            switch (count) {
+                1 => {
+                    const data = parser.ast.create(Ast.Type.SharedData);
+                    data.* = .{
+                        .as = .{ .Type_Of = expressions[0] },
+                        .byte_size = 0,
+                        .alignment = .Byte,
+                        .stages = Ast.default_stages_none,
+                    };
+                    const expression = parser.ast.create(Ast.Expression);
+                    expression.* = .{
+                        .position = token.position,
+                        .as = .{ .Type = .{
+                            .position = token.position,
+                            .data = data,
+                            .symbol = null,
+                        } },
+                        .typ = Ast.void_type,
+                        .flags = .{},
+                        .typechecking = .None,
+                    };
+                    return expression;
+                },
+                else => {
+                    parser.c.report_error(token.position, "expected 1 arguments, but got {}", .{count});
+                    exit(1);
+                },
+            }
+        },
+        else => {
+            parser.c.report_error(token.position, "token doesn't start an expression or a type", .{});
+            exit(1);
+        },
+    }
+}
+
 fn parse_expression_highest_prec(parser: *Parser) *Ast.Expression {
-    var base: *Ast.Expression = base: {
-        const tok = grab(parser);
-        advance(parser);
-
-        switch (tok.as) {
-            .And => {
-                const subsubexpression = parse_expression_highest_prec(parser);
-                const subexpression = parser.ast.create(Ast.Expression);
-                subexpression.* = .{
-                    .position = tok.position,
-                    .as = .{ .Ref = subsubexpression },
-                    .typ = Ast.void_type,
-                    .flags = .{},
-                    .typechecking = .None,
-                };
-                subexpression.position.column += 1;
-                subexpression.position.offset += 1;
-                const expression = parser.ast.create(Ast.Expression);
-                expression.* = .{
-                    .position = tok.position,
-                    .as = .{ .Ref = subexpression },
-                    .typ = Ast.void_type,
-                    .flags = .{},
-                    .typechecking = .None,
-                };
-                break :base expression;
-            },
-            .Plus,
-            .Minus,
-            .Not,
-            => {
-                const subexpression = parse_expression_highest_prec(parser);
-                const expression = parser.ast.create(Ast.Expression);
-                expression.* = .{
-                    .position = subexpression.position,
-                    .as = .{ .Unary_Op = .{
-                        .subexpression = subexpression,
-                        .tag = switch (tok.as) {
-                            .Plus => .Pos,
-                            .Minus => .Neg,
-                            .Not => .Not,
-                            else => unreachable,
-                        },
-                    } },
-                    .typ = Ast.void_type,
-                    .flags = .{},
-                    .typechecking = .None,
-                };
-                break :base expression;
-            },
-            .Reference => {
-                const subexpression = parse_expression_highest_prec(parser);
-                const expression = parser.ast.create(Ast.Expression);
-                expression.* = .{
-                    .position = subexpression.position,
-                    .as = .{ .Ref = subexpression },
-                    .typ = Ast.void_type,
-                    .flags = .{},
-                    .typechecking = .None,
-                };
-                break :base expression;
-            },
-            .Left_Parenthesis => {
-                const expression = parse_expression(parser);
-                expression.position = tok.position;
-                expect(parser, .Right_Parenthesis);
-                break :base expression;
-            },
-            .If => {
-                const condition = parse_expression(parser);
-                if (peek(parser) == .Then) {
-                    advance(parser);
-                }
-                const true_branch = parse_expression(parser);
-                expect(parser, .Else);
-                const false_branch = parse_expression(parser);
-
-                const expression = parser.ast.create(Ast.Expression);
-                expression.* = .{
-                    .position = tok.position,
-                    .as = .{ .If = .{
-                        .condition = condition,
-                        .true_branch = true_branch,
-                        .false_branch = false_branch,
-                    } },
-                    .typ = Ast.void_type,
-                    .flags = .{},
-                    .typechecking = .None,
-                };
-
-                break :base expression;
-            },
-            .Boolean_Literal => |value| {
-                const expression = parser.ast.create(Ast.Expression);
-                expression.* = .{
-                    .position = tok.position,
-                    .as = .{ .Boolean = value },
-                    .typ = Ast.bool_type,
-                    .flags = .{},
-                    .typechecking = .None,
-                };
-                break :base expression;
-            },
-            .Null_Literal => {
-                const expression = parser.ast.create(Ast.Expression);
-                expression.* = .{
-                    .position = tok.position,
-                    .as = .Null,
-                    .typ = Ast.void_pointer_type,
-                    .flags = .{},
-                    .typechecking = .None,
-                };
-                break :base expression;
-            },
-            .Identifier => |name| {
-                const expression = parser.ast.create(Ast.Expression);
-                expression.* = .{
-                    .position = tok.position,
-                    .as = .{ .Identifier = .{
-                        .name = name,
-                        .scope = parser.current_scope,
-                    } },
-                    .typ = Ast.void_type,
-                    .flags = .{},
-                    .typechecking = .None,
-                };
-                break :base expression;
-            },
-            .Integer_Literal => |value| {
-                const typ = Ast.integer_type_from_u64(value);
-                const expression = parser.ast.create(Ast.Expression);
-                expression.* = .{
-                    .position = tok.position,
-                    .as = .{ .Integer = value },
-                    .typ = typ,
-                    .flags = .{},
-                    .typechecking = .None,
-                };
-                break :base expression;
-            },
-            .Byte_Size_Of => {
-                var expressions: [1]*Ast.Expression = undefined;
-                const count = parse_fixed_size_expression_list(parser, &expressions);
-
-                switch (count) {
-                    1 => {
-                        const expression = parser.ast.create(Ast.Expression);
-                        expression.* = .{
-                            .position = tok.position,
-                            .as = .{ .Byte_Size_Of = expressions[0] },
-                            .typ = Ast.void_type,
-                            .flags = .{},
-                            .typechecking = .None,
-                        };
-                        break :base expression;
-                    },
-                    else => {
-                        parser.c.report_error(tok.position, "expected 1 argument, but got {}", .{count});
-                        exit(1);
-                    },
-                }
-            },
-            .Alignment_Of => {
-                var expressions: [1]*Ast.Expression = undefined;
-                const count = parse_fixed_size_expression_list(parser, &expressions);
-
-                switch (count) {
-                    1 => {
-                        const expression = parser.ast.create(Ast.Expression);
-                        expression.* = .{
-                            .position = tok.position,
-                            .as = .{ .Alignment_Of = expressions[0] },
-                            .typ = Ast.void_type,
-                            .flags = .{},
-                            .typechecking = .None,
-                        };
-                        break :base expression;
-                    },
-                    else => {
-                        parser.c.report_error(tok.position, "expected 1 argument, but got {}", .{count});
-                        exit(1);
-                    },
-                }
-            },
-            .As => {
-                var expressions: [2]*Ast.Expression = undefined;
-                const count = parse_fixed_size_expression_list(parser, &expressions);
-
-                switch (count) {
-                    2 => {
-                        const typ = parser.ast.expression_to_type(expressions[0]);
-                        const expression = parser.ast.create(Ast.Expression);
-                        expression.* = .{
-                            .position = tok.position,
-                            .as = .{ .As = .{
-                                .typ = typ,
-                                .expression = expressions[1],
-                            } },
-                            .typ = typ,
-                            .flags = .{},
-                            .typechecking = .None,
-                        };
-                        break :base expression;
-                    },
-                    else => {
-                        parser.c.report_error(tok.position, "expected 2 arguments, but got {}", .{count});
-                        exit(1);
-                    },
-                }
-            },
-            .Cast => {
-                var expressions: [2]*Ast.Expression = undefined;
-                const count = parse_fixed_size_expression_list(parser, &expressions);
-
-                switch (count) {
-                    2 => {
-                        const typ = parser.ast.expression_to_type(expressions[0]);
-                        const expression = parser.ast.create(Ast.Expression);
-                        expression.* = .{
-                            .position = tok.position,
-                            .as = .{ .Cast = .{
-                                .typ = typ,
-                                .expression = expressions[1],
-                            } },
-                            .typ = typ,
-                            .flags = .{},
-                            .typechecking = .None,
-                        };
-                        break :base expression;
-                    },
-                    else => {
-                        parser.c.report_error(tok.position, "expected 2 arguments, but got {}", .{count});
-                        exit(1);
-                    },
-                }
-            },
-            .Struct => {
-                expect(parser, .Left_Brace);
-                push_scope(parser);
-                const scope = parser.current_scope;
-                const fields = parser.ast.create(Ast.SymbolList);
-                const rest = parser.ast.create(Ast.SymbolList);
-                fields.* = .{};
-                rest.* = .{};
-                parse_symbol_list(parser, fields, rest, .{ .Parsing_Container = .Struct });
-                pop_scope(parser);
-                expect(parser, .Right_Brace);
-                const data = parser.ast.create(Ast.Type.SharedData);
-                data.* = .{
-                    .as = .{ .Struct = .{
-                        .fields = fields,
-                        .rest = rest,
-                        .scope = scope,
-                    } },
-                    .byte_size = 0,
-                    .alignment = .Byte,
-                    .stages = Ast.default_stages_none,
-                };
-                const expression = parser.ast.create(Ast.Expression);
-                expression.* = .{
-                    .position = tok.position,
-                    .as = .{ .Type = .{
-                        .position = tok.position,
-                        .data = data,
-                        .symbol = null,
-                    } },
-                    .typ = Ast.void_type,
-                    .flags = .{},
-                    .typechecking = .None,
-                };
-                {
-                    const node = parser.ast.create(Ast.TypeList.Node);
-                    node.* = .{
-                        .data = &expression.as.Type,
-                    };
-                    parser.ast.namespaces.append(node);
-                }
-                break :base expression;
-            },
-            .Union => {
-                expect(parser, .Left_Brace);
-                push_scope(parser);
-                const scope = parser.current_scope;
-                const fields = parser.ast.create(Ast.SymbolList);
-                const rest = parser.ast.create(Ast.SymbolList);
-                fields.* = .{};
-                rest.* = .{};
-                parse_symbol_list(parser, fields, rest, .{ .Parsing_Container = .Union });
-                pop_scope(parser);
-                expect(parser, .Right_Brace);
-                const data = parser.ast.create(Ast.Type.SharedData);
-                data.* = .{
-                    .as = .{ .Union = .{
-                        .fields = fields,
-                        .rest = rest,
-                        .scope = scope,
-                    } },
-                    .byte_size = 0,
-                    .alignment = .Byte,
-                    .stages = Ast.default_stages_none,
-                };
-                const expression = parser.ast.create(Ast.Expression);
-                expression.* = .{
-                    .position = tok.position,
-                    .as = .{ .Type = .{
-                        .position = tok.position,
-                        .data = data,
-                        .symbol = null,
-                    } },
-                    .typ = Ast.void_type,
-                    .flags = .{},
-                    .typechecking = .None,
-                };
-                {
-                    const node = parser.ast.create(Ast.TypeList.Node);
-                    node.* = .{
-                        .data = &expression.as.Type,
-                    };
-                    parser.ast.namespaces.append(node);
-                }
-                break :base expression;
-            },
-            .Enum => {
-                expect(parser, .Left_Brace);
-                push_scope(parser);
-                const scope = parser.current_scope;
-                const fields = parser.ast.create(Ast.SymbolList);
-                const rest = parser.ast.create(Ast.SymbolList);
-                fields.* = .{};
-                rest.* = .{};
-                parse_symbol_list(parser, fields, rest, .{ .Parsing_Container = .Enum });
-                pop_scope(parser);
-                expect(parser, .Right_Brace);
-                const data = parser.ast.create(Ast.Type.SharedData);
-                data.* = .{
-                    .as = .{ .Enum = .{
-                        .fields = fields,
-                        .rest = rest,
-                        .integer_type = Ast.lookup_integer_type(0, false),
-                        .scope = scope,
-                    } },
-                    .byte_size = 0,
-                    .alignment = .Byte,
-                    .stages = Ast.default_stages_none,
-                };
-                const expression = parser.ast.create(Ast.Expression);
-                expression.* = .{
-                    .position = tok.position,
-                    .as = .{ .Type = .{
-                        .position = tok.position,
-                        .data = data,
-                        .symbol = null,
-                    } },
-                    .typ = Ast.void_type,
-                    .flags = .{},
-                    .typechecking = .None,
-                };
-                {
-                    const node = parser.ast.create(Ast.TypeList.Node);
-                    node.* = .{
-                        .data = &expression.as.Type,
-                    };
-                    parser.ast.namespaces.append(node);
-                }
-                break :base expression;
-            },
-            .Proc => {
-                expect(parser, .Left_Parenthesis);
-                push_scope(parser);
-                const scope = parser.current_scope;
-                var params = Ast.SymbolList{};
-                parse_symbol_list(parser, &params, null, .Parsing_Procedure);
-                pop_scope(parser);
-                expect(parser, .Right_Parenthesis);
-                const return_type = parse_type(parser);
-                const data = parser.ast.create(Ast.Type.SharedData);
-                data.* = .{
-                    .as = .{ .Proc = .{
-                        .params = params,
-                        .return_type = return_type,
-                        .scope = scope,
-                    } },
-                    .byte_size = Ast.pointer_byte_size,
-                    .alignment = Ast.pointer_alignment,
-                    .stages = Ast.default_stages_none,
-                };
-                const expression = parser.ast.create(Ast.Expression);
-                expression.* = .{
-                    .position = tok.position,
-                    .as = .{ .Type = .{
-                        .position = tok.position,
-                        .data = data,
-                        .symbol = null,
-                    } },
-                    .typ = Ast.void_type,
-                    .flags = .{},
-                    .typechecking = .None,
-                };
-                break :base expression;
-            },
-            .Integer_Type => |Integer_Type| {
-                const typ = Ast.lookup_integer_type(Integer_Type.bits, Integer_Type.is_signed);
-                const expression = parser.ast.create(Ast.Expression);
-                expression.* = .{
-                    .position = tok.position,
-                    .as = .{ .Type = .{
-                        .position = tok.position,
-                        .data = typ.data,
-                        .symbol = null,
-                    } },
-                    .typ = Ast.void_type,
-                    .flags = .{},
-                    .typechecking = .None,
-                };
-                break :base expression;
-            },
-            .Boolean_Type => {
-                const expression = parser.ast.create(Ast.Expression);
-                expression.* = .{
-                    .position = tok.position,
-                    .as = .{ .Type = .{
-                        .position = tok.position,
-                        .data = Ast.bool_type.data,
-                        .symbol = null,
-                    } },
-                    .typ = Ast.void_type,
-                    .flags = .{},
-                    .typechecking = .None,
-                };
-                break :base expression;
-            },
-            .Void_Type => {
-                const expression = parser.ast.create(Ast.Expression);
-                expression.* = .{
-                    .position = tok.position,
-                    .as = .{ .Type = .{
-                        .position = tok.position,
-                        .data = Ast.void_type.data,
-                        .symbol = null,
-                    } },
-                    .typ = Ast.void_type,
-                    .flags = .{},
-                    .typechecking = .None,
-                };
-                break :base expression;
-            },
-            .Type_Of => {
-                var expressions: [1]*Ast.Expression = undefined;
-                const count = parse_fixed_size_expression_list(parser, &expressions);
-                switch (count) {
-                    1 => {
-                        const data = parser.ast.create(Ast.Type.SharedData);
-                        data.* = .{
-                            .as = .{ .Type_Of = expressions[0] },
-                            .byte_size = 0,
-                            .alignment = .Byte,
-                            .stages = Ast.default_stages_none,
-                        };
-                        const expression = parser.ast.create(Ast.Expression);
-                        expression.* = .{
-                            .position = tok.position,
-                            .as = .{ .Type = .{
-                                .position = tok.position,
-                                .data = data,
-                                .symbol = null,
-                            } },
-                            .typ = Ast.void_type,
-                            .flags = .{},
-                            .typechecking = .None,
-                        };
-                        break :base expression;
-                    },
-                    else => {
-                        parser.c.report_error(tok.position, "expected 1 arguments, but got {}", .{count});
-                        exit(1);
-                    },
-                }
-            },
-            else => {
-                parser.c.report_error(tok.position, "token doesn't start an expression or a type", .{});
-                exit(1);
-            },
-        }
-    };
+    var base = parse_base_expression(parser);
 
     while (true) {
         switch (peek(parser)) {
