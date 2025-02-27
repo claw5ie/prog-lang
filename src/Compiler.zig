@@ -22,7 +22,6 @@ pub fn compile() void {
     switch (options.mode) {
         .Build => {
             const Parser = @import("Parser.zig");
-            const Ast = @import("Ast.zig");
             const TypeChecker = @import("TypeChecker.zig");
             const IRGenerator = @import("IRGenerator.zig");
 
@@ -54,19 +53,16 @@ pub fn compile() void {
             defer compiler.string_pool.deinit();
             defer nostd.general_allocator.free(compiler.source_code);
 
-            var ast = Ast.init(&compiler);
-            var parser = Parser.init(&compiler, &ast);
+            var ast = Parser.parse(&compiler);
             var ir = IR.init();
             var ir_generator = IRGenerator.init(&ast, &ir);
 
-            parser.parse();
             TypeChecker.check(&compiler, &ast, &ir_generator);
             ir_generator.generate();
             ir.write_to_file(output_filepath);
 
             ir_generator.deinit();
             ir.deinit();
-            parser.deinit();
             ast.deinit();
         },
         .Run => {
