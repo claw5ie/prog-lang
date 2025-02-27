@@ -70,237 +70,6 @@ fn parse_base_expression(parser: *Parser) *Ast.Expression {
     advance(parser);
 
     switch (token.as) {
-        .And => {
-            const subsubexpression = parse_expression_highest_prec(parser);
-            const subexpression = parser.ast.create(Ast.Expression);
-            subexpression.* = .{
-                .position = token.position,
-                .as = .{ .Ref = subsubexpression },
-                .typ = Ast.void_type,
-                .flags = .{},
-                .typechecking = .None,
-            };
-            subexpression.position.column += 1;
-            subexpression.position.offset += 1;
-            const expression = parser.ast.create(Ast.Expression);
-            expression.* = .{
-                .position = token.position,
-                .as = .{ .Ref = subexpression },
-                .typ = Ast.void_type,
-                .flags = .{},
-                .typechecking = .None,
-            };
-            return expression;
-        },
-        .Plus,
-        .Minus,
-        .Not,
-        => {
-            const subexpression = parse_expression_highest_prec(parser);
-            const expression = parser.ast.create(Ast.Expression);
-            expression.* = .{
-                .position = subexpression.position,
-                .as = .{ .Unary_Op = .{
-                    .subexpression = subexpression,
-                    .tag = switch (token.as) {
-                        .Plus => .Pos,
-                        .Minus => .Neg,
-                        .Not => .Not,
-                        else => unreachable,
-                    },
-                } },
-                .typ = Ast.void_type,
-                .flags = .{},
-                .typechecking = .None,
-            };
-            return expression;
-        },
-        .Reference => {
-            const subexpression = parse_expression_highest_prec(parser);
-            const expression = parser.ast.create(Ast.Expression);
-            expression.* = .{
-                .position = subexpression.position,
-                .as = .{ .Ref = subexpression },
-                .typ = Ast.void_type,
-                .flags = .{},
-                .typechecking = .None,
-            };
-            return expression;
-        },
-        .Left_Parenthesis => {
-            const expression = parse_expression(parser);
-            expression.position = token.position;
-            expect(parser, .Right_Parenthesis);
-            return expression;
-        },
-        .If => {
-            const condition = parse_expression(parser);
-            if (peek(parser) == .Then) {
-                advance(parser);
-            }
-            const true_branch = parse_expression(parser);
-            expect(parser, .Else);
-            const false_branch = parse_expression(parser);
-
-            const expression = parser.ast.create(Ast.Expression);
-            expression.* = .{
-                .position = token.position,
-                .as = .{ .If = .{
-                    .condition = condition,
-                    .true_branch = true_branch,
-                    .false_branch = false_branch,
-                } },
-                .typ = Ast.void_type,
-                .flags = .{},
-                .typechecking = .None,
-            };
-
-            return expression;
-        },
-        .Boolean_Literal => |value| {
-            const expression = parser.ast.create(Ast.Expression);
-            expression.* = .{
-                .position = token.position,
-                .as = .{ .Boolean = value },
-                .typ = Ast.bool_type,
-                .flags = .{},
-                .typechecking = .None,
-            };
-            return expression;
-        },
-        .Null_Literal => {
-            const expression = parser.ast.create(Ast.Expression);
-            expression.* = .{
-                .position = token.position,
-                .as = .Null,
-                .typ = Ast.void_pointer_type,
-                .flags = .{},
-                .typechecking = .None,
-            };
-            return expression;
-        },
-        .Identifier => |name| {
-            const expression = parser.ast.create(Ast.Expression);
-            expression.* = .{
-                .position = token.position,
-                .as = .{ .Identifier = .{
-                    .name = name,
-                    .scope = parser.current_scope,
-                } },
-                .typ = Ast.void_type,
-                .flags = .{},
-                .typechecking = .None,
-            };
-            return expression;
-        },
-        .Integer_Literal => |value| {
-            const typ = Ast.integer_type_from_u64(value);
-            const expression = parser.ast.create(Ast.Expression);
-            expression.* = .{
-                .position = token.position,
-                .as = .{ .Integer = value },
-                .typ = typ,
-                .flags = .{},
-                .typechecking = .None,
-            };
-            return expression;
-        },
-        .Byte_Size_Of => {
-            var expressions: [1]*Ast.Expression = undefined;
-            const count = parse_fixed_size_expression_list(parser, &expressions);
-
-            switch (count) {
-                1 => {
-                    const expression = parser.ast.create(Ast.Expression);
-                    expression.* = .{
-                        .position = token.position,
-                        .as = .{ .Byte_Size_Of = expressions[0] },
-                        .typ = Ast.void_type,
-                        .flags = .{},
-                        .typechecking = .None,
-                    };
-                    return expression;
-                },
-                else => {
-                    parser.c.report_error(token.position, "expected 1 argument, but got {}", .{count});
-                    exit(1);
-                },
-            }
-        },
-        .Alignment_Of => {
-            var expressions: [1]*Ast.Expression = undefined;
-            const count = parse_fixed_size_expression_list(parser, &expressions);
-
-            switch (count) {
-                1 => {
-                    const expression = parser.ast.create(Ast.Expression);
-                    expression.* = .{
-                        .position = token.position,
-                        .as = .{ .Alignment_Of = expressions[0] },
-                        .typ = Ast.void_type,
-                        .flags = .{},
-                        .typechecking = .None,
-                    };
-                    return expression;
-                },
-                else => {
-                    parser.c.report_error(token.position, "expected 1 argument, but got {}", .{count});
-                    exit(1);
-                },
-            }
-        },
-        .As => {
-            var expressions: [2]*Ast.Expression = undefined;
-            const count = parse_fixed_size_expression_list(parser, &expressions);
-
-            switch (count) {
-                2 => {
-                    const typ = parser.ast.expression_to_type(expressions[0]);
-                    const expression = parser.ast.create(Ast.Expression);
-                    expression.* = .{
-                        .position = token.position,
-                        .as = .{ .As = .{
-                            .typ = typ,
-                            .expression = expressions[1],
-                        } },
-                        .typ = typ,
-                        .flags = .{},
-                        .typechecking = .None,
-                    };
-                    return expression;
-                },
-                else => {
-                    parser.c.report_error(token.position, "expected 2 arguments, but got {}", .{count});
-                    exit(1);
-                },
-            }
-        },
-        .Cast => {
-            var expressions: [2]*Ast.Expression = undefined;
-            const count = parse_fixed_size_expression_list(parser, &expressions);
-
-            switch (count) {
-                2 => {
-                    const typ = parser.ast.expression_to_type(expressions[0]);
-                    const expression = parser.ast.create(Ast.Expression);
-                    expression.* = .{
-                        .position = token.position,
-                        .as = .{ .Cast = .{
-                            .typ = typ,
-                            .expression = expressions[1],
-                        } },
-                        .typ = typ,
-                        .flags = .{},
-                        .typechecking = .None,
-                    };
-                    return expression;
-                },
-                else => {
-                    parser.c.report_error(token.position, "expected 2 arguments, but got {}", .{count});
-                    exit(1);
-                },
-            }
-        },
         .Struct => {
             expect(parser, .Left_Brace);
             push_scope(parser);
@@ -543,6 +312,243 @@ fn parse_base_expression(parser: *Parser) *Ast.Expression {
                 },
             }
         },
+
+        .Byte_Size_Of => {
+            var expressions: [1]*Ast.Expression = undefined;
+            const count = parse_fixed_size_expression_list(parser, &expressions);
+
+            switch (count) {
+                1 => {
+                    const expression = parser.ast.create(Ast.Expression);
+                    expression.* = .{
+                        .position = token.position,
+                        .as = .{ .Byte_Size_Of = expressions[0] },
+                        .typ = Ast.void_type,
+                        .flags = .{},
+                        .typechecking = .None,
+                    };
+                    return expression;
+                },
+                else => {
+                    parser.c.report_error(token.position, "expected 1 argument, but got {}", .{count});
+                    exit(1);
+                },
+            }
+        },
+        .Alignment_Of => {
+            var expressions: [1]*Ast.Expression = undefined;
+            const count = parse_fixed_size_expression_list(parser, &expressions);
+
+            switch (count) {
+                1 => {
+                    const expression = parser.ast.create(Ast.Expression);
+                    expression.* = .{
+                        .position = token.position,
+                        .as = .{ .Alignment_Of = expressions[0] },
+                        .typ = Ast.void_type,
+                        .flags = .{},
+                        .typechecking = .None,
+                    };
+                    return expression;
+                },
+                else => {
+                    parser.c.report_error(token.position, "expected 1 argument, but got {}", .{count});
+                    exit(1);
+                },
+            }
+        },
+        .As => {
+            var expressions: [2]*Ast.Expression = undefined;
+            const count = parse_fixed_size_expression_list(parser, &expressions);
+
+            switch (count) {
+                2 => {
+                    const typ = parser.ast.expression_to_type(expressions[0]);
+                    const expression = parser.ast.create(Ast.Expression);
+                    expression.* = .{
+                        .position = token.position,
+                        .as = .{ .As = .{
+                            .typ = typ,
+                            .expression = expressions[1],
+                        } },
+                        .typ = typ,
+                        .flags = .{},
+                        .typechecking = .None,
+                    };
+                    return expression;
+                },
+                else => {
+                    parser.c.report_error(token.position, "expected 2 arguments, but got {}", .{count});
+                    exit(1);
+                },
+            }
+        },
+        .Cast => {
+            var expressions: [2]*Ast.Expression = undefined;
+            const count = parse_fixed_size_expression_list(parser, &expressions);
+
+            switch (count) {
+                2 => {
+                    const typ = parser.ast.expression_to_type(expressions[0]);
+                    const expression = parser.ast.create(Ast.Expression);
+                    expression.* = .{
+                        .position = token.position,
+                        .as = .{ .Cast = .{
+                            .typ = typ,
+                            .expression = expressions[1],
+                        } },
+                        .typ = typ,
+                        .flags = .{},
+                        .typechecking = .None,
+                    };
+                    return expression;
+                },
+                else => {
+                    parser.c.report_error(token.position, "expected 2 arguments, but got {}", .{count});
+                    exit(1);
+                },
+            }
+        },
+        .Integer_Literal => |value| {
+            const typ = Ast.integer_type_from_u64(value);
+            const expression = parser.ast.create(Ast.Expression);
+            expression.* = .{
+                .position = token.position,
+                .as = .{ .Integer = value },
+                .typ = typ,
+                .flags = .{},
+                .typechecking = .None,
+            };
+            return expression;
+        },
+        .Boolean_Literal => |value| {
+            const expression = parser.ast.create(Ast.Expression);
+            expression.* = .{
+                .position = token.position,
+                .as = .{ .Boolean = value },
+                .typ = Ast.bool_type,
+                .flags = .{},
+                .typechecking = .None,
+            };
+            return expression;
+        },
+        .Null_Literal => {
+            const expression = parser.ast.create(Ast.Expression);
+            expression.* = .{
+                .position = token.position,
+                .as = .Null,
+                .typ = Ast.void_pointer_type,
+                .flags = .{},
+                .typechecking = .None,
+            };
+            return expression;
+        },
+        .Identifier => |name| {
+            const expression = parser.ast.create(Ast.Expression);
+            expression.* = .{
+                .position = token.position,
+                .as = .{ .Identifier = .{
+                    .name = name,
+                    .scope = parser.current_scope,
+                } },
+                .typ = Ast.void_type,
+                .flags = .{},
+                .typechecking = .None,
+            };
+            return expression;
+        },
+
+        .Left_Parenthesis => {
+            const expression = parse_expression(parser);
+            expression.position = token.position;
+            expect(parser, .Right_Parenthesis);
+            return expression;
+        },
+
+        .Reference => {
+            const subexpression = parse_expression_highest_prec(parser);
+            const expression = parser.ast.create(Ast.Expression);
+            expression.* = .{
+                .position = subexpression.position,
+                .as = .{ .Ref = subexpression },
+                .typ = Ast.void_type,
+                .flags = .{},
+                .typechecking = .None,
+            };
+            return expression;
+        },
+
+        .Not,
+        .Plus,
+        .Minus,
+        => {
+            const subexpression = parse_expression_highest_prec(parser);
+            const expression = parser.ast.create(Ast.Expression);
+            expression.* = .{
+                .position = subexpression.position,
+                .as = .{ .Unary_Op = .{
+                    .subexpression = subexpression,
+                    .tag = switch (token.as) {
+                        .Not => .Not,
+                        .Plus => .Pos,
+                        .Minus => .Neg,
+                        else => unreachable,
+                    },
+                } },
+                .typ = Ast.void_type,
+                .flags = .{},
+                .typechecking = .None,
+            };
+            return expression;
+        },
+
+        .And => {
+            const subsubexpression = parse_expression_highest_prec(parser);
+            const subexpression = parser.ast.create(Ast.Expression);
+            subexpression.* = .{
+                .position = token.position,
+                .as = .{ .Ref = subsubexpression },
+                .typ = Ast.void_type,
+                .flags = .{},
+                .typechecking = .None,
+            };
+            subexpression.position.column += 1;
+            subexpression.position.offset += 1;
+            const expression = parser.ast.create(Ast.Expression);
+            expression.* = .{
+                .position = token.position,
+                .as = .{ .Ref = subexpression },
+                .typ = Ast.void_type,
+                .flags = .{},
+                .typechecking = .None,
+            };
+            return expression;
+        },
+
+        .If => {
+            const condition = parse_expression(parser);
+            if (peek(parser) == .Then) {
+                advance(parser);
+            }
+            const true_branch = parse_expression(parser);
+            expect(parser, .Else);
+            const false_branch = parse_expression(parser);
+
+            const expression = parser.ast.create(Ast.Expression);
+            expression.* = .{
+                .position = token.position,
+                .as = .{ .If = .{
+                    .condition = condition,
+                    .true_branch = true_branch,
+                    .false_branch = false_branch,
+                } },
+                .typ = Ast.void_type,
+                .flags = .{},
+                .typechecking = .None,
+            };
+
+            return expression;
+        },
         else => {
             parser.c.report_error(token.position, "token doesn't start an expression or a type", .{});
             exit(1);
@@ -564,24 +570,6 @@ fn parse_expression_highest_prec(parser: *Parser) *Ast.Expression {
                     .as = .{ .Call = .{
                         .subexpression = base,
                         .args = args,
-                    } },
-                    .typ = Ast.void_type,
-                    .flags = .{},
-                    .typechecking = .None,
-                };
-                base = new_base;
-            },
-            .Left_Bracket => {
-                advance(parser);
-                const index = parse_expression(parser);
-                expect(parser, .Right_Bracket);
-
-                const new_base = parser.ast.create(Ast.Expression);
-                new_base.* = .{
-                    .position = base.position,
-                    .as = .{ .Subscript = .{
-                        .subexpression = base,
-                        .index = index,
                     } },
                     .typ = Ast.void_type,
                     .flags = .{},
@@ -625,6 +613,24 @@ fn parse_expression_highest_prec(parser: *Parser) *Ast.Expression {
                     .as = .{ .Field = .{
                         .subexpression = base,
                         .field = field,
+                    } },
+                    .typ = Ast.void_type,
+                    .flags = .{},
+                    .typechecking = .None,
+                };
+                base = new_base;
+            },
+            .Left_Bracket => {
+                advance(parser);
+                const index = parse_expression(parser);
+                expect(parser, .Right_Bracket);
+
+                const new_base = parser.ast.create(Ast.Expression);
+                new_base.* = .{
+                    .position = base.position,
+                    .as = .{ .Subscript = .{
+                        .subexpression = base,
+                        .index = index,
                     } },
                     .typ = Ast.void_type,
                     .flags = .{},
@@ -863,21 +869,6 @@ fn parse_statement(parser: *Parser) *Ast.Statement {
 
             return statement;
         },
-        .Left_Brace => {
-            putback(parser, tok);
-
-            push_scope(parser);
-            const block = parse_statement_list(parser);
-            pop_scope(parser);
-
-            const statement = parser.ast.create(Ast.Statement);
-            statement.* = .{
-                .position = tok.position,
-                .as = .{ .Block = block },
-            };
-
-            return statement;
-        },
         .If => {
             const condition = parse_expression(parser);
             if (peek(parser) == .Then) {
@@ -1000,6 +991,21 @@ fn parse_statement(parser: *Parser) *Ast.Statement {
             statement.* = .{
                 .position = tok.position,
                 .as = .{ .Return = expression },
+            };
+
+            return statement;
+        },
+        .Left_Brace => {
+            putback(parser, tok);
+
+            push_scope(parser);
+            const block = parse_statement_list(parser);
+            pop_scope(parser);
+
+            const statement = parser.ast.create(Ast.Statement);
+            statement.* = .{
+                .position = tok.position,
+                .as = .{ .Block = block },
             };
 
             return statement;
