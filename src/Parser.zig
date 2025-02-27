@@ -18,60 +18,91 @@ pub fn init(c: *Compiler, ast: *Ast) Parser {
 
 pub fn deinit(_: *Parser) void {}
 
-fn push_scope(p: *Parser) void {
-    const scope = p.ast.create(Ast.Scope);
+const TokenIndex = Lexer.TokenIndex;
+const Token = Lexer.Token;
+
+inline fn putback(parser: *Parser, token: Token) void {
+    parser.lexer.putback(token);
+}
+
+inline fn grab(parser: *Parser) Token {
+    return parser.lexer.grab();
+}
+
+inline fn peek_at(parser: *Parser, index: TokenIndex) Token.Tag {
+    return parser.lexer.peek_at(index);
+}
+
+inline fn peek(parser: *Parser) Token.Tag {
+    return parser.lexer.peek();
+}
+
+inline fn advance_many(parser: *Parser, count: TokenIndex) void {
+    parser.lexer.advance_many(count);
+}
+
+inline fn advance(parser: *Parser) void {
+    parser.lexer.advance();
+}
+
+inline fn expect(parser: *Parser, expected: Token.Tag) void {
+    parser.lexer.expect(expected);
+}
+
+fn push_scope(parser: *Parser) void {
+    const scope = parser.ast.create(Ast.Scope);
     scope.* = .{
-        .parent = p.current_scope,
+        .parent = parser.current_scope,
     };
-    p.current_scope = scope;
+    parser.current_scope = scope;
 }
 
-fn pop_scope(p: *Parser) void {
-    p.current_scope = p.current_scope.parent.?;
+fn pop_scope(parser: *Parser) void {
+    parser.current_scope = parser.current_scope.parent.?;
 }
 
-fn parse_type(p: *Parser) *Ast.Type {
-    return p.ast.expr_to_type(parse_expr(p));
+fn parse_type(parser: *Parser) *Ast.Type {
+    return parser.ast.expression_to_type(parse_expression(parser));
 }
 
-fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
-    var base: *Ast.Expr = base: {
-        const tok = p.lexer.grab();
-        p.lexer.advance();
+fn parse_expression_highest_prec(parser: *Parser) *Ast.Expression {
+    var base: *Ast.Expression = base: {
+        const tok = grab(parser);
+        advance(parser);
 
         switch (tok.as) {
             .And => {
-                const subsubexpr = parse_expr_highest_prec(p);
-                const subexpr = p.ast.create(Ast.Expr);
-                subexpr.* = .{
+                const subsubexpression = parse_expression_highest_prec(parser);
+                const subexpression = parser.ast.create(Ast.Expression);
+                subexpression.* = .{
                     .position = tok.position,
-                    .as = .{ .Ref = subsubexpr },
+                    .as = .{ .Ref = subsubexpression },
                     .typ = Ast.void_type,
                     .flags = .{},
                     .typechecking = .None,
                 };
-                subexpr.position.column += 1;
-                subexpr.position.offset += 1;
-                const expr = p.ast.create(Ast.Expr);
-                expr.* = .{
+                subexpression.position.column += 1;
+                subexpression.position.offset += 1;
+                const expression = parser.ast.create(Ast.Expression);
+                expression.* = .{
                     .position = tok.position,
-                    .as = .{ .Ref = subexpr },
+                    .as = .{ .Ref = subexpression },
                     .typ = Ast.void_type,
                     .flags = .{},
                     .typechecking = .None,
                 };
-                break :base expr;
+                break :base expression;
             },
             .Plus,
             .Minus,
             .Not,
             => {
-                const subexpr = parse_expr_highest_prec(p);
-                const expr = p.ast.create(Ast.Expr);
-                expr.* = .{
-                    .position = subexpr.position,
+                const subexpression = parse_expression_highest_prec(parser);
+                const expression = parser.ast.create(Ast.Expression);
+                expression.* = .{
+                    .position = subexpression.position,
                     .as = .{ .Unary_Op = .{
-                        .subexpr = subexpr,
+                        .subexpression = subexpression,
                         .tag = switch (tok.as) {
                             .Plus => .Pos,
                             .Minus => .Neg,
@@ -83,37 +114,37 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                     .flags = .{},
                     .typechecking = .None,
                 };
-                break :base expr;
+                break :base expression;
             },
             .Reference => {
-                const subexpr = parse_expr_highest_prec(p);
-                const expr = p.ast.create(Ast.Expr);
-                expr.* = .{
-                    .position = subexpr.position,
-                    .as = .{ .Ref = subexpr },
+                const subexpression = parse_expression_highest_prec(parser);
+                const expression = parser.ast.create(Ast.Expression);
+                expression.* = .{
+                    .position = subexpression.position,
+                    .as = .{ .Ref = subexpression },
                     .typ = Ast.void_type,
                     .flags = .{},
                     .typechecking = .None,
                 };
-                break :base expr;
+                break :base expression;
             },
             .Left_Parenthesis => {
-                const expr = parse_expr(p);
-                expr.position = tok.position;
-                p.lexer.expect(.Right_Parenthesis);
-                break :base expr;
+                const expression = parse_expression(parser);
+                expression.position = tok.position;
+                expect(parser, .Right_Parenthesis);
+                break :base expression;
             },
             .If => {
-                const condition = parse_expr(p);
-                if (p.lexer.peek() == .Then) {
-                    p.lexer.advance();
+                const condition = parse_expression(parser);
+                if (peek(parser) == .Then) {
+                    advance(parser);
                 }
-                const true_branch = parse_expr(p);
-                p.lexer.expect(.Else);
-                const false_branch = parse_expr(p);
+                const true_branch = parse_expression(parser);
+                expect(parser, .Else);
+                const false_branch = parse_expression(parser);
 
-                const expr = p.ast.create(Ast.Expr);
-                expr.* = .{
+                const expression = parser.ast.create(Ast.Expression);
+                expression.* = .{
                     .position = tok.position,
                     .as = .{ .If = .{
                         .condition = condition,
@@ -125,164 +156,164 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                     .typechecking = .None,
                 };
 
-                break :base expr;
+                break :base expression;
             },
             .Boolean_Literal => |value| {
-                const expr = p.ast.create(Ast.Expr);
-                expr.* = .{
+                const expression = parser.ast.create(Ast.Expression);
+                expression.* = .{
                     .position = tok.position,
                     .as = .{ .Boolean = value },
                     .typ = Ast.bool_type,
                     .flags = .{},
                     .typechecking = .None,
                 };
-                break :base expr;
+                break :base expression;
             },
             .Null_Literal => {
-                const expr = p.ast.create(Ast.Expr);
-                expr.* = .{
+                const expression = parser.ast.create(Ast.Expression);
+                expression.* = .{
                     .position = tok.position,
                     .as = .Null,
                     .typ = Ast.void_pointer_type,
                     .flags = .{},
                     .typechecking = .None,
                 };
-                break :base expr;
+                break :base expression;
             },
             .Identifier => |name| {
-                const expr = p.ast.create(Ast.Expr);
-                expr.* = .{
+                const expression = parser.ast.create(Ast.Expression);
+                expression.* = .{
                     .position = tok.position,
                     .as = .{ .Identifier = .{
                         .name = name,
-                        .scope = p.current_scope,
+                        .scope = parser.current_scope,
                     } },
                     .typ = Ast.void_type,
                     .flags = .{},
                     .typechecking = .None,
                 };
-                break :base expr;
+                break :base expression;
             },
             .Integer_Literal => |value| {
                 const typ = Ast.integer_type_from_u64(value);
-                const expr = p.ast.create(Ast.Expr);
-                expr.* = .{
+                const expression = parser.ast.create(Ast.Expression);
+                expression.* = .{
                     .position = tok.position,
                     .as = .{ .Integer = value },
                     .typ = typ,
                     .flags = .{},
                     .typechecking = .None,
                 };
-                break :base expr;
+                break :base expression;
             },
             .Byte_Size_Of => {
-                var exprs: [1]*Ast.Expr = undefined;
-                const count = parse_fixed_size_expr_list(p, &exprs);
+                var expressions: [1]*Ast.Expression = undefined;
+                const count = parse_fixed_size_expression_list(parser, &expressions);
 
                 switch (count) {
                     1 => {
-                        const expr = p.ast.create(Ast.Expr);
-                        expr.* = .{
+                        const expression = parser.ast.create(Ast.Expression);
+                        expression.* = .{
                             .position = tok.position,
-                            .as = .{ .Byte_Size_Of = exprs[0] },
+                            .as = .{ .Byte_Size_Of = expressions[0] },
                             .typ = Ast.void_type,
                             .flags = .{},
                             .typechecking = .None,
                         };
-                        break :base expr;
+                        break :base expression;
                     },
                     else => {
-                        p.c.report_error(tok.position, "expected 1 argument, but got {}", .{count});
+                        parser.c.report_error(tok.position, "expected 1 argument, but got {}", .{count});
                         exit(1);
                     },
                 }
             },
             .Alignment_Of => {
-                var exprs: [1]*Ast.Expr = undefined;
-                const count = parse_fixed_size_expr_list(p, &exprs);
+                var expressions: [1]*Ast.Expression = undefined;
+                const count = parse_fixed_size_expression_list(parser, &expressions);
 
                 switch (count) {
                     1 => {
-                        const expr = p.ast.create(Ast.Expr);
-                        expr.* = .{
+                        const expression = parser.ast.create(Ast.Expression);
+                        expression.* = .{
                             .position = tok.position,
-                            .as = .{ .Alignment_Of = exprs[0] },
+                            .as = .{ .Alignment_Of = expressions[0] },
                             .typ = Ast.void_type,
                             .flags = .{},
                             .typechecking = .None,
                         };
-                        break :base expr;
+                        break :base expression;
                     },
                     else => {
-                        p.c.report_error(tok.position, "expected 1 argument, but got {}", .{count});
+                        parser.c.report_error(tok.position, "expected 1 argument, but got {}", .{count});
                         exit(1);
                     },
                 }
             },
             .As => {
-                var exprs: [2]*Ast.Expr = undefined;
-                const count = parse_fixed_size_expr_list(p, &exprs);
+                var expressions: [2]*Ast.Expression = undefined;
+                const count = parse_fixed_size_expression_list(parser, &expressions);
 
                 switch (count) {
                     2 => {
-                        const typ = p.ast.expr_to_type(exprs[0]);
-                        const expr = p.ast.create(Ast.Expr);
-                        expr.* = .{
+                        const typ = parser.ast.expression_to_type(expressions[0]);
+                        const expression = parser.ast.create(Ast.Expression);
+                        expression.* = .{
                             .position = tok.position,
                             .as = .{ .As = .{
                                 .typ = typ,
-                                .expr = exprs[1],
+                                .expression = expressions[1],
                             } },
                             .typ = typ,
                             .flags = .{},
                             .typechecking = .None,
                         };
-                        break :base expr;
+                        break :base expression;
                     },
                     else => {
-                        p.c.report_error(tok.position, "expected 2 arguments, but got {}", .{count});
+                        parser.c.report_error(tok.position, "expected 2 arguments, but got {}", .{count});
                         exit(1);
                     },
                 }
             },
             .Cast => {
-                var exprs: [2]*Ast.Expr = undefined;
-                const count = parse_fixed_size_expr_list(p, &exprs);
+                var expressions: [2]*Ast.Expression = undefined;
+                const count = parse_fixed_size_expression_list(parser, &expressions);
 
                 switch (count) {
                     2 => {
-                        const typ = p.ast.expr_to_type(exprs[0]);
-                        const expr = p.ast.create(Ast.Expr);
-                        expr.* = .{
+                        const typ = parser.ast.expression_to_type(expressions[0]);
+                        const expression = parser.ast.create(Ast.Expression);
+                        expression.* = .{
                             .position = tok.position,
                             .as = .{ .Cast = .{
                                 .typ = typ,
-                                .expr = exprs[1],
+                                .expression = expressions[1],
                             } },
                             .typ = typ,
                             .flags = .{},
                             .typechecking = .None,
                         };
-                        break :base expr;
+                        break :base expression;
                     },
                     else => {
-                        p.c.report_error(tok.position, "expected 2 arguments, but got {}", .{count});
+                        parser.c.report_error(tok.position, "expected 2 arguments, but got {}", .{count});
                         exit(1);
                     },
                 }
             },
             .Struct => {
-                p.lexer.expect(.Left_Brace);
-                push_scope(p);
-                const scope = p.current_scope;
-                const fields = p.ast.create(Ast.SymbolList);
-                const rest = p.ast.create(Ast.SymbolList);
+                expect(parser, .Left_Brace);
+                push_scope(parser);
+                const scope = parser.current_scope;
+                const fields = parser.ast.create(Ast.SymbolList);
+                const rest = parser.ast.create(Ast.SymbolList);
                 fields.* = .{};
                 rest.* = .{};
-                parse_symbol_list(p, fields, rest, .{ .Parsing_Container = .Struct });
-                pop_scope(p);
-                p.lexer.expect(.Right_Brace);
-                const data = p.ast.create(Ast.Type.SharedData);
+                parse_symbol_list(parser, fields, rest, .{ .Parsing_Container = .Struct });
+                pop_scope(parser);
+                expect(parser, .Right_Brace);
+                const data = parser.ast.create(Ast.Type.SharedData);
                 data.* = .{
                     .as = .{ .Struct = .{
                         .fields = fields,
@@ -293,8 +324,8 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                     .alignment = .Byte,
                     .stages = Ast.default_stages_none,
                 };
-                const expr = p.ast.create(Ast.Expr);
-                expr.* = .{
+                const expression = parser.ast.create(Ast.Expression);
+                expression.* = .{
                     .position = tok.position,
                     .as = .{ .Type = .{
                         .position = tok.position,
@@ -306,26 +337,26 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                     .typechecking = .None,
                 };
                 {
-                    const node = p.ast.create(Ast.TypeList.Node);
+                    const node = parser.ast.create(Ast.TypeList.Node);
                     node.* = .{
-                        .data = &expr.as.Type,
+                        .data = &expression.as.Type,
                     };
-                    p.ast.namespaces.append(node);
+                    parser.ast.namespaces.append(node);
                 }
-                break :base expr;
+                break :base expression;
             },
             .Union => {
-                p.lexer.expect(.Left_Brace);
-                push_scope(p);
-                const scope = p.current_scope;
-                const fields = p.ast.create(Ast.SymbolList);
-                const rest = p.ast.create(Ast.SymbolList);
+                expect(parser, .Left_Brace);
+                push_scope(parser);
+                const scope = parser.current_scope;
+                const fields = parser.ast.create(Ast.SymbolList);
+                const rest = parser.ast.create(Ast.SymbolList);
                 fields.* = .{};
                 rest.* = .{};
-                parse_symbol_list(p, fields, rest, .{ .Parsing_Container = .Union });
-                pop_scope(p);
-                p.lexer.expect(.Right_Brace);
-                const data = p.ast.create(Ast.Type.SharedData);
+                parse_symbol_list(parser, fields, rest, .{ .Parsing_Container = .Union });
+                pop_scope(parser);
+                expect(parser, .Right_Brace);
+                const data = parser.ast.create(Ast.Type.SharedData);
                 data.* = .{
                     .as = .{ .Union = .{
                         .fields = fields,
@@ -336,8 +367,8 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                     .alignment = .Byte,
                     .stages = Ast.default_stages_none,
                 };
-                const expr = p.ast.create(Ast.Expr);
-                expr.* = .{
+                const expression = parser.ast.create(Ast.Expression);
+                expression.* = .{
                     .position = tok.position,
                     .as = .{ .Type = .{
                         .position = tok.position,
@@ -349,26 +380,26 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                     .typechecking = .None,
                 };
                 {
-                    const node = p.ast.create(Ast.TypeList.Node);
+                    const node = parser.ast.create(Ast.TypeList.Node);
                     node.* = .{
-                        .data = &expr.as.Type,
+                        .data = &expression.as.Type,
                     };
-                    p.ast.namespaces.append(node);
+                    parser.ast.namespaces.append(node);
                 }
-                break :base expr;
+                break :base expression;
             },
             .Enum => {
-                p.lexer.expect(.Left_Brace);
-                push_scope(p);
-                const scope = p.current_scope;
-                const fields = p.ast.create(Ast.SymbolList);
-                const rest = p.ast.create(Ast.SymbolList);
+                expect(parser, .Left_Brace);
+                push_scope(parser);
+                const scope = parser.current_scope;
+                const fields = parser.ast.create(Ast.SymbolList);
+                const rest = parser.ast.create(Ast.SymbolList);
                 fields.* = .{};
                 rest.* = .{};
-                parse_symbol_list(p, fields, rest, .{ .Parsing_Container = .Enum });
-                pop_scope(p);
-                p.lexer.expect(.Right_Brace);
-                const data = p.ast.create(Ast.Type.SharedData);
+                parse_symbol_list(parser, fields, rest, .{ .Parsing_Container = .Enum });
+                pop_scope(parser);
+                expect(parser, .Right_Brace);
+                const data = parser.ast.create(Ast.Type.SharedData);
                 data.* = .{
                     .as = .{ .Enum = .{
                         .fields = fields,
@@ -380,8 +411,8 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                     .alignment = .Byte,
                     .stages = Ast.default_stages_none,
                 };
-                const expr = p.ast.create(Ast.Expr);
-                expr.* = .{
+                const expression = parser.ast.create(Ast.Expression);
+                expression.* = .{
                     .position = tok.position,
                     .as = .{ .Type = .{
                         .position = tok.position,
@@ -393,24 +424,24 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                     .typechecking = .None,
                 };
                 {
-                    const node = p.ast.create(Ast.TypeList.Node);
+                    const node = parser.ast.create(Ast.TypeList.Node);
                     node.* = .{
-                        .data = &expr.as.Type,
+                        .data = &expression.as.Type,
                     };
-                    p.ast.namespaces.append(node);
+                    parser.ast.namespaces.append(node);
                 }
-                break :base expr;
+                break :base expression;
             },
             .Proc => {
-                p.lexer.expect(.Left_Parenthesis);
-                push_scope(p);
-                const scope = p.current_scope;
+                expect(parser, .Left_Parenthesis);
+                push_scope(parser);
+                const scope = parser.current_scope;
                 var params = Ast.SymbolList{};
-                parse_symbol_list(p, &params, null, .Parsing_Procedure);
-                pop_scope(p);
-                p.lexer.expect(.Right_Parenthesis);
-                const return_type = parse_type(p);
-                const data = p.ast.create(Ast.Type.SharedData);
+                parse_symbol_list(parser, &params, null, .Parsing_Procedure);
+                pop_scope(parser);
+                expect(parser, .Right_Parenthesis);
+                const return_type = parse_type(parser);
+                const data = parser.ast.create(Ast.Type.SharedData);
                 data.* = .{
                     .as = .{ .Proc = .{
                         .params = params,
@@ -421,8 +452,8 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                     .alignment = Ast.pointer_alignment,
                     .stages = Ast.default_stages_none,
                 };
-                const expr = p.ast.create(Ast.Expr);
-                expr.* = .{
+                const expression = parser.ast.create(Ast.Expression);
+                expression.* = .{
                     .position = tok.position,
                     .as = .{ .Type = .{
                         .position = tok.position,
@@ -433,12 +464,12 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                     .flags = .{},
                     .typechecking = .None,
                 };
-                break :base expr;
+                break :base expression;
             },
             .Integer_Type => |Integer_Type| {
                 const typ = Ast.lookup_integer_type(Integer_Type.bits, Integer_Type.is_signed);
-                const expr = p.ast.create(Ast.Expr);
-                expr.* = .{
+                const expression = parser.ast.create(Ast.Expression);
+                expression.* = .{
                     .position = tok.position,
                     .as = .{ .Type = .{
                         .position = tok.position,
@@ -449,11 +480,11 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                     .flags = .{},
                     .typechecking = .None,
                 };
-                break :base expr;
+                break :base expression;
             },
             .Boolean_Type => {
-                const expr = p.ast.create(Ast.Expr);
-                expr.* = .{
+                const expression = parser.ast.create(Ast.Expression);
+                expression.* = .{
                     .position = tok.position,
                     .as = .{ .Type = .{
                         .position = tok.position,
@@ -464,11 +495,11 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                     .flags = .{},
                     .typechecking = .None,
                 };
-                break :base expr;
+                break :base expression;
             },
             .Void_Type => {
-                const expr = p.ast.create(Ast.Expr);
-                expr.* = .{
+                const expression = parser.ast.create(Ast.Expression);
+                expression.* = .{
                     .position = tok.position,
                     .as = .{ .Type = .{
                         .position = tok.position,
@@ -479,22 +510,22 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                     .flags = .{},
                     .typechecking = .None,
                 };
-                break :base expr;
+                break :base expression;
             },
             .Type_Of => {
-                var exprs: [1]*Ast.Expr = undefined;
-                const count = parse_fixed_size_expr_list(p, &exprs);
+                var expressions: [1]*Ast.Expression = undefined;
+                const count = parse_fixed_size_expression_list(parser, &expressions);
                 switch (count) {
                     1 => {
-                        const data = p.ast.create(Ast.Type.SharedData);
+                        const data = parser.ast.create(Ast.Type.SharedData);
                         data.* = .{
-                            .as = .{ .Type_Of = exprs[0] },
+                            .as = .{ .Type_Of = expressions[0] },
                             .byte_size = 0,
                             .alignment = .Byte,
                             .stages = Ast.default_stages_none,
                         };
-                        const expr = p.ast.create(Ast.Expr);
-                        expr.* = .{
+                        const expression = parser.ast.create(Ast.Expression);
+                        expression.* = .{
                             .position = tok.position,
                             .as = .{ .Type = .{
                                 .position = tok.position,
@@ -505,31 +536,31 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                             .flags = .{},
                             .typechecking = .None,
                         };
-                        break :base expr;
+                        break :base expression;
                     },
                     else => {
-                        p.c.report_error(tok.position, "expected 1 arguments, but got {}", .{count});
+                        parser.c.report_error(tok.position, "expected 1 arguments, but got {}", .{count});
                         exit(1);
                     },
                 }
             },
             else => {
-                p.c.report_error(tok.position, "token doesn't start an expression or a type", .{});
+                parser.c.report_error(tok.position, "token doesn't start an expression or a type", .{});
                 exit(1);
             },
         }
     };
 
     while (true) {
-        switch (p.lexer.peek()) {
+        switch (peek(parser)) {
             .Left_Parenthesis => {
-                const args = parse_expr_list(p);
+                const args = parse_expression_list(parser);
 
-                const new_base = p.ast.create(Ast.Expr);
+                const new_base = parser.ast.create(Ast.Expression);
                 new_base.* = .{
                     .position = base.position,
                     .as = .{ .Call = .{
-                        .subexpr = base,
+                        .subexpression = base,
                         .args = args,
                     } },
                     .typ = Ast.void_type,
@@ -539,15 +570,15 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                 base = new_base;
             },
             .Left_Bracket => {
-                p.lexer.advance();
-                const index = parse_expr(p);
-                p.lexer.expect(.Right_Bracket);
+                advance(parser);
+                const index = parse_expression(parser);
+                expect(parser, .Right_Bracket);
 
-                const new_base = p.ast.create(Ast.Expr);
+                const new_base = parser.ast.create(Ast.Expression);
                 new_base.* = .{
                     .position = base.position,
                     .as = .{ .Subscript = .{
-                        .subexpr = base,
+                        .subexpression = base,
                         .index = index,
                     } },
                     .typ = Ast.void_type,
@@ -557,9 +588,9 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                 base = new_base;
             },
             .Dereference => {
-                p.lexer.advance();
+                advance(parser);
 
-                const new_base = p.ast.create(Ast.Expr);
+                const new_base = parser.ast.create(Ast.Expression);
                 new_base.* = .{
                     .position = base.position,
                     .as = .{ .Deref = base },
@@ -570,27 +601,27 @@ fn parse_expr_highest_prec(p: *Parser) *Ast.Expr {
                 base = new_base;
             },
             .Dot => {
-                p.lexer.advance();
+                advance(parser);
 
-                const id = p.lexer.grab();
-                p.lexer.expect(.Identifier);
+                const id = grab(parser);
+                expect(parser, .Identifier);
 
-                const field = p.ast.create(Ast.Expr);
+                const field = parser.ast.create(Ast.Expression);
                 field.* = .{
                     .position = id.position,
                     .as = .{ .Identifier = .{
                         .name = id.as.Identifier,
-                        .scope = p.current_scope,
+                        .scope = parser.current_scope,
                     } },
                     .typ = Ast.void_type,
                     .flags = .{},
                     .typechecking = .None,
                 };
-                const new_base = p.ast.create(Ast.Expr);
+                const new_base = parser.ast.create(Ast.Expression);
                 new_base.* = .{
                     .position = base.position,
                     .as = .{ .Field = .{
-                        .subexpr = base,
+                        .subexpression = base,
                         .field = field,
                     } },
                     .typ = Ast.void_type,
@@ -631,19 +662,19 @@ fn prec_of_op(op: Token.Tag) i32 {
     };
 }
 
-fn parse_expr_prec(p: *Parser, min_prec: i32) *Ast.Expr {
-    var lhs = parse_expr_highest_prec(p);
-    var op = p.lexer.peek();
+fn parse_expression_prec(parser: *Parser, min_prec: i32) *Ast.Expression {
+    var lhs = parse_expression_highest_prec(parser);
+    var op = peek(parser);
     var prev_prec: i32 = std.math.maxInt(i32);
     var curr_prec: i32 = prec_of_op(op);
 
     while (curr_prec < prev_prec and curr_prec >= min_prec) {
         while (true) {
-            const position = p.lexer.grab().position;
-            p.lexer.advance();
+            const position = grab(parser).position;
+            advance(parser);
 
-            const rhs = parse_expr_prec(p, curr_prec + 1);
-            const new_lhs = p.ast.create(Ast.Expr);
+            const rhs = parse_expression_prec(parser, curr_prec + 1);
+            const new_lhs = parser.ast.create(Ast.Expression);
             new_lhs.* = .{
                 .position = lhs.position,
                 .as = .{ .Binary_Op = .{
@@ -673,7 +704,7 @@ fn parse_expr_prec(p: *Parser, min_prec: i32) *Ast.Expr {
             };
             lhs = new_lhs;
 
-            op = p.lexer.peek();
+            op = peek(parser);
             if (curr_prec != prec_of_op(op)) break;
         }
 
@@ -684,117 +715,117 @@ fn parse_expr_prec(p: *Parser, min_prec: i32) *Ast.Expr {
     return lhs;
 }
 
-fn parse_expr(p: *Parser) *Ast.Expr {
-    return parse_expr_prec(p, LOWEST_PREC);
+fn parse_expression(parser: *Parser) *Ast.Expression {
+    return parse_expression_prec(parser, LOWEST_PREC);
 }
 
-fn parse_fixed_size_expr_list(p: *Parser, dst: []*Ast.Expr) usize {
-    p.lexer.expect(.Left_Parenthesis);
+fn parse_fixed_size_expression_list(parser: *Parser, dst: []*Ast.Expression) usize {
+    expect(parser, .Left_Parenthesis);
 
     var count: usize = 0;
 
-    var tt = p.lexer.peek();
+    var tt = peek(parser);
     while (tt != .End_Of_File and tt != .Right_Parenthesis) {
-        const expr = parse_expr(p);
+        const expression = parse_expression(parser);
 
         if (count < dst.len) {
-            dst[count] = expr;
+            dst[count] = expression;
         }
 
         count += 1;
 
-        tt = p.lexer.peek();
+        tt = peek(parser);
         if (tt != .End_Of_File and tt != .Right_Parenthesis) {
-            p.lexer.expect(.Comma);
-            tt = p.lexer.peek();
+            expect(parser, .Comma);
+            tt = peek(parser);
         }
     }
 
-    p.lexer.expect(.Right_Parenthesis);
+    expect(parser, .Right_Parenthesis);
 
     return count;
 }
 
-fn parse_expr_list(p: *Parser) Ast.ExprList {
-    p.lexer.expect(.Left_Parenthesis);
+fn parse_expression_list(parser: *Parser) Ast.ExpressionList {
+    expect(parser, .Left_Parenthesis);
 
-    var list = Ast.ExprList{};
+    var list = Ast.ExpressionList{};
 
-    var tt = p.lexer.peek();
+    var tt = peek(parser);
     while (tt != .End_Of_File and tt != .Right_Parenthesis) {
-        const expr_node = p.ast.create(Ast.ExprListNode);
-        expr_node.* = expr_node: {
-            const lhs = parse_expr(p);
-            if (p.lexer.peek() == .Equal) {
-                p.lexer.advance();
-                const rhs = parse_expr(p);
+        const expression_node = parser.ast.create(Ast.ExpressionListNode);
+        expression_node.* = expression_node: {
+            const lhs = parse_expression(parser);
+            if (peek(parser) == .Equal) {
+                advance(parser);
+                const rhs = parse_expression(parser);
 
-                break :expr_node .{ .Designator = .{
+                break :expression_node .{ .Designator = .{
                     .lhs = lhs,
                     .rhs = rhs,
                 } };
             }
-            break :expr_node .{ .Expr = lhs };
+            break :expression_node .{ .Expression = lhs };
         };
 
         {
-            const node = p.ast.create(Ast.ExprList.Node);
+            const node = parser.ast.create(Ast.ExpressionList.Node);
             node.* = .{
-                .data = expr_node,
+                .data = expression_node,
             };
             list.append(node);
         }
 
-        tt = p.lexer.peek();
+        tt = peek(parser);
         if (tt != .End_Of_File and tt != .Right_Parenthesis) {
-            p.lexer.expect(.Comma);
-            tt = p.lexer.peek();
+            expect(parser, .Comma);
+            tt = peek(parser);
         }
     }
 
-    p.lexer.expect(.Right_Parenthesis);
+    expect(parser, .Right_Parenthesis);
 
     return list;
 }
 
-fn parse_stmt_switch(p: *Parser) Ast.Stmt.Switch.CaseList {
-    p.lexer.expect(.Left_Brace);
-    push_scope(p);
+fn parse_statement_switch(parser: *Parser) Ast.Statement.Switch.CaseList {
+    expect(parser, .Left_Brace);
+    push_scope(parser);
 
-    var list = Ast.Stmt.Switch.CaseList{};
+    var list = Ast.Statement.Switch.CaseList{};
 
-    var tt = p.lexer.peek();
+    var tt = peek(parser);
     while (tt != .End_Of_File and tt != .Right_Brace) {
-        const case = parse_switch_case(p);
+        const case = parse_switch_case(parser);
 
         {
-            const node = p.ast.create(Ast.Stmt.Switch.CaseList.Node);
+            const node = parser.ast.create(Ast.Statement.Switch.CaseList.Node);
             node.* = .{
                 .data = case,
             };
             list.append(node);
         }
 
-        tt = p.lexer.peek();
+        tt = peek(parser);
     }
 
-    p.lexer.expect(.Right_Brace);
-    pop_scope(p);
+    expect(parser, .Right_Brace);
+    pop_scope(parser);
 
     return list;
 }
 
-fn parse_switch_case(p: *Parser) *Ast.Stmt.Switch.Case {
-    switch (p.lexer.peek()) {
+fn parse_switch_case(parser: *Parser) *Ast.Statement.Switch.Case {
+    switch (peek(parser)) {
         .Case => {
-            p.lexer.advance();
-            const value = parse_expr(p);
-            if (p.lexer.peek() == .Then) {
-                p.lexer.advance();
+            advance(parser);
+            const value = parse_expression(parser);
+            if (peek(parser) == .Then) {
+                advance(parser);
             }
-            const subcase = parse_switch_case(p);
+            const subcase = parse_switch_case(parser);
 
-            const case = p.ast.create(Ast.Stmt.Switch.Case);
+            const case = parser.ast.create(Ast.Statement.Switch.Case);
             case.* = .{ .Case = .{
                 .value = value,
                 .subcase = subcase,
@@ -803,62 +834,62 @@ fn parse_switch_case(p: *Parser) *Ast.Stmt.Switch.Case {
             return case;
         },
         else => {
-            const stmt = parse_stmt(p);
+            const statement = parse_statement(parser);
 
-            const case = p.ast.create(Ast.Stmt.Switch.Case);
-            case.* = .{ .Stmt = stmt };
+            const case = parser.ast.create(Ast.Statement.Switch.Case);
+            case.* = .{ .Statement = statement };
 
             return case;
         },
     }
 }
 
-fn parse_stmt(p: *Parser) *Ast.Stmt {
-    const tok = p.lexer.grab();
-    p.lexer.advance();
+fn parse_statement(parser: *Parser) *Ast.Statement {
+    const tok = grab(parser);
+    advance(parser);
 
     switch (tok.as) {
         .Print => {
-            const expr = parse_expr(p);
-            p.lexer.expect(.Semicolon);
+            const expression = parse_expression(parser);
+            expect(parser, .Semicolon);
 
-            const stmt = p.ast.create(Ast.Stmt);
-            stmt.* = .{
+            const statement = parser.ast.create(Ast.Statement);
+            statement.* = .{
                 .position = tok.position,
-                .as = .{ .Print = expr },
+                .as = .{ .Print = expression },
             };
 
-            return stmt;
+            return statement;
         },
         .Left_Brace => {
-            p.lexer.putback(tok);
+            putback(parser, tok);
 
-            push_scope(p);
-            const block = parse_stmt_list(p);
-            pop_scope(p);
+            push_scope(parser);
+            const block = parse_statement_list(parser);
+            pop_scope(parser);
 
-            const stmt = p.ast.create(Ast.Stmt);
-            stmt.* = .{
+            const statement = parser.ast.create(Ast.Statement);
+            statement.* = .{
                 .position = tok.position,
                 .as = .{ .Block = block },
             };
 
-            return stmt;
+            return statement;
         },
         .If => {
-            const condition = parse_expr(p);
-            if (p.lexer.peek() == .Then) {
-                p.lexer.advance();
+            const condition = parse_expression(parser);
+            if (peek(parser) == .Then) {
+                advance(parser);
             }
-            const true_branch = parse_stmt(p);
-            var false_branch: ?*Ast.Stmt = null;
-            if (p.lexer.peek() == .Else) {
-                p.lexer.advance();
-                false_branch = parse_stmt(p);
+            const true_branch = parse_statement(parser);
+            var false_branch: ?*Ast.Statement = null;
+            if (peek(parser) == .Else) {
+                advance(parser);
+                false_branch = parse_statement(parser);
             }
 
-            const stmt = p.ast.create(Ast.Stmt);
-            stmt.* = .{
+            const statement = parser.ast.create(Ast.Statement);
+            statement.* = .{
                 .position = tok.position,
                 .as = .{ .If = .{
                     .condition = condition,
@@ -867,17 +898,17 @@ fn parse_stmt(p: *Parser) *Ast.Stmt {
                 } },
             };
 
-            return stmt;
+            return statement;
         },
         .While => {
-            const condition = parse_expr(p);
-            if (p.lexer.peek() == .Do) {
-                p.lexer.advance();
+            const condition = parse_expression(parser);
+            if (peek(parser) == .Do) {
+                advance(parser);
             }
-            const body = parse_stmt(p);
+            const body = parse_statement(parser);
 
-            const stmt = p.ast.create(Ast.Stmt);
-            stmt.* = .{
+            const statement = parser.ast.create(Ast.Statement);
+            statement.* = .{
                 .position = tok.position,
                 .as = .{ .While = .{
                     .condition = condition,
@@ -885,16 +916,16 @@ fn parse_stmt(p: *Parser) *Ast.Stmt {
                 } },
             };
 
-            return stmt;
+            return statement;
         },
         .Do => {
-            const body = parse_stmt(p);
-            p.lexer.expect(.While);
-            const condition = parse_expr(p);
-            p.lexer.expect(.Semicolon);
+            const body = parse_statement(parser);
+            expect(parser, .While);
+            const condition = parse_expression(parser);
+            expect(parser, .Semicolon);
 
-            const stmt = p.ast.create(Ast.Stmt);
-            stmt.* = .{
+            const statement = parser.ast.create(Ast.Statement);
+            statement.* = .{
                 .position = tok.position,
                 .as = .{ .Do_While = .{
                     .condition = condition,
@@ -902,41 +933,41 @@ fn parse_stmt(p: *Parser) *Ast.Stmt {
                 } },
             };
 
-            return stmt;
+            return statement;
         },
         .Break => {
-            p.lexer.expect(.Semicolon);
+            expect(parser, .Semicolon);
 
-            const stmt = p.ast.create(Ast.Stmt);
-            stmt.* = .{
+            const statement = parser.ast.create(Ast.Statement);
+            statement.* = .{
                 .position = tok.position,
                 .as = .Break,
             };
 
-            return stmt;
+            return statement;
         },
         .Continue => {
-            p.lexer.expect(.Semicolon);
+            expect(parser, .Semicolon);
 
-            const stmt = p.ast.create(Ast.Stmt);
-            stmt.* = .{
+            const statement = parser.ast.create(Ast.Statement);
+            statement.* = .{
                 .position = tok.position,
                 .as = .Continue,
             };
 
-            return stmt;
+            return statement;
         },
         .Switch => {
-            const condition = parse_expr(p);
-            const cases = parse_stmt_switch(p);
-            var default_case: ?*Ast.Stmt = null;
-            if (p.lexer.peek() == .Else) {
-                p.lexer.advance();
-                default_case = parse_stmt(p);
+            const condition = parse_expression(parser);
+            const cases = parse_statement_switch(parser);
+            var default_case: ?*Ast.Statement = null;
+            if (peek(parser) == .Else) {
+                advance(parser);
+                default_case = parse_statement(parser);
             }
 
-            const stmt = p.ast.create(Ast.Stmt);
-            stmt.* = .{
+            const statement = parser.ast.create(Ast.Statement);
+            statement.* = .{
                 .position = tok.position,
                 .as = .{ .Switch = .{
                     .condition = condition,
@@ -945,36 +976,36 @@ fn parse_stmt(p: *Parser) *Ast.Stmt {
                 } },
             };
 
-            return stmt;
+            return statement;
         },
         .Return => {
-            if (p.lexer.peek() == .Semicolon) {
-                p.lexer.advance();
+            if (peek(parser) == .Semicolon) {
+                advance(parser);
 
-                const stmt = p.ast.create(Ast.Stmt);
-                stmt.* = .{
+                const statement = parser.ast.create(Ast.Statement);
+                statement.* = .{
                     .position = tok.position,
                     .as = .{ .Return = null },
                 };
 
-                return stmt;
+                return statement;
             }
 
-            const expr = parse_expr(p);
-            p.lexer.expect(.Semicolon);
+            const expression = parse_expression(parser);
+            expect(parser, .Semicolon);
 
-            const stmt = p.ast.create(Ast.Stmt);
-            stmt.* = .{
+            const statement = parser.ast.create(Ast.Statement);
+            statement.* = .{
                 .position = tok.position,
-                .as = .{ .Return = expr },
+                .as = .{ .Return = expression },
             };
 
-            return stmt;
+            return statement;
         },
         else => {
-            p.lexer.putback(tok);
+            putback(parser, tok);
 
-            const result = try_parse_symbol(p);
+            const result = try_parse_symbol(parser);
             switch (result.tag) {
                 .Type,
                 .Symbol_Without_Type,
@@ -982,54 +1013,54 @@ fn parse_stmt(p: *Parser) *Ast.Stmt {
                 .Symbol_With_Type_And_Value,
                 .Procedure,
                 => {
-                    const symbol = insert_symbol(p, result, .Parsing_Statement);
+                    const symbol = insert_symbol(parser, result, .Parsing_Statement);
 
                     if (symbol.as == .Procedure) {
-                        const node = p.ast.create(Ast.SymbolList.Node);
+                        const node = parser.ast.create(Ast.SymbolList.Node);
                         node.* = .{
                             .data = symbol,
                         };
-                        p.ast.local_procedures.append(node);
+                        parser.ast.local_procedures.append(node);
                     }
 
-                    const stmt = p.ast.create(Ast.Stmt);
-                    stmt.* = .{
+                    const statement = parser.ast.create(Ast.Statement);
+                    statement.* = .{
                         .position = tok.position,
                         .as = .{ .Symbol = symbol },
                     };
-                    return stmt;
+                    return statement;
                 },
-                .Expr => {
+                .Expression => {
                     if (!result.attributes.is_empty()) {
-                        p.c.report_error(tok.position, "unexpected attributes", .{});
+                        parser.c.report_error(tok.position, "unexpected attributes", .{});
                     }
 
-                    const expr = result.pattern;
-                    switch (p.lexer.peek()) {
+                    const expression = result.pattern;
+                    switch (peek(parser)) {
                         .Equal => {
-                            p.lexer.advance();
-                            const rhs = parse_expr(p);
-                            p.lexer.expect(.Semicolon);
+                            advance(parser);
+                            const rhs = parse_expression(parser);
+                            expect(parser, .Semicolon);
 
-                            const stmt = p.ast.create(Ast.Stmt);
-                            stmt.* = .{
+                            const statement = parser.ast.create(Ast.Statement);
+                            statement.* = .{
                                 .position = tok.position,
                                 .as = .{ .Assign = .{
-                                    .lhs = expr,
+                                    .lhs = expression,
                                     .rhs = rhs,
                                 } },
                             };
 
-                            return stmt;
+                            return statement;
                         },
                         else => {
-                            p.lexer.expect(.Semicolon);
-                            const stmt = p.ast.create(Ast.Stmt);
-                            stmt.* = .{
+                            expect(parser, .Semicolon);
+                            const statement = parser.ast.create(Ast.Statement);
+                            statement.* = .{
                                 .position = tok.position,
-                                .as = .{ .Expr = expr },
+                                .as = .{ .Expression = expression },
                             };
-                            return stmt;
+                            return statement;
                         },
                     }
                 },
@@ -1038,27 +1069,27 @@ fn parse_stmt(p: *Parser) *Ast.Stmt {
     }
 }
 
-fn parse_stmt_list(p: *Parser) Ast.StmtList {
-    p.lexer.expect(.Left_Brace);
+fn parse_statement_list(parser: *Parser) Ast.StatementList {
+    expect(parser, .Left_Brace);
 
-    var list = Ast.StmtList{};
+    var list = Ast.StatementList{};
 
-    var tt = p.lexer.peek();
+    var tt = peek(parser);
     while (tt != .End_Of_File and tt != .Right_Brace) {
-        const stmt = parse_stmt(p);
+        const statement = parse_statement(parser);
 
         {
-            const node = p.ast.create(Ast.StmtList.Node);
+            const node = parser.ast.create(Ast.StatementList.Node);
             node.* = .{
-                .data = stmt,
+                .data = statement,
             };
             list.append(node);
         }
 
-        tt = p.lexer.peek();
+        tt = peek(parser);
     }
 
-    p.lexer.expect(.Right_Brace);
+    expect(parser, .Right_Brace);
 
     return list;
 }
@@ -1073,7 +1104,7 @@ const HowToParseSymbol = union(enum) {
     Parsing_Statement: void,
 };
 
-fn insert_symbol(p: *Parser, result: ParseSymbolResult, how_to_parse: HowToParseSymbol) *Ast.Symbol {
+fn insert_symbol(parser: *Parser, result: ParseSymbolResult, how_to_parse: HowToParseSymbol) *Ast.Symbol {
     const symbol: *Ast.Symbol = symbol: {
         switch (result.pattern.as) {
             .Identifier => |Identifier| {
@@ -1081,15 +1112,15 @@ fn insert_symbol(p: *Parser, result: ParseSymbolResult, how_to_parse: HowToParse
                     .name = Identifier.name,
                     .scope = Identifier.scope,
                 };
-                const insert_result = p.ast.symbol_table.insert(key);
+                const insert_result = parser.ast.symbol_table.insert(key);
 
                 if (insert_result.found_existing) {
-                    p.c.report_error(result.pattern.position, "symbol '{s}' is defined already", .{key.name});
-                    p.c.report_note(insert_result.value_ptr.*.position, "first defined here", .{});
+                    parser.c.report_error(result.pattern.position, "symbol '{s}' is defined already", .{key.name});
+                    parser.c.report_note(insert_result.value_ptr.*.position, "first defined here", .{});
                     exit(1);
                 }
 
-                const symbol = p.ast.create(Ast.Symbol);
+                const symbol = parser.ast.create(Ast.Symbol);
                 symbol.* = .{
                     .position = result.pattern.position,
                     .as = undefined,
@@ -1102,7 +1133,7 @@ fn insert_symbol(p: *Parser, result: ParseSymbolResult, how_to_parse: HowToParse
                 break :symbol symbol;
             },
             else => {
-                p.c.report_error(result.pattern.position, "expected identifier", .{});
+                parser.c.report_error(result.pattern.position, "expected identifier", .{});
                 exit(1);
             },
         }
@@ -1120,7 +1151,7 @@ fn insert_symbol(p: *Parser, result: ParseSymbolResult, how_to_parse: HowToParse
 
                         switch (container_type) {
                             .Struct, .Union => {
-                                p.c.report_error(result.pattern.position, "expected type after pattern", .{});
+                                parser.c.report_error(result.pattern.position, "expected type after pattern", .{});
                                 exit(1);
                             },
                             .Enum => break :symbol_tag .Enum_Field,
@@ -1137,16 +1168,16 @@ fn insert_symbol(p: *Parser, result: ParseSymbolResult, how_to_parse: HowToParse
                             .Struct => break :symbol_tag .Struct_Field,
                             .Union => break :symbol_tag .Union_Field,
                             .Enum => {
-                                p.c.report_error(result.typ.?.position, "unexpected type", .{});
+                                parser.c.report_error(result.typ.?.position, "unexpected type", .{});
                                 exit(1);
                             },
                         }
                     },
                     .Procedure => break :symbol_tag .Procedure,
-                    .Expr => {
+                    .Expression => {
                         switch (container_type) {
                             .Struct, .Union => {
-                                p.c.report_error(result.pattern.position, "expected type after pattern", .{});
+                                parser.c.report_error(result.pattern.position, "expected type after pattern", .{});
                                 exit(1);
                             },
                             .Enum => break :symbol_tag .Enum_Field,
@@ -1160,19 +1191,19 @@ fn insert_symbol(p: *Parser, result: ParseSymbolResult, how_to_parse: HowToParse
                     .Symbol_With_Type_And_Value,
                     => break :symbol_tag .Parameter,
                     .Type => {
-                        p.c.report_error(result.pattern.position, "unexpected type", .{});
+                        parser.c.report_error(result.pattern.position, "unexpected type", .{});
                         exit(1);
                     },
                     .Symbol_Without_Type => {
-                        p.c.report_error(result.pattern.position, "expected type after pattern", .{});
+                        parser.c.report_error(result.pattern.position, "expected type after pattern", .{});
                         exit(1);
                     },
                     .Procedure => {
-                        p.c.report_error(result.pattern.position, "unexpected procedure", .{});
+                        parser.c.report_error(result.pattern.position, "unexpected procedure", .{});
                         exit(1);
                     },
-                    .Expr => {
-                        p.c.report_error(result.pattern.position, "unexpected expression", .{});
+                    .Expression => {
+                        parser.c.report_error(result.pattern.position, "unexpected expression", .{});
                         exit(1);
                     },
                 }
@@ -1185,7 +1216,7 @@ fn insert_symbol(p: *Parser, result: ParseSymbolResult, how_to_parse: HowToParse
                     .Symbol_With_Type_And_Value,
                     => break :symbol_tag .Variable,
                     .Procedure => break :symbol_tag .Procedure,
-                    .Expr => unreachable,
+                    .Expression => unreachable,
                 }
             },
         }
@@ -1194,7 +1225,7 @@ fn insert_symbol(p: *Parser, result: ParseSymbolResult, how_to_parse: HowToParse
     symbol.as = as: {
         switch (symbol_tag) {
             .Variable => {
-                p.lexer.expect(.Semicolon);
+                expect(parser, .Semicolon);
 
                 const is_global = symbol.key.scope == &Ast.global_scope or how_to_parse == .Parsing_Container;
                 const is_static = is_global and !symbol.attributes.is_const;
@@ -1209,7 +1240,7 @@ fn insert_symbol(p: *Parser, result: ParseSymbolResult, how_to_parse: HowToParse
             },
             .Parameter => {
                 if (!symbol.attributes.is_empty()) {
-                    p.c.report_error(result.pattern.position, "unexpected attributes for parameter", .{});
+                    parser.c.report_error(result.pattern.position, "unexpected attributes for parameter", .{});
                     exit(1);
                 }
 
@@ -1221,7 +1252,7 @@ fn insert_symbol(p: *Parser, result: ParseSymbolResult, how_to_parse: HowToParse
             },
             .Procedure => {
                 if (symbol.attributes.is_static) {
-                    p.c.report_error(result.pattern.position, "procedures can't be static", .{});
+                    parser.c.report_error(result.pattern.position, "procedures can't be static", .{});
                     exit(1);
                 }
 
@@ -1256,10 +1287,10 @@ fn insert_symbol(p: *Parser, result: ParseSymbolResult, how_to_parse: HowToParse
                 } };
             },
             .Type => {
-                p.lexer.expect(.Semicolon);
+                expect(parser, .Semicolon);
 
                 if (!symbol.attributes.is_empty()) {
-                    p.c.report_error(result.pattern.position, "unexpected attributes for a type", .{});
+                    parser.c.report_error(result.pattern.position, "unexpected attributes for a type", .{});
                     exit(1);
                 }
 
@@ -1273,10 +1304,10 @@ fn insert_symbol(p: *Parser, result: ParseSymbolResult, how_to_parse: HowToParse
 
 const ParseSymbolResult = struct {
     attributes: Token.Attributes,
-    pattern: *Ast.Expr,
+    pattern: *Ast.Expression,
     typ: ?*Ast.Type,
-    value: ?*Ast.Expr,
-    block: Ast.StmtList,
+    value: ?*Ast.Expression,
+    block: Ast.StatementList,
     tag: Tag,
 
     pub const Tag = enum {
@@ -1285,69 +1316,69 @@ const ParseSymbolResult = struct {
         Symbol_With_Type,
         Symbol_With_Type_And_Value,
         Procedure,
-        Expr,
+        Expression,
     };
 };
 
-fn try_parse_symbol(p: *Parser) ParseSymbolResult {
-    const position = p.lexer.grab().position;
+fn try_parse_symbol(parser: *Parser) ParseSymbolResult {
+    const position = grab(parser).position;
     var attributes = Token.Attributes{};
 
-    if (p.lexer.peek() == .Attributes) {
-        attributes = p.lexer.grab().as.Attributes;
-        p.lexer.advance();
+    if (peek(parser) == .Attributes) {
+        attributes = grab(parser).as.Attributes;
+        advance(parser);
     }
 
     if (attributes.is_const and attributes.is_static) {
-        p.c.report_error(position, "'#const' and '#static' are mutually exclusive", .{});
+        parser.c.report_error(position, "'#const' and '#static' are mutually exclusive", .{});
         exit(1);
     }
 
     var is_type = false;
 
-    if (p.lexer.peek() == .Alias) {
-        p.lexer.advance();
+    if (peek(parser) == .Alias) {
+        advance(parser);
         is_type = true;
     }
 
-    const pattern = parse_expr(p);
+    const pattern = parse_expression(parser);
     var typ: ?*Ast.Type = null;
-    var value: ?*Ast.Expr = null;
-    var block: Ast.StmtList = .{};
-    var tag: ParseSymbolResult.Tag = .Expr;
+    var value: ?*Ast.Expression = null;
+    var block: Ast.StatementList = .{};
+    var tag: ParseSymbolResult.Tag = .Expression;
 
-    switch (p.lexer.peek()) {
+    switch (peek(parser)) {
         .Colon => {
-            if (p.lexer.peek_at(1) == .Equal) {
-                p.lexer.advance();
+            if (peek_at(parser, 1) == .Equal) {
+                advance(parser);
                 tag = .Symbol_Without_Type;
-                p.lexer.advance();
-                value = parse_expr(p);
+                advance(parser);
+                value = parse_expression(parser);
             } else {
                 tag = .Symbol_With_Type;
-                p.lexer.advance();
-                typ = parse_type(p);
-                switch (p.lexer.peek()) {
+                advance(parser);
+                typ = parse_type(parser);
+                switch (peek(parser)) {
                     .Left_Brace => {
                         switch (typ.?.data.as) {
                             .Proc => |Proc| {
                                 tag = .Procedure;
-                                const old_current_scope = p.current_scope;
+                                const old_current_scope = parser.current_scope;
 
-                                p.current_scope = Proc.scope;
-                                block = parse_stmt_list(p);
-                                p.current_scope = old_current_scope;
+                                parser.current_scope = Proc.scope;
+                                block = parse_statement_list(parser);
+                                parser.current_scope = old_current_scope;
                             },
                             else => {
-                                p.c.report_error(p.lexer.grab().position, "unexpected procedure body", .{});
+                                parser.c.report_error(grab(parser).position, "unexpected procedure body", .{});
                                 exit(1);
                             },
                         }
                     },
                     .Equal => {
                         tag = .Symbol_With_Type_And_Value;
-                        p.lexer.advance();
-                        value = parse_expr(p);
+                        advance(parser);
+                        value = parse_expression(parser);
                     },
                     else => {},
                 }
@@ -1362,19 +1393,19 @@ fn try_parse_symbol(p: *Parser) ParseSymbolResult {
                 tag = .Type;
             },
             .Symbol_Without_Type => {
-                p.c.report_error(pattern.position, "missing type after expression", .{});
+                parser.c.report_error(pattern.position, "missing type after expression", .{});
                 exit(1);
             },
             .Symbol_With_Type_And_Value => {
-                p.c.report_error(value.?.position, "value expression", .{});
+                parser.c.report_error(value.?.position, "value expression", .{});
                 exit(1);
             },
             .Procedure => {
-                p.c.report_error(value.?.position, "expected type definition, not procedure", .{});
+                parser.c.report_error(value.?.position, "expected type definition, not procedure", .{});
                 exit(1);
             },
-            .Expr => {
-                p.c.report_error(pattern.position, "missing type after expression", .{});
+            .Expression => {
+                parser.c.report_error(pattern.position, "missing type after expression", .{});
                 exit(1);
             },
             .Type => unreachable,
@@ -1391,20 +1422,20 @@ fn try_parse_symbol(p: *Parser) ParseSymbolResult {
     };
 }
 
-fn parse_symbol(p: *Parser, how_to_parse: HowToParseSymbol) *Ast.Symbol {
-    const result = try_parse_symbol(p);
-    const symbol = insert_symbol(p, result, how_to_parse);
+fn parse_symbol(parser: *Parser, how_to_parse: HowToParseSymbol) *Ast.Symbol {
+    const result = try_parse_symbol(parser);
+    const symbol = insert_symbol(parser, result, how_to_parse);
     return symbol;
 }
 
-fn parse_symbol_list(p: *Parser, fields: *Ast.SymbolList, rest: ?*Ast.SymbolList, how_to_parse: HowToParseSymbol) void {
-    var tt = p.lexer.peek();
+fn parse_symbol_list(parser: *Parser, fields: *Ast.SymbolList, rest: ?*Ast.SymbolList, how_to_parse: HowToParseSymbol) void {
+    var tt = peek(parser);
     while (tt != .End_Of_File and tt != .Right_Parenthesis and tt != .Right_Brace) {
-        const symbol = parse_symbol(p, how_to_parse);
+        const symbol = parse_symbol(parser, how_to_parse);
         var expect_comma = false;
 
         {
-            const node = p.ast.create(Ast.SymbolList.Node);
+            const node = parser.ast.create(Ast.SymbolList.Node);
             node.* = .{
                 .data = symbol,
             };
@@ -1427,45 +1458,43 @@ fn parse_symbol_list(p: *Parser, fields: *Ast.SymbolList, rest: ?*Ast.SymbolList
             }
         }
 
-        tt = p.lexer.peek();
+        tt = peek(parser);
         if (expect_comma and tt != .End_Of_File and tt != .Right_Parenthesis and tt != .Right_Brace) {
-            p.lexer.expect(.Comma);
-            tt = p.lexer.peek();
+            expect(parser, .Comma);
+            tt = peek(parser);
         }
     }
 }
 
-fn parse_top_level(p: *Parser) void {
-    while (p.lexer.peek() != .End_Of_File) {
-        const stmt = parse_stmt(p);
-        switch (stmt.as) {
+fn parse_top_level(parser: *Parser) void {
+    while (peek(parser) != .End_Of_File) {
+        const statement = parse_statement(parser);
+        switch (statement.as) {
             .Symbol => |symbol| {
-                const node = p.ast.create(Ast.SymbolList.Node);
+                const node = parser.ast.create(Ast.SymbolList.Node);
                 node.* = .{
                     .data = symbol,
                 };
-                p.ast.globals.append(node);
+                parser.ast.globals.append(node);
             },
             else => {
-                p.c.report_error(stmt.position, "expected symbol definition", .{});
+                parser.c.report_error(statement.position, "expected symbol definition", .{});
             },
         }
     }
 
-    std.debug.assert(p.current_scope == &Ast.global_scope);
+    std.debug.assert(parser.current_scope == &Ast.global_scope);
 
-    if (p.c.had_error) {
+    if (parser.c.had_error) {
         exit(1);
     }
 }
 
-pub fn parse(p: *Parser) void {
-    parse_top_level(p);
+pub fn parse(parser: *Parser) void {
+    parse_top_level(parser);
 }
 
 const exit = nostd.exit;
-
-const Token = Lexer.Token;
 
 const std = @import("std");
 const nostd = @import("nostd.zig");

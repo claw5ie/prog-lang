@@ -142,7 +142,7 @@ fn generate_global_symbol(generator: *IRGenerator, symbol: *Ast.Symbol) void {
                 .{ .Imm = 0 },
             );
 
-            generate_stmt_list(generator, Procedure.block);
+            generate_statement_list(generator, Procedure.block);
 
             const stack_space_used = nostd.align_up(generator.biggest_next_local, .Qword);
             generate_label(generator, labels.end);
@@ -181,7 +181,7 @@ fn generate_local_symbol(generator: *IRGenerator, symbol: *Ast.Symbol) void {
             }
 
             if (Variable.value) |value| {
-                _ = generate_expr(generator, Variable.storage, value);
+                _ = generate_expression(generator, Variable.storage, value);
             }
         },
         .Procedure,
@@ -227,15 +227,15 @@ fn generate_type(generator: *IRGenerator, typ: *Ast.Type) void {
     }
 }
 
-fn generate_stmt(generator: *IRGenerator, stmt: *Ast.Stmt) void {
-    switch (stmt.as) {
-        .Print => |expr| {
-            const src = generate_expr(generator, null, expr);
-            switch (expr.typ.data.as) {
+fn generate_statement(generator: *IRGenerator, statement: *Ast.Statement) void {
+    switch (statement.as) {
+        .Print => |expression| {
+            const src = generate_expression(generator, null, expression);
+            switch (expression.typ.data.as) {
                 .Enum => {
                     generate_instr1(
                         generator,
-                        if (expr.typ.is_signed()) .printi else .printu,
+                        if (expression.typ.is_signed()) .printi else .printu,
                         src,
                     );
                 },
@@ -245,7 +245,7 @@ fn generate_stmt(generator: *IRGenerator, stmt: *Ast.Stmt) void {
                 .Integer => {
                     generate_instr1(
                         generator,
-                        if (expr.typ.is_signed()) .printi else .printu,
+                        if (expression.typ.is_signed()) .printi else .printu,
                         src,
                     );
                 },
@@ -266,7 +266,7 @@ fn generate_stmt(generator: *IRGenerator, stmt: *Ast.Stmt) void {
         .Block => |block| {
             // Clean locals allocated on the stack.
             const old_next_local = generator.next_local;
-            generate_stmt_list(generator, block);
+            generate_statement_list(generator, block);
             generator.next_local = old_next_local;
         },
         .If => |If| {
@@ -276,16 +276,16 @@ fn generate_stmt(generator: *IRGenerator, stmt: *Ast.Stmt) void {
 
                 generate_jmpc(generator, If.condition, false_branch_label, false);
 
-                _ = generate_stmt(generator, If.true_branch);
+                _ = generate_statement(generator, If.true_branch);
                 generate_instr1(generator, .jmp, .{ .Label = end_label });
                 generate_label(generator, false_branch_label);
-                _ = generate_stmt(generator, false_branch);
+                _ = generate_statement(generator, false_branch);
                 generate_label(generator, end_label);
             } else {
                 const end_label = grab_label(generator);
                 generate_jmpc(generator, If.condition, end_label, false);
 
-                _ = generate_stmt(generator, If.true_branch);
+                _ = generate_statement(generator, If.true_branch);
                 generate_label(generator, end_label);
             }
         },
@@ -300,11 +300,11 @@ fn generate_stmt(generator: *IRGenerator, stmt: *Ast.Stmt) void {
             generator.loop_condition_label = condition_label;
             generator.loop_end_label = end_label;
 
-            if (stmt.as == .While) {
+            if (statement.as == .While) {
                 generate_instr1(generator, .jmp, .{ .Label = condition_label });
             }
             generate_label(generator, start_label);
-            generate_stmt(generator, While.body);
+            generate_statement(generator, While.body);
             generate_label(generator, condition_label);
             generate_jmpc(generator, While.condition, start_label, true);
             generate_label(generator, end_label);
@@ -319,7 +319,7 @@ fn generate_stmt(generator: *IRGenerator, stmt: *Ast.Stmt) void {
             generate_instr1(generator, .jmp, .{ .Label = generator.loop_condition_label.? });
         },
         .Switch => |Switch| {
-            const condition = generate_expr(generator, null, Switch.condition);
+            const condition = generate_expression(generator, null, Switch.condition);
             const is_signed = Switch.condition.typ.is_signed();
 
             const first_label = grab_many_labels(generator, Switch.cases.len);
@@ -333,7 +333,7 @@ fn generate_stmt(generator: *IRGenerator, stmt: *Ast.Stmt) void {
                     while (true) {
                         switch (case.*) {
                             .Case => |Case| {
-                                const src0 = generate_expr(generator, null, Case.value);
+                                const src0 = generate_expression(generator, null, Case.value);
                                 generate_instr3(
                                     generator,
                                     if (is_signed) .ije else .uje,
@@ -343,7 +343,7 @@ fn generate_stmt(generator: *IRGenerator, stmt: *Ast.Stmt) void {
                                 );
                                 case = Case.subcase;
                             },
-                            .Stmt => break,
+                            .Statement => break,
                         }
                     }
                     label += 1;
@@ -352,8 +352,8 @@ fn generate_stmt(generator: *IRGenerator, stmt: *Ast.Stmt) void {
                 }
             }
 
-            if (Switch.default_case) |else_stmt| {
-                generate_stmt(generator, else_stmt);
+            if (Switch.default_case) |else_statement| {
+                generate_statement(generator, else_statement);
             }
 
             generate_instr1(generator, .jmp, .{ .Label = end_label });
@@ -366,9 +366,9 @@ fn generate_stmt(generator: *IRGenerator, stmt: *Ast.Stmt) void {
                     while (true) {
                         switch (case.*) {
                             .Case => |Case| case = Case.subcase,
-                            .Stmt => |substmt| {
+                            .Statement => |substatement| {
                                 generate_label(generator, label);
-                                generate_stmt(generator, substmt);
+                                generate_statement(generator, substatement);
                                 generate_instr1(generator, .jmp, .{ .Label = end_label });
                                 break;
                             },
@@ -382,8 +382,8 @@ fn generate_stmt(generator: *IRGenerator, stmt: *Ast.Stmt) void {
 
             generate_label(generator, end_label);
         },
-        .Return => |has_expr| {
-            if (has_expr) |expr| {
+        .Return => |has_expression| {
+            if (has_expression) |expression| {
                 const dst = IRE.Operand{ .Mem = .{
                     .base = .{
                         .offset = -IRE.FIRST_PARAM_OFFSET,
@@ -391,10 +391,10 @@ fn generate_stmt(generator: *IRGenerator, stmt: *Ast.Stmt) void {
                         .tag = .Relative,
                     },
                     .offset = 0,
-                    .size = expr.typ.data.byte_size,
+                    .size = expression.typ.data.byte_size,
                 } };
                 // Can't move directly to 'dst', because of pointer aliasing. Example: src = foo(&src) may not generate correct code.
-                const src = generate_expr(generator, null, expr);
+                const src = generate_expression(generator, null, expression);
                 generate_instr2(generator, .mov, dst, src);
             }
 
@@ -404,24 +404,24 @@ fn generate_stmt(generator: *IRGenerator, stmt: *Ast.Stmt) void {
             generate_local_symbol(generator, symbol);
         },
         .Assign => |Assign| {
-            const dst = generate_expr(generator, null, Assign.lhs);
-            _ = generate_expr(generator, dst, Assign.rhs);
+            const dst = generate_expression(generator, null, Assign.lhs);
+            _ = generate_expression(generator, dst, Assign.rhs);
         },
-        .Expr => |expr| {
-            _ = generate_expr(generator, null, expr);
+        .Expression => |expression| {
+            _ = generate_expression(generator, null, expression);
         },
     }
 }
 
-fn generate_stmt_list(generator: *IRGenerator, list: Ast.StmtList) void {
+fn generate_statement_list(generator: *IRGenerator, list: Ast.StatementList) void {
     var it = list.first;
     while (it) |node| {
-        generate_stmt(generator, node.data);
+        generate_statement(generator, node.data);
         it = node.next;
     }
 }
 
-pub fn generate_expr(generator: *IRGenerator, has_dst: ?IRE.Operand, expr: *Ast.Expr) IRE.Operand {
+pub fn generate_expression(generator: *IRGenerator, has_dst: ?IRE.Operand, expression: *Ast.Expression) IRE.Operand {
     const State = struct {
         generator: *IRGenerator,
         has_dst: ?IRE.Operand,
@@ -451,11 +451,11 @@ pub fn generate_expr(generator: *IRGenerator, has_dst: ?IRE.Operand, expr: *Ast.
         .has_dst = has_dst,
     };
 
-    switch (expr.as) {
+    switch (expression.as) {
         .Binary_Op => |Binary_Op| {
-            const src0 = generate_expr(generator, null, Binary_Op.lhs);
-            const src1 = generate_expr(generator, null, Binary_Op.rhs);
-            const dst = fns.maybe_grab_local_from_type(&state, expr.typ.data);
+            const src0 = generate_expression(generator, null, Binary_Op.lhs);
+            const src1 = generate_expression(generator, null, Binary_Op.rhs);
+            const dst = fns.maybe_grab_local_from_type(&state, expression.typ.data);
 
             var opcode: IRE.Opcode = switch (Binary_Op.tag) {
                 .Or, .And => unreachable,
@@ -482,30 +482,30 @@ pub fn generate_expr(generator: *IRGenerator, has_dst: ?IRE.Operand, expr: *Ast.
             generate_instr3(generator, opcode, dst.*, src0, src1);
         },
         .Unary_Op => |Unary_Op| {
-            const src = generate_expr(generator, null, Unary_Op.subexpr);
+            const src = generate_expression(generator, null, Unary_Op.subexpression);
 
             switch (Unary_Op.tag) {
                 .Pos => {
                     fns.move_to_dst(&state, src);
                 },
                 .Neg => {
-                    const dst = fns.maybe_grab_local_from_type(&state, expr.typ.data);
+                    const dst = fns.maybe_grab_local_from_type(&state, expression.typ.data);
                     generate_instr2(generator, .neg, dst.*, src);
                 },
                 .Not => {
-                    const dst = fns.maybe_grab_local_from_type(&state, expr.typ.data);
+                    const dst = fns.maybe_grab_local_from_type(&state, expression.typ.data);
                     generate_instr2(generator, .not, dst.*, src);
                 },
             }
         },
-        .Ref => |subexpr| {
-            const src = generate_expr(generator, null, subexpr);
+        .Ref => |subexpression| {
+            const src = generate_expression(generator, null, subexpression);
             const new_src = src.addr_of();
             fns.move_to_dst(&state, new_src);
         },
-        .Deref => |subexpr| {
-            const src = generate_expr(generator, null, subexpr);
-            const new_src = deref(generator, src, 0, expr.typ.data.byte_size);
+        .Deref => |subexpression| {
+            const src = generate_expression(generator, null, subexpression);
+            const new_src = deref(generator, src, 0, expression.typ.data.byte_size);
             fns.move_to_dst(&state, new_src);
         },
         .If => |If| {
@@ -513,12 +513,12 @@ pub fn generate_expr(generator: *IRGenerator, has_dst: ?IRE.Operand, expr: *Ast.
             const end_label = grab_label(generator);
 
             generate_jmpc(generator, If.condition, false_branch_label, false);
-            const dst = fns.maybe_grab_local_from_type(&state, expr.typ.data);
+            const dst = fns.maybe_grab_local_from_type(&state, expression.typ.data);
 
-            _ = generate_expr(generator, dst.*, If.true_branch);
+            _ = generate_expression(generator, dst.*, If.true_branch);
             generate_instr1(generator, .jmp, .{ .Label = end_label });
             generate_label(generator, false_branch_label);
-            _ = generate_expr(generator, dst.*, If.false_branch);
+            _ = generate_expression(generator, dst.*, If.false_branch);
             generate_label(generator, end_label);
         },
         .Field => |Field| {
@@ -527,36 +527,36 @@ pub fn generate_expr(generator: *IRGenerator, has_dst: ?IRE.Operand, expr: *Ast.
                 else => unreachable,
             };
 
-            const src = generate_expr(generator, null, Field.subexpr);
-            const new_src: IRE.Operand = if (Field.subexpr.typ.data.as != .Pointer)
-                src.bump(offset, expr.typ.data.byte_size)
+            const src = generate_expression(generator, null, Field.subexpression);
+            const new_src: IRE.Operand = if (Field.subexpression.typ.data.as != .Pointer)
+                src.bump(offset, expression.typ.data.byte_size)
             else
-                deref(generator, src, offset, expr.typ.data.byte_size);
+                deref(generator, src, offset, expression.typ.data.byte_size);
 
             fns.move_to_dst(&state, new_src);
         },
         .Call => |Call| {
-            const dst = fns.maybe_grab_local_from_type(&state, expr.typ.data);
+            const dst = fns.maybe_grab_local_from_type(&state, expression.typ.data);
             const old_next_local = generator.next_local;
 
             var bytes_pushed: u64 = 0;
 
             var it = Call.args.last;
             while (it) |node| {
-                const arg = node.data.Expr;
-                const src = generate_expr(generator, null, arg);
+                const arg = node.data.Expression;
+                const src = generate_expression(generator, null, arg);
                 generate_instr1(generator, .push, src);
                 bytes_pushed += nostd.align_up(arg.typ.data.byte_size, .Qword);
 
                 it = node.prev;
             }
 
-            if (!expr.typ.equal(Ast.void_type)) {
+            if (!expression.typ.equal(Ast.void_type)) {
                 generate_instr1(generator, .push, dst.addr_of());
                 bytes_pushed += 8;
             }
 
-            const src = generate_expr(generator, null, Call.subexpr);
+            const src = generate_expression(generator, null, Call.subexpression);
             generate_instr1(generator, .call, src);
 
             if (bytes_pushed > 0) {
@@ -568,7 +568,7 @@ pub fn generate_expr(generator: *IRGenerator, has_dst: ?IRE.Operand, expr: *Ast.
         .Constructor => |Constructor| {
             switch (Constructor.typ.data.as) {
                 .Struct, .Union => {
-                    const dst = fns.maybe_grab_local_from_type(&state, expr.typ.data);
+                    const dst = fns.maybe_grab_local_from_type(&state, expression.typ.data);
 
                     var it = Constructor.args.first;
                     while (it) |node| {
@@ -585,22 +585,22 @@ pub fn generate_expr(generator: *IRGenerator, has_dst: ?IRE.Operand, expr: *Ast.
                         }
 
                         const new_dst = dst.bump(offset, size);
-                        _ = generate_expr(generator, new_dst, Designator.rhs);
+                        _ = generate_expression(generator, new_dst, Designator.rhs);
 
                         it = node.next;
                     }
                 },
                 .Array => |Array| {
-                    const dst = fns.maybe_grab_local_from_type(&state, expr.typ.data);
+                    const dst = fns.maybe_grab_local_from_type(&state, expression.typ.data);
 
                     var offset: u64 = 0;
                     var it = Constructor.args.first;
                     while (it) |node| {
                         const size = Array.subtype.data.byte_size;
-                        const arg = node.data.Expr;
+                        const arg = node.data.Expression;
 
                         const new_dst = dst.bump(offset, size);
-                        _ = generate_expr(generator, new_dst, arg);
+                        _ = generate_expression(generator, new_dst, arg);
 
                         offset += size;
                         offset = nostd.align_up(offset, Array.subtype.data.alignment);
@@ -613,8 +613,8 @@ pub fn generate_expr(generator: *IRGenerator, has_dst: ?IRE.Operand, expr: *Ast.
                 .Integer,
                 .Bool,
                 => {
-                    const arg = Constructor.args.first.?.data.Expr;
-                    const src = generate_expr(generator, null, arg);
+                    const arg = Constructor.args.first.?.data.Expression;
+                    const src = generate_expression(generator, null, arg);
                     fns.move_to_dst(&state, src);
                 },
                 .Void,
@@ -625,22 +625,22 @@ pub fn generate_expr(generator: *IRGenerator, has_dst: ?IRE.Operand, expr: *Ast.
             }
         },
         .Subscript => |Subscript| {
-            const subexpr = generate_expr(generator, null, Subscript.subexpr);
+            const subexpression = generate_expression(generator, null, Subscript.subexpression);
             const dst = grab_local(generator, 8, .Qword);
 
             {
-                const index = generate_expr(generator, null, Subscript.index);
-                const offset = nostd.align_up(expr.typ.data.byte_size, expr.typ.data.alignment);
+                const index = generate_expression(generator, null, Subscript.index);
+                const offset = nostd.align_up(expression.typ.data.byte_size, expression.typ.data.alignment);
                 generate_instr3(generator, .umul, dst, index, .{ .Imm = offset });
             }
 
-            if (Subscript.subexpr.typ.data.as != .Pointer) {
-                generate_instr3(generator, .uadd, dst, dst, subexpr.addr_of());
+            if (Subscript.subexpression.typ.data.as != .Pointer) {
+                generate_instr3(generator, .uadd, dst, dst, subexpression.addr_of());
             } else {
-                generate_instr3(generator, .uadd, dst, dst, subexpr);
+                generate_instr3(generator, .uadd, dst, dst, subexpression);
             }
 
-            const src = dst.mem_from_tmp(0, expr.typ.data.byte_size);
+            const src = dst.mem_from_tmp(0, expression.typ.data.byte_size);
             fns.move_to_dst(&state, src);
         },
         .Byte_Size_Of => unreachable,
@@ -657,18 +657,18 @@ pub fn generate_expr(generator: *IRGenerator, has_dst: ?IRE.Operand, expr: *Ast.
                 .Proc,
                 .Pointer,
                 => {
-                    const src = generate_expr(generator, null, Cast.expr);
+                    const src = generate_expression(generator, null, Cast.expression);
                     fns.move_to_dst(&state, src);
                 },
                 .Enum => unreachable,
                 .Integer => |dInteger| {
-                    const src = generate_expr(generator, null, Cast.expr);
+                    const src = generate_expression(generator, null, Cast.expression);
 
                     _ = src: {
-                        switch (Cast.expr.typ.data.as) {
+                        switch (Cast.expression.typ.data.as) {
                             .Integer => |sInteger| {
                                 if (dInteger.bits > sInteger.bits and dInteger.is_signed and sInteger.is_signed) {
-                                    const dst = fns.maybe_grab_local_from_type(&state, expr.typ.data);
+                                    const dst = fns.maybe_grab_local_from_type(&state, expression.typ.data);
                                     generate_instr3(generator, .movsx, dst.*, src, .{ .Imm = sInteger.bits });
                                     break :src;
                                 } else {}
@@ -682,8 +682,8 @@ pub fn generate_expr(generator: *IRGenerator, has_dst: ?IRE.Operand, expr: *Ast.
                     };
                 },
                 .Bool => {
-                    const src = generate_expr(generator, null, Cast.expr);
-                    const dst = fns.maybe_grab_local_from_type(&state, expr.typ.data);
+                    const src = generate_expression(generator, null, Cast.expression);
+                    const dst = fns.maybe_grab_local_from_type(&state, expression.typ.data);
                     generate_instr2(generator, .setnz, dst.*, src);
                 },
                 .Void,
@@ -734,19 +734,19 @@ pub fn generate_expr(generator: *IRGenerator, has_dst: ?IRE.Operand, expr: *Ast.
     return state.has_dst.?;
 }
 
-fn generate_jmpc(generator: *IRGenerator, expr: *Ast.Expr, label: IRE.Label, jump_if_true: bool) void {
+fn generate_jmpc(generator: *IRGenerator, expression: *Ast.Expression, label: IRE.Label, jump_if_true: bool) void {
     var src0: IRE.Operand = undefined;
     var src1: IRE.Operand = .{ .Imm = 0 };
     var opcode: IRE.Opcode = .ujne;
     var is_signed = false;
 
     _ = fill: {
-        switch (expr.as) {
+        switch (expression.as) {
             .Binary_Op => |Binary_Op| {
                 switch (Binary_Op.tag) {
                     .Eq, .Neq, .Lt, .Leq, .Gt, .Geq => {
-                        src0 = generate_expr(generator, null, Binary_Op.lhs);
-                        src1 = generate_expr(generator, null, Binary_Op.rhs);
+                        src0 = generate_expression(generator, null, Binary_Op.lhs);
+                        src1 = generate_expression(generator, null, Binary_Op.rhs);
 
                         opcode = switch (Binary_Op.tag) {
                             .Eq => .uje,
@@ -768,7 +768,7 @@ fn generate_jmpc(generator: *IRGenerator, expr: *Ast.Expr, label: IRE.Label, jum
             .Unary_Op => |Unary_Op| {
                 switch (Unary_Op.tag) {
                     .Not => {
-                        generate_jmpc(generator, Unary_Op.subexpr, label, !jump_if_true);
+                        generate_jmpc(generator, Unary_Op.subexpression, label, !jump_if_true);
                         return;
                     },
                     else => {},
@@ -777,7 +777,7 @@ fn generate_jmpc(generator: *IRGenerator, expr: *Ast.Expr, label: IRE.Label, jum
             else => {},
         }
 
-        src0 = generate_expr(generator, null, expr);
+        src0 = generate_expression(generator, null, expression);
     };
 
     if (!jump_if_true) {

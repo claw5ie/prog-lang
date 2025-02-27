@@ -191,11 +191,11 @@ pub fn find_symbol_with_scope_bound(ast: *Ast, key: Ast.Symbol.Key, scope_bound:
     return null;
 }
 
-// Assume 'expr' is heap allocated and can be reused.
-pub fn expr_to_type(ast: *Ast, expr: *Expr) *Type {
-    switch (expr.as) {
-        .Deref => |subexpr| {
-            const subtype = expr_to_type(ast, subexpr);
+// Assume 'expression' is heap allocated and can be reused.
+pub fn expression_to_type(ast: *Ast, expression: *Expression) *Type {
+    switch (expression.as) {
+        .Deref => |subexpression| {
+            const subtype = expression_to_type(ast, subexpression);
 
             const data = ast.create(Type.SharedData);
             data.* = .{
@@ -204,16 +204,16 @@ pub fn expr_to_type(ast: *Ast, expr: *Expr) *Type {
                 .alignment = pointer_alignment,
                 .stages = default_stages_none,
             };
-            expr.as = .{ .Type = .{
-                .position = expr.position,
+            expression.as = .{ .Type = .{
+                .position = expression.position,
                 .data = data,
                 .symbol = null,
             } };
 
-            return &expr.as.Type;
+            return &expression.as.Type;
         },
         .Field => |Field| {
-            const subtype = expr_to_type(ast, Field.subexpr);
+            const subtype = expression_to_type(ast, Field.subexpression);
 
             const data = ast.create(Type.SharedData);
             data.* = .{
@@ -225,16 +225,16 @@ pub fn expr_to_type(ast: *Ast, expr: *Expr) *Type {
                 .alignment = .Byte,
                 .stages = default_stages_none,
             };
-            expr.as = .{ .Type = .{
-                .position = expr.position,
+            expression.as = .{ .Type = .{
+                .position = expression.position,
                 .data = data,
                 .symbol = null,
             } };
 
-            return &expr.as.Type;
+            return &expression.as.Type;
         },
         .Subscript => |Subscript| {
-            const subtype = expr_to_type(ast, Subscript.subexpr);
+            const subtype = expression_to_type(ast, Subscript.subexpression);
 
             const data = ast.create(Type.SharedData);
             data.* = .{
@@ -247,13 +247,13 @@ pub fn expr_to_type(ast: *Ast, expr: *Expr) *Type {
                 .alignment = .Byte,
                 .stages = default_stages_none,
             };
-            expr.as = .{ .Type = .{
-                .position = expr.position,
+            expression.as = .{ .Type = .{
+                .position = expression.position,
                 .data = data,
                 .symbol = null,
             } };
 
-            return &expr.as.Type;
+            return &expression.as.Type;
         },
         .Type => |*typ| {
             return typ;
@@ -269,16 +269,16 @@ pub fn expr_to_type(ast: *Ast, expr: *Expr) *Type {
                 .alignment = .Byte,
                 .stages = default_stages_none,
             };
-            expr.as = .{ .Type = .{
-                .position = expr.position,
+            expression.as = .{ .Type = .{
+                .position = expression.position,
                 .data = data,
                 .symbol = null,
             } };
 
-            return &expr.as.Type;
+            return &expression.as.Type;
         },
         else => {
-            ast.c.report_error(expr.position, "expected expression, not a type", .{});
+            ast.c.report_error(expression.position, "expected expressionession, not a type", .{});
             exit(1);
         },
     }
@@ -499,7 +499,7 @@ pub const Type = struct {
         Bool: void,
         Void: void,
         Identifier: Type.Identifier,
-        Type_Of: *Ast.Expr,
+        Type_Of: *Ast.Expression,
     };
 
     pub const Struct = struct {
@@ -523,13 +523,13 @@ pub const Type = struct {
 
     pub const Array = struct {
         subtype: *Type,
-        size: *Expr,
+        size: *Expression,
         computed_size: u64,
     };
 
     pub const Field = struct {
         subtype: *Type,
-        field: *Expr,
+        field: *Expression,
     };
 
     pub const IntegerType = struct {
@@ -563,7 +563,7 @@ pub const Type = struct {
 
 pub const TypeList = std.DoublyLinkedList(*Type);
 
-pub const Expr = struct {
+pub const Expression = struct {
     position: FilePosition,
     as: As,
     typ: *Type,
@@ -571,31 +571,31 @@ pub const Expr = struct {
     typechecking: Stage,
 
     pub const As = union(enum) {
-        Binary_Op: Expr.BinaryOp,
-        Unary_Op: Expr.UnaryOp,
-        Ref: *Expr,
-        Deref: *Expr,
-        If: Expr.If,
-        Field: Expr.Field,
-        Call: Expr.Call,
-        Constructor: Expr.Constructor,
-        Subscript: Expr.Subscript,
-        Byte_Size_Of: *Ast.Expr,
-        Alignment_Of: *Ast.Expr,
-        As: Expr.Cast,
-        Cast: Expr.Cast,
+        Binary_Op: Expression.BinaryOp,
+        Unary_Op: Expression.UnaryOp,
+        Ref: *Expression,
+        Deref: *Expression,
+        If: Expression.If,
+        Field: Expression.Field,
+        Call: Expression.Call,
+        Constructor: Expression.Constructor,
+        Subscript: Expression.Subscript,
+        Byte_Size_Of: *Ast.Expression,
+        Alignment_Of: *Ast.Expression,
+        As: Expression.Cast,
+        Cast: Expression.Cast,
         Type: Type,
         Integer: u64,
         Boolean: bool,
         Null: void,
         Symbol: *Symbol,
-        Identifier: Expr.Identifier,
+        Identifier: Expression.Identifier,
     };
 
     pub const BinaryOp = struct {
         position: FilePosition,
-        lhs: *Expr,
-        rhs: *Expr,
+        lhs: *Expression,
+        rhs: *Expression,
         tag: Tag,
 
         pub const Tag = enum {
@@ -616,7 +616,7 @@ pub const Expr = struct {
     };
 
     pub const UnaryOp = struct {
-        subexpr: *Expr,
+        subexpression: *Expression,
         tag: Tag,
 
         pub const Tag = enum {
@@ -627,34 +627,34 @@ pub const Expr = struct {
     };
 
     pub const If = struct {
-        condition: *Expr,
-        true_branch: *Expr,
-        false_branch: *Expr,
+        condition: *Expression,
+        true_branch: *Expression,
+        false_branch: *Expression,
     };
 
     pub const Call = struct {
-        subexpr: *Expr,
-        args: ExprList,
+        subexpression: *Expression,
+        args: ExpressionList,
     };
 
     pub const Constructor = struct {
         typ: *Type,
-        args: ExprList,
+        args: ExpressionList,
     };
 
     pub const Subscript = struct {
-        subexpr: *Expr,
-        index: *Expr,
+        subexpression: *Expression,
+        index: *Expression,
     };
 
     pub const Field = struct {
-        subexpr: *Expr,
-        field: *Expr,
+        subexpression: *Expression,
+        field: *Expression,
     };
 
     pub const Cast = struct {
         typ: *Type,
-        expr: *Expr,
+        expression: *Expression,
     };
 
     pub const Identifier = struct {
@@ -669,69 +669,69 @@ pub const Expr = struct {
     };
 };
 
-pub const ExprListNode = union(enum) {
+pub const ExpressionListNode = union(enum) {
     Designator: struct {
-        lhs: *Expr,
-        rhs: *Expr,
+        lhs: *Expression,
+        rhs: *Expression,
     },
-    Expr: *Expr,
+    Expression: *Expression,
 };
 
-pub const ExprList = std.DoublyLinkedList(*ExprListNode);
+pub const ExpressionList = std.DoublyLinkedList(*ExpressionListNode);
 
-pub const Stmt = struct {
+pub const Statement = struct {
     position: FilePosition,
     as: As,
 
     pub const As = union(enum) {
-        Print: *Expr,
-        Block: StmtList,
-        If: Stmt.If,
-        While: Stmt.While,
-        Do_While: Stmt.While,
+        Print: *Expression,
+        Block: StatementList,
+        If: Statement.If,
+        While: Statement.While,
+        Do_While: Statement.While,
         Break: void,
         Continue: void,
-        Switch: Stmt.Switch,
-        Return: ?*Expr,
+        Switch: Statement.Switch,
+        Return: ?*Expression,
         Symbol: *Symbol,
-        Assign: Stmt.Assign,
-        Expr: *Expr,
+        Assign: Statement.Assign,
+        Expression: *Expression,
     };
 
     pub const If = struct {
-        condition: *Expr,
-        true_branch: *Stmt,
-        false_branch: ?*Stmt,
+        condition: *Expression,
+        true_branch: *Statement,
+        false_branch: ?*Statement,
     };
 
     pub const While = struct {
-        condition: *Expr,
-        body: *Stmt,
+        condition: *Expression,
+        body: *Statement,
     };
 
     pub const Switch = struct {
-        condition: *Expr,
+        condition: *Expression,
         cases: CaseList,
-        default_case: ?*Stmt,
+        default_case: ?*Statement,
 
         pub const Case = union(enum) {
             Case: struct {
-                value: *Expr,
+                value: *Expression,
                 subcase: *Case,
             },
-            Stmt: *Stmt,
+            Statement: *Statement,
         };
 
         pub const CaseList = std.DoublyLinkedList(*Case);
     };
 
     pub const Assign = struct {
-        lhs: *Expr,
-        rhs: *Expr,
+        lhs: *Expression,
+        rhs: *Expression,
     };
 };
 
-pub const StmtList = std.DoublyLinkedList(*Stmt);
+pub const StatementList = std.DoublyLinkedList(*Statement);
 
 pub const Symbol = struct {
     position: FilePosition,
@@ -762,19 +762,19 @@ pub const Symbol = struct {
 
     pub const Variable = struct {
         typ: ?*Type,
-        value: ?*Expr,
+        value: ?*Expression,
         storage: ?IR.Encoded.Operand,
     };
 
     pub const Parameter = struct {
         typ: *Type,
-        value: ?*Expr,
+        value: ?*Expression,
         storage: ?IR.Encoded.Operand,
     };
 
     pub const Procedure = struct {
         typ: *Type,
-        block: StmtList,
+        block: StatementList,
         labels: ?LabelPair,
 
         pub const LabelPair = struct {
@@ -785,12 +785,12 @@ pub const Symbol = struct {
 
     pub const StructField = struct {
         typ: *Type,
-        value: ?*Expr,
+        value: ?*Expression,
         offset: u64,
     };
 
     pub const EnumField = struct {
-        value: ?*Expr,
+        value: ?*Expression,
         computed_value: u64,
     };
 
