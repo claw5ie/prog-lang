@@ -87,6 +87,18 @@ pub fn compile() void {
     }
 }
 
+const Options = struct {
+    has_input_filepath: ?[:0]const u8 = null,
+    has_output_filepath: ?[:0]const u8 = null,
+    mode: Mode = .Build,
+
+    const Mode = enum {
+        Build,
+        Run,
+        Print,
+    };
+};
+
 fn parse_cmd_options() Options {
     var options = Options{};
     var activated_modes_count: u32 = 0;
@@ -153,6 +165,8 @@ fn parse_cmd_options() Options {
     return options;
 }
 
+pub const FilePosition = nostd.FilePosition;
+
 pub fn report_error(c: *Compiler, position: FilePosition, comptime format: []const u8, args: anytype) void {
     c.had_error = true;
     nostd.eprint("{s}:{}:{}: error: " ++ format ++ "\n", .{ c.filepath, position.line, position.column } ++ args);
@@ -174,20 +188,6 @@ const report_simple_fatal_error = nostd.report_fatal_error;
 
 const std = @import("std");
 const nostd = @import("nostd.zig");
-
-pub const FilePosition = nostd.FilePosition;
-
-const Options = struct {
-    has_input_filepath: ?[:0]const u8 = null,
-    has_output_filepath: ?[:0]const u8 = null,
-    mode: Mode = .Build,
-
-    const Mode = enum {
-        Build,
-        Run,
-        Print,
-    };
-};
 
 pub const Stage = enum {
     None,
