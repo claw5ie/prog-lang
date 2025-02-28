@@ -10,6 +10,7 @@ const Ast = @This();
 
 pub var global_scope: Scope = .{
     .parent = null,
+    .tag = .Global,
 };
 
 pub var void_pointer_type: *Type = undefined;
@@ -153,11 +154,14 @@ pub fn find_symbol_in_scope(ast: *Ast, key: Symbol.Key, skip_local_variables: bo
 
     if (has_symbol) |symbol| {
         switch (symbol.as) {
-            .Variable, .Parameter => {
-                if (symbol.attributes.is_const or symbol.attributes.is_static or (symbol.position.offset < offset and !skip_local_variables)) {
+            .Variable => |Variable| {
+                if (Variable.attributes.is_const or Variable.attributes.is_static or
+                    (!skip_local_variables and symbol.position.offset < offset))
+                {
                     return symbol;
                 }
             },
+            .Parameter,
             .Procedure,
             .Struct_Field,
             .Union_Field,
@@ -301,6 +305,16 @@ pub const Alignment = nostd.Alignment;
 
 pub const Scope = struct {
     parent: ?*Scope,
+    tag: Tag,
+
+    pub const Tag = enum {
+        Global,
+        Structure,
+        Union,
+        Enumerator,
+        Procedure,
+        Statement_Block,
+    };
 };
 
 pub const Type = struct {
@@ -738,19 +752,8 @@ pub const Symbol = struct {
     as: As,
     key: Key,
     typechecking: Stage,
-    attributes: Attributes,
 
-    pub const Tag = enum {
-        Variable,
-        Parameter,
-        Procedure,
-        Struct_Field,
-        Union_Field,
-        Enum_Field,
-        Type,
-    };
-
-    pub const As = union(Tag) {
+    pub const As = union(enum) {
         Variable: Symbol.Variable,
         Parameter: Symbol.Parameter,
         Procedure: Symbol.Procedure,
@@ -761,9 +764,15 @@ pub const Symbol = struct {
     };
 
     pub const Variable = struct {
+        attributes: Attributes,
         typ: ?*Type,
         value: ?*Expression,
         storage: ?IR.Encoded.Operand,
+
+        pub const Attributes = packed struct {
+            is_const: bool,
+            is_static: bool,
+        };
     };
 
     pub const Parameter = struct {
@@ -798,8 +807,6 @@ pub const Symbol = struct {
         name: []const u8,
         scope: *Scope,
     };
-
-    pub const Attributes = @import("Lexer.zig").Token.Attributes;
 };
 
 pub const SymbolList = std.DoublyLinkedList(*Symbol);

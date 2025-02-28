@@ -1,4 +1,4 @@
-main: proc() void
+proc main: () void
 {
   #const a: i32;
 }

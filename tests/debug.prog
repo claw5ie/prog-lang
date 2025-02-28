@@ -1,8 +1,10 @@
 // Comment
 
+#const a := 42;
+
 g_a: u1 = 1;
 
-main: proc() void
+proc main: () void
 {
   {
     #print g_a || false;
@@ -51,7 +53,7 @@ main: proc() void
       i = i + 1;
     }
 
-  _foo: proc() i32
+  proc _foo: () i32
   {
     return 420;
   }
@@ -76,29 +78,29 @@ main: proc() void
 
     alias Foo: struct
     {
-      x: i32,
+      x: i32;
 
       alias Bar: struct
       {
-        x: Foo,
-      };
+        x: Foo;
+      }
 
-      foo: proc() void
+      proc foo: () void
       {
         #print 42069420;
       }
-    };
+    }
 
     Foo.foo();
   }
 }
 
-foo: proc(x: u32) void
+proc foo: (x: u32) void
 {
   #print x;
 }
 
-bar: proc(x: u32) i32
+proc bar: (x: u32) i32
 {
   return #cast(i32, x + 42);
 }

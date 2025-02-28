@@ -36,10 +36,11 @@ inline fn expect(parser: *Parser, expected: Token.Tag) void {
     parser.lexer.expect(expected);
 }
 
-fn push_scope(parser: *Parser) void {
+fn push_scope(parser: *Parser, tag: Ast.Scope.Tag) void {
     const scope = parser.ast.create(Ast.Scope);
     scope.* = .{
         .parent = parser.current_scope,
+        .tag = tag,
     };
     parser.current_scope = scope;
 }
@@ -52,29 +53,82 @@ fn parse_type(parser: *Parser) *Ast.Type {
     return parser.ast.expression_to_type(parse_expression(parser));
 }
 
-fn parse_base_expression(parser: *Parser) *Ast.Expression {
+fn maybe_eat_semicolon(parser: *Parser, symbol: *Ast.Symbol) void {
+    switch (symbol.as) {
+        .Variable,
+        .Struct_Field,
+        .Union_Field,
+        .Enum_Field,
+        => expect(parser, .Semicolon),
+        .Parameter,
+        .Procedure,
+        .Type,
+        => {},
+    }
+}
+
+fn parse_structure_union_or_enumerator_body(parser: *Parser, tag: Ast.Scope.Tag) Ast.Type.Struct {
+    push_scope(parser, tag);
+
+    expect(parser, .Left_Brace);
+
+    var fields = parser.ast.create(Ast.SymbolList);
+    var rest = parser.ast.create(Ast.SymbolList);
+
+    fields.* = .{};
+    rest.* = .{};
+
+    var tt = peek(parser);
+    while (tt != .End_Of_File and tt != .Right_Brace) {
+        const symbol = parse_symbol(parser);
+
+        {
+            const node = parser.ast.create(Ast.SymbolList.Node);
+            node.* = .{ .data = symbol };
+            switch (symbol.as) {
+                .Struct_Field,
+                .Union_Field,
+                .Enum_Field,
+                => fields.append(node),
+                .Variable,
+                .Procedure,
+                .Type,
+                => rest.append(node),
+                .Parameter,
+                => unreachable,
+            }
+
+            maybe_eat_semicolon(parser, symbol);
+        }
+
+        tt = peek(parser);
+    }
+
+    expect(parser, .Right_Brace);
+
+    const scope = parser.current_scope;
+
+    pop_scope(parser);
+
+    return .{
+        .fields = fields,
+        .rest = rest,
+        .scope = scope,
+    };
+}
+
+fn parse_structure_union_or_enumerator(parser: *Parser) struct { *Ast.Expression, ?Token } {
     const token = grab(parser);
     advance(parser);
 
     switch (token.as) {
         .Struct => {
-            expect(parser, .Left_Brace);
-            push_scope(parser);
-            const scope = parser.current_scope;
-            const fields = parser.ast.create(Ast.SymbolList);
-            const rest = parser.ast.create(Ast.SymbolList);
-            fields.* = .{};
-            rest.* = .{};
-            parse_symbol_list(parser, fields, rest, .{ .Parsing_Container = .Struct });
-            pop_scope(parser);
-            expect(parser, .Right_Brace);
+            const has_id = maybe_eat_symbol_declaration(parser);
+            const body = parse_structure_union_or_enumerator_body(parser, .Structure);
+
             const data = parser.ast.create(Ast.Type.SharedData);
             data.* = .{
-                .as = .{ .Struct = .{
-                    .fields = fields,
-                    .rest = rest,
-                    .scope = scope,
-                } },
+                .as = .{ .Struct = body },
                 .byte_size = 0,
                 .alignment = .Byte,
                 .stages = Ast.default_stages_none,
@@ -91,33 +145,22 @@ fn parse_base_expression(parser: *Parser) *Ast.Expression {
                 .flags = .{},
                 .typechecking = .None,
             };
+
             {
                 const node = parser.ast.create(Ast.TypeList.Node);
-                node.* = .{
-                    .data = &expression.as.Type,
-                };
+                node.* = .{ .data = &expression.as.Type };
                 parser.ast.namespaces.append(node);
             }
-            return expression;
+
+            return .{ expression, has_id };
         },
         .Union => {
-            expect(parser, .Left_Brace);
-            push_scope(parser);
-            const scope = parser.current_scope;
-            const fields = parser.ast.create(Ast.SymbolList);
-            const rest = parser.ast.create(Ast.SymbolList);
-            fields.* = .{};
-            rest.* = .{};
-            parse_symbol_list(parser, fields, rest, .{ .Parsing_Container = .Union });
-            pop_scope(parser);
-            expect(parser, .Right_Brace);
+            const has_id = maybe_eat_symbol_declaration(parser);
+            const body = parse_structure_union_or_enumerator_body(parser, .Union);
+
             const data = parser.ast.create(Ast.Type.SharedData);
             data.* = .{
-                .as = .{ .Union = .{
-                    .fields = fields,
-                    .rest = rest,
-                    .scope = scope,
-                } },
+                .as = .{ .Union = body },
                 .byte_size = 0,
                 .alignment = .Byte,
                 .stages = Ast.default_stages_none,
@@ -134,33 +177,26 @@ fn parse_base_expression(parser: *Parser) *Ast.Expression {
                 .flags = .{},
                 .typechecking = .None,
             };
+
             {
                 const node = parser.ast.create(Ast.TypeList.Node);
-                node.* = .{
-                    .data = &expression.as.Type,
-                };
+                node.* = .{ .data = &expression.as.Type };
                 parser.ast.namespaces.append(node);
             }
-            return expression;
+
+            return .{ expression, has_id };
         },
         .Enum => {
-            expect(parser, .Left_Brace);
-            push_scope(parser);
-            const scope = parser.current_scope;
-            const fields = parser.ast.create(Ast.SymbolList);
-            const rest = parser.ast.create(Ast.SymbolList);
-            fields.* = .{};
-            rest.* = .{};
-            parse_symbol_list(parser, fields, rest, .{ .Parsing_Container = .Enum });
-            pop_scope(parser);
-            expect(parser, .Right_Brace);
+            const has_id = maybe_eat_symbol_declaration(parser);
+            const body = parse_structure_union_or_enumerator_body(parser, .Enumerator);
+
             const data = parser.ast.create(Ast.Type.SharedData);
             data.* = .{
                 .as = .{ .Enum = .{
-                    .fields = fields,
-                    .rest = rest,
-                    .integer_type = Ast.lookup_integer_type(0, false),
-                    .scope = scope,
+                    .fields = body.fields,
+                    .rest = body.rest,
+                    .integer_type = Ast.void_type,
+                    .scope = body.scope,
                 } },
                 .byte_size = 0,
                 .alignment = .Byte,
@@ -178,48 +214,148 @@ fn parse_base_expression(parser: *Parser) *Ast.Expression {
                 .flags = .{},
                 .typechecking = .None,
             };
+
             {
                 const node = parser.ast.create(Ast.TypeList.Node);
-                node.* = .{
-                    .data = &expression.as.Type,
-                };
+                node.* = .{ .data = &expression.as.Type };
                 parser.ast.namespaces.append(node);
             }
-            return expression;
+
+            return .{ expression, has_id };
+        },
+        else => unreachable,
+    }
+}
+
+const ProcedureOrItsType = union(enum) {
+    Procedure_Type: Ast.Type,
+    Procedure: Ast.Symbol.Procedure,
+};
+
+fn parse_procedure_or_its_type(parser: *Parser, position: FilePosition) ProcedureOrItsType {
+    push_scope(parser, .Procedure);
+    defer pop_scope(parser);
+
+    expect(parser, .Left_Parenthesis);
+
+    var parameters = Ast.SymbolList{};
+
+    var tt = peek(parser);
+    while (tt != .End_Of_File and tt != .Right_Parenthesis) {
+        const symbol = parse_variable(parser);
+
+        switch (symbol.as) {
+            .Variable => |Variable| {
+                if (Variable.attributes.is_static or Variable.attributes.is_const) {
+                    parser.c.report_error(symbol.position, "parameter can't be constant or static", .{});
+                }
+
+                if (Variable.value) |value| {
+                    parser.c.report_error(value.position, "default value for parameters is not supported", .{});
+                }
+
+                if (Variable.typ == null) {
+                    parser.c.report_fatal_error(symbol.position, "expected type for a parameter", .{});
+                }
+
+                const tmp = Variable;
+                symbol.as = .{ .Parameter = .{
+                    .typ = tmp.typ.?,
+                    .value = tmp.value,
+                    .storage = null,
+                } };
+            },
+            else => unreachable,
+        }
+
+        {
+            const node = parser.ast.create(Ast.SymbolList.Node);
+            node.* = .{ .data = symbol };
+            parameters.append(node);
+        }
+
+        tt = peek(parser);
+        if (tt != .End_Of_File and tt != .Right_Parenthesis) {
+            expect(parser, .Comma);
+            tt = peek(parser);
+        }
+    }
+
+    expect(parser, .Right_Parenthesis);
+
+    const return_type = parse_type(parser);
+
+    const data = parser.ast.create(Ast.Type.SharedData);
+    data.* = .{
+        .as = .{ .Proc = .{
+            .params = parameters,
+            .return_type = return_type,
+            .scope = parser.current_scope,
+        } },
+        .byte_size = Ast.pointer_byte_size,
+        .alignment = Ast.pointer_alignment,
+        .stages = Ast.default_stages_none,
+    };
+
+    if (peek(parser) == .Left_Brace) {
+        const block = parse_statement_list(parser);
+
+        const typ = parser.ast.create(Ast.Type);
+        typ.* = .{
+            .position = position,
+            .data = data,
+            .symbol = null,
+        };
+
+        return .{ .Procedure = .{
+            .typ = typ,
+            .block = block,
+            .labels = null,
+        } };
+    }
+
+    return .{ .Procedure_Type = .{
+        .position = position,
+        .data = data,
+        .symbol = null,
+    } };
+}
+
+fn parse_base_expression(parser: *Parser) *Ast.Expression {
+    const token = grab(parser);
+    advance(parser);
+
+    switch (token.as) {
+        .Struct,
+        .Union,
+        .Enum,
+        => {
+            putback(parser, token);
+            const typ, const has_id = parse_structure_union_or_enumerator(parser);
+
+            if (has_id) |id| {
+                parser.c.report_error(id.position, "unexpected identifier declaration for an unnamed type", .{});
+            }
+
+            return typ;
         },
         .Proc => {
-            expect(parser, .Left_Parenthesis);
-            push_scope(parser);
-            const scope = parser.current_scope;
-            var params = Ast.SymbolList{};
-            parse_symbol_list(parser, &params, null, .Parsing_Procedure);
-            pop_scope(parser);
-            expect(parser, .Right_Parenthesis);
-            const return_type = parse_type(parser);
-            const data = parser.ast.create(Ast.Type.SharedData);
-            data.* = .{
-                .as = .{ .Proc = .{
-                    .params = params,
-                    .return_type = return_type,
-                    .scope = scope,
-                } },
-                .byte_size = Ast.pointer_byte_size,
-                .alignment = Ast.pointer_alignment,
-                .stages = Ast.default_stages_none,
-            };
-            const expression = parser.ast.create(Ast.Expression);
-            expression.* = .{
-                .position = token.position,
-                .as = .{ .Type = .{
-                    .position = token.position,
-                    .data = data,
-                    .symbol = null,
-                } },
-                .typ = Ast.void_type,
-                .flags = .{},
-                .typechecking = .None,
-            };
-            return expression;
+            switch (parse_procedure_or_its_type(parser, token.position)) {
+                .Procedure_Type => |Type| {
+                    const expression = parser.ast.create(Ast.Expression);
+                    expression.* = .{
+                        .position = token.position,
+                        .as = .{ .Type = Type },
+                        .typ = Ast.void_type,
+                        .flags = .{},
+                        .typechecking = .None,
+                    };
+                    return expression;
+                },
+                .Procedure => {
+                    parser.c.report_fatal_error(token.position, "unnamed procedures are not supported", .{});
+                },
+            }
         },
         .Integer_Type => |Integer_Type| {
             const typ = Ast.lookup_integer_type(Integer_Type.bits, Integer_Type.is_signed);
@@ -757,7 +893,7 @@ fn parse_expression_list(parser: *Parser) Ast.ExpressionList {
 
 fn parse_statement_switch(parser: *Parser) Ast.Statement.Switch.CaseList {
     expect(parser, .Left_Brace);
-    push_scope(parser);
+    push_scope(parser, .Statement_Block);
 
     var list = Ast.Statement.Switch.CaseList{};
 
@@ -957,7 +1093,7 @@ fn parse_statement(parser: *Parser) *Ast.Statement {
         .Left_Brace => {
             putback(parser, tok);
 
-            push_scope(parser);
+            push_scope(parser, .Statement_Block);
             const block = parse_statement_list(parser);
             pop_scope(parser);
 
@@ -972,65 +1108,45 @@ fn parse_statement(parser: *Parser) *Ast.Statement {
         else => {
             putback(parser, tok);
 
-            const result = try_parse_symbol(parser);
-            switch (result.tag) {
-                .Type,
-                .Symbol_Without_Type,
-                .Symbol_With_Type,
-                .Symbol_With_Type_And_Value,
-                .Procedure,
-                => {
-                    const symbol = insert_symbol(parser, result, .Parsing_Statement);
+            if (try_parse_symbol(parser)) |symbol| {
+                maybe_eat_semicolon(parser, symbol);
 
-                    if (symbol.as == .Procedure) {
-                        const node = parser.ast.create(Ast.SymbolList.Node);
-                        node.* = .{
-                            .data = symbol,
+                const statement = parser.ast.create(Ast.Statement);
+                statement.* = .{
+                    .position = tok.position,
+                    .as = .{ .Symbol = symbol },
+                };
+                return statement;
+            } else {
+                const expression = parse_expression(parser);
+
+                switch (peek(parser)) {
+                    .Equal => {
+                        advance(parser);
+                        const rhs = parse_expression(parser);
+                        expect(parser, .Semicolon);
+
+                        const statement = parser.ast.create(Ast.Statement);
+                        statement.* = .{
+                            .position = tok.position,
+                            .as = .{ .Assign = .{
+                                .lhs = expression,
+                                .rhs = rhs,
+                            } },
                         };
-                        parser.ast.local_procedures.append(node);
-                    }
 
-                    const statement = parser.ast.create(Ast.Statement);
-                    statement.* = .{
-                        .position = tok.position,
-                        .as = .{ .Symbol = symbol },
-                    };
-                    return statement;
-                },
-                .Expression => {
-                    if (!result.attributes.is_empty()) {
-                        parser.c.report_error(tok.position, "unexpected attributes", .{});
-                    }
-
-                    const expression = result.pattern;
-                    switch (peek(parser)) {
-                        .Equal => {
-                            advance(parser);
-                            const rhs = parse_expression(parser);
-                            expect(parser, .Semicolon);
-
-                            const statement = parser.ast.create(Ast.Statement);
-                            statement.* = .{
-                                .position = tok.position,
-                                .as = .{ .Assign = .{
-                                    .lhs = expression,
-                                    .rhs = rhs,
-                                } },
-                            };
-
-                            return statement;
-                        },
-                        else => {
-                            expect(parser, .Semicolon);
-                            const statement = parser.ast.create(Ast.Statement);
-                            statement.* = .{
-                                .position = tok.position,
-                                .as = .{ .Expression = expression },
-                            };
-                            return statement;
-                        },
-                    }
-                },
+                        return statement;
+                    },
+                    else => {
+                        expect(parser, .Semicolon);
+                        const statement = parser.ast.create(Ast.Statement);
+                        statement.* = .{
+                            .position = tok.position,
+                            .as = .{ .Expression = expression },
+                        };
+                        return statement;
+                    },
+                }
             }
         },
     }
@@ -1061,344 +1177,271 @@ fn parse_statement_list(parser: *Parser) Ast.StatementList {
     return list;
 }
 
-const HowToParseSymbol = union(enum) {
-    Parsing_Container: enum {
-        Struct,
-        Union,
-        Enum,
-    },
-    Parsing_Procedure: void,
-    Parsing_Statement: void,
-};
-
-fn insert_symbol(parser: *Parser, result: ParseSymbolResult, how_to_parse: HowToParseSymbol) *Ast.Symbol {
-    const symbol: *Ast.Symbol = symbol: {
-        switch (result.pattern.as) {
-            .Identifier => |Identifier| {
-                const key = Ast.Symbol.Key{
-                    .name = Identifier.name,
-                    .scope = Identifier.scope,
-                };
-                const insert_result = parser.ast.symbol_table.insert(key);
-
-                if (insert_result.found_existing) {
-                    parser.c.report_error(result.pattern.position, "symbol '{s}' is defined already", .{key.name});
-                    parser.c.report_note(insert_result.value_ptr.*.position, "first defined here", .{});
-                    exit(1);
-                }
-
-                const symbol = parser.ast.create(Ast.Symbol);
-                symbol.* = .{
-                    .position = result.pattern.position,
-                    .as = undefined,
-                    .key = key,
-                    .typechecking = .None,
-                    .attributes = result.attributes,
-                };
-                insert_result.value_ptr.* = symbol;
-
-                break :symbol symbol;
-            },
-            else => {
-                parser.c.report_error(result.pattern.position, "expected identifier", .{});
-                exit(1);
-            },
-        }
+fn insert_symbol(parser: *Parser, id: Token) *Ast.Symbol {
+    const key = Ast.Symbol.Key{
+        .name = id.as.Identifier,
+        .scope = parser.current_scope,
     };
+    const insert_result = parser.ast.symbol_table.insert(key);
 
-    const symbol_tag: Ast.Symbol.Tag = symbol_tag: {
-        switch (how_to_parse) {
-            .Parsing_Container => |container_type| {
-                switch (result.tag) {
-                    .Type => break :symbol_tag .Type,
-                    .Symbol_Without_Type => {
-                        if (!result.attributes.is_empty()) {
-                            break :symbol_tag .Variable;
-                        }
-
-                        switch (container_type) {
-                            .Struct, .Union => {
-                                parser.c.report_error(result.pattern.position, "expected type after pattern", .{});
-                                exit(1);
-                            },
-                            .Enum => break :symbol_tag .Enum_Field,
-                        }
-                    },
-                    .Symbol_With_Type,
-                    .Symbol_With_Type_And_Value,
-                    => {
-                        if (!result.attributes.is_empty()) {
-                            break :symbol_tag .Variable;
-                        }
-
-                        switch (container_type) {
-                            .Struct => break :symbol_tag .Struct_Field,
-                            .Union => break :symbol_tag .Union_Field,
-                            .Enum => {
-                                parser.c.report_error(result.typ.?.position, "unexpected type", .{});
-                                exit(1);
-                            },
-                        }
-                    },
-                    .Procedure => break :symbol_tag .Procedure,
-                    .Expression => {
-                        switch (container_type) {
-                            .Struct, .Union => {
-                                parser.c.report_error(result.pattern.position, "expected type after pattern", .{});
-                                exit(1);
-                            },
-                            .Enum => break :symbol_tag .Enum_Field,
-                        }
-                    },
-                }
-            },
-            .Parsing_Procedure => {
-                switch (result.tag) {
-                    .Symbol_With_Type,
-                    .Symbol_With_Type_And_Value,
-                    => break :symbol_tag .Parameter,
-                    .Type => {
-                        parser.c.report_error(result.pattern.position, "unexpected type", .{});
-                        exit(1);
-                    },
-                    .Symbol_Without_Type => {
-                        parser.c.report_error(result.pattern.position, "expected type after pattern", .{});
-                        exit(1);
-                    },
-                    .Procedure => {
-                        parser.c.report_error(result.pattern.position, "unexpected procedure", .{});
-                        exit(1);
-                    },
-                    .Expression => {
-                        parser.c.report_error(result.pattern.position, "unexpected expression", .{});
-                        exit(1);
-                    },
-                }
-            },
-            .Parsing_Statement => {
-                switch (result.tag) {
-                    .Type => break :symbol_tag .Type,
-                    .Symbol_Without_Type,
-                    .Symbol_With_Type,
-                    .Symbol_With_Type_And_Value,
-                    => break :symbol_tag .Variable,
-                    .Procedure => break :symbol_tag .Procedure,
-                    .Expression => unreachable,
-                }
-            },
-        }
-    };
-
-    symbol.as = as: {
-        switch (symbol_tag) {
-            .Variable => {
-                expect(parser, .Semicolon);
-
-                const is_global = symbol.key.scope == &Ast.global_scope or how_to_parse == .Parsing_Container;
-                const is_static = is_global and !symbol.attributes.is_const;
-
-                symbol.attributes.is_static = symbol.attributes.is_static or is_static;
-                symbol.attributes.is_global = is_global;
-                break :as .{ .Variable = .{
-                    .typ = result.typ,
-                    .value = result.value,
-                    .storage = null,
-                } };
-            },
-            .Parameter => {
-                if (!symbol.attributes.is_empty()) {
-                    parser.c.report_error(result.pattern.position, "unexpected attributes for parameter", .{});
-                    exit(1);
-                }
-
-                break :as .{ .Parameter = .{
-                    .typ = result.typ.?,
-                    .value = result.value,
-                    .storage = null,
-                } };
-            },
-            .Procedure => {
-                if (symbol.attributes.is_static) {
-                    parser.c.report_error(result.pattern.position, "procedures can't be static", .{});
-                    exit(1);
-                }
-
-                symbol.attributes.is_const = true;
-                break :as .{ .Procedure = .{
-                    .typ = result.typ.?,
-                    .block = result.block,
-                    .labels = null,
-                } };
-            },
-            .Struct_Field => {
-                std.debug.assert(symbol.attributes.is_empty());
-                break :as .{ .Struct_Field = .{
-                    .typ = result.typ.?,
-                    .value = result.value,
-                    .offset = 0,
-                } };
-            },
-            .Union_Field => {
-                std.debug.assert(symbol.attributes.is_empty());
-                break :as .{ .Union_Field = .{
-                    .typ = result.typ.?,
-                    .value = result.value,
-                    .offset = 0,
-                } };
-            },
-            .Enum_Field => {
-                symbol.attributes.is_const = true;
-                break :as .{ .Enum_Field = .{
-                    .value = result.value,
-                    .computed_value = 0,
-                } };
-            },
-            .Type => {
-                expect(parser, .Semicolon);
-
-                if (!symbol.attributes.is_empty()) {
-                    parser.c.report_error(result.pattern.position, "unexpected attributes for a type", .{});
-                    exit(1);
-                }
-
-                break :as .{ .Type = result.typ.? };
-            },
-        }
-    };
-
-    return symbol;
-}
-
-const ParseSymbolResult = struct {
-    attributes: Token.Attributes,
-    pattern: *Ast.Expression,
-    typ: ?*Ast.Type,
-    value: ?*Ast.Expression,
-    block: Ast.StatementList,
-    tag: Tag,
-
-    pub const Tag = enum {
-        Type,
-        Symbol_Without_Type,
-        Symbol_With_Type,
-        Symbol_With_Type_And_Value,
-        Procedure,
-        Expression,
-    };
-};
-
-fn try_parse_symbol(parser: *Parser) ParseSymbolResult {
-    const position = grab(parser).position;
-    var attributes = Token.Attributes{};
-
-    if (peek(parser) == .Attributes) {
-        attributes = grab(parser).as.Attributes;
-        advance(parser);
-    }
-
-    if (attributes.is_const and attributes.is_static) {
-        parser.c.report_error(position, "'#const' and '#static' are mutually exclusive", .{});
+    if (insert_result.found_existing) {
+        parser.c.report_error(id.position, "symbol '{s}' is defined already", .{key.name});
+        parser.c.report_note(insert_result.value_ptr.*.position, "first defined here", .{});
         exit(1);
     }
 
-    var is_type = false;
-
-    if (peek(parser) == .Alias) {
-        advance(parser);
-        is_type = true;
-    }
-
-    const pattern = parse_expression(parser);
-    var typ: ?*Ast.Type = null;
-    var value: ?*Ast.Expression = null;
-    var block: Ast.StatementList = .{};
-    var tag: ParseSymbolResult.Tag = .Expression;
-
-    switch (peek(parser)) {
-        .Colon => {
-            if (peek_at(parser, 1) == .Equal) {
-                advance(parser);
-                tag = .Symbol_Without_Type;
-                advance(parser);
-                value = parse_expression(parser);
-            } else {
-                tag = .Symbol_With_Type;
-                advance(parser);
-                typ = parse_type(parser);
-                switch (peek(parser)) {
-                    .Left_Brace => {
-                        switch (typ.?.data.as) {
-                            .Proc => |Proc| {
-                                tag = .Procedure;
-                                const old_current_scope = parser.current_scope;
-
-                                parser.current_scope = Proc.scope;
-                                block = parse_statement_list(parser);
-                                parser.current_scope = old_current_scope;
-                            },
-                            else => {
-                                parser.c.report_error(grab(parser).position, "unexpected procedure body", .{});
-                                exit(1);
-                            },
-                        }
-                    },
-                    .Equal => {
-                        tag = .Symbol_With_Type_And_Value;
-                        advance(parser);
-                        value = parse_expression(parser);
-                    },
-                    else => {},
-                }
-            }
-        },
-        else => {},
-    }
-
-    if (is_type) {
-        switch (tag) {
-            .Symbol_With_Type => {
-                tag = .Type;
-            },
-            .Symbol_Without_Type => {
-                parser.c.report_error(pattern.position, "missing type after expression", .{});
-                exit(1);
-            },
-            .Symbol_With_Type_And_Value => {
-                parser.c.report_error(value.?.position, "value expression", .{});
-                exit(1);
-            },
-            .Procedure => {
-                parser.c.report_error(value.?.position, "expected type definition, not procedure", .{});
-                exit(1);
-            },
-            .Expression => {
-                parser.c.report_error(pattern.position, "missing type after expression", .{});
-                exit(1);
-            },
-            .Type => unreachable,
-        }
-    }
-
-    return .{
-        .attributes = attributes,
-        .pattern = pattern,
-        .typ = typ,
-        .value = value,
-        .block = block,
-        .tag = tag,
+    const symbol = parser.ast.create(Ast.Symbol);
+    symbol.* = .{
+        .position = id.position,
+        .as = undefined,
+        .key = key,
+        .typechecking = .None,
     };
-}
+    insert_result.value_ptr.* = symbol;
 
-fn parse_symbol(parser: *Parser, how_to_parse: HowToParseSymbol) *Ast.Symbol {
-    const result = try_parse_symbol(parser);
-    const symbol = insert_symbol(parser, result, how_to_parse);
     return symbol;
 }
 
-fn parse_symbol_list(parser: *Parser, fields: *Ast.SymbolList, rest: ?*Ast.SymbolList, how_to_parse: HowToParseSymbol) void {
+fn maybe_eat_symbol_declaration(parser: *Parser) ?Token {
+    if (peek(parser) == .Identifier and peek_at(parser, 1) == .Colon) {
+        const id = grab(parser);
+        advance_many(parser, 2);
+        return id;
+    }
+
+    return null;
+}
+
+fn eat_symbol_declaration(parser: *Parser) Token {
+    if (maybe_eat_symbol_declaration(parser)) |id| {
+        return id;
+    }
+
+    parser.c.report_fatal_error(grab(parser).position, "expected identifier declaration", .{});
+}
+
+fn try_parse_variable(parser: *Parser) ?*Ast.Symbol {
+    var lookahead: TokenIndex = 0;
+    var has_attributes = false;
+
+    if (peek_at(parser, lookahead) == .Attributes) {
+        lookahead += 1;
+        has_attributes = true;
+    }
+
+    switch (peek_at(parser, lookahead)) {
+        .Identifier => switch (peek_at(parser, lookahead + 1)) {
+            .Colon => {
+                var attributes = Token.Attributes{
+                    .is_const = false,
+                    .is_static = false,
+                };
+
+                if (has_attributes) {
+                    attributes = grab(parser).as.Attributes;
+                    advance(parser);
+                }
+
+                const id = eat_symbol_declaration(parser);
+
+                var has_type: ?*Ast.Type = null;
+                var has_value: ?*Ast.Expression = null;
+
+                if (peek(parser) == .Equal) {
+                    advance(parser);
+                    has_value = parse_expression(parser);
+                } else {
+                    has_type = parse_type(parser);
+
+                    if (peek(parser) == .Equal) {
+                        advance(parser);
+                        has_value = parse_expression(parser);
+                    }
+                }
+
+                if (attributes.is_const and attributes.is_static) {
+                    parser.c.report_error(id.position, "variable can't be static and constant at the same time", .{});
+                }
+
+                const symbol = insert_symbol(parser, id);
+                symbol.as = if (attributes.is_const or attributes.is_static) as: {
+                    break :as .{ .Variable = .{
+                        .attributes = .{
+                            .is_const = attributes.is_const,
+                            .is_static = attributes.is_static,
+                        },
+                        .typ = has_type,
+                        .value = has_value,
+                        .storage = null,
+                    } };
+                } else as: {
+                    switch (symbol.key.scope.tag) {
+                        .Global => {
+                            attributes.is_static = !attributes.is_const;
+
+                            if (has_value == null) {
+                                parser.c.report_error(symbol.position, "expected initializer for a global variable", .{});
+                            }
+
+                            break :as .{ .Variable = .{
+                                .attributes = .{
+                                    .is_const = attributes.is_const,
+                                    .is_static = attributes.is_static,
+                                },
+                                .typ = has_type,
+                                .value = has_value,
+                                .storage = null,
+                            } };
+                        },
+                        .Structure => {
+                            if (has_type == null) {
+                                parser.c.report_error(symbol.position, "expected type for a structure field", .{});
+                            }
+
+                            break :as .{ .Struct_Field = .{
+                                .typ = has_type.?,
+                                .value = has_value,
+                                .offset = 0,
+                            } };
+                        },
+                        .Union => {
+                            if (has_type == null) {
+                                parser.c.report_error(symbol.position, "expected type for a union field", .{});
+                            }
+
+                            break :as .{ .Union_Field = .{
+                                .typ = has_type.?,
+                                .value = has_value,
+                                .offset = 0,
+                            } };
+                        },
+                        .Enumerator => {
+                            if (has_type) |typ| {
+                                parser.c.report_error(typ.position, "unexpected type for an enumerator value", .{});
+                            }
+
+                            break :as .{ .Enum_Field = .{
+                                .value = has_value,
+                                .computed_value = 0,
+                            } };
+                        },
+                        .Procedure,
+                        .Statement_Block,
+                        => {
+                            break :as .{ .Variable = .{
+                                .attributes = .{
+                                    .is_const = attributes.is_const,
+                                    .is_static = attributes.is_static,
+                                },
+                                .typ = has_type,
+                                .value = has_value,
+                                .storage = null,
+                            } };
+                        },
+                    }
+                };
+
+                return symbol;
+            },
+            else => if (parser.current_scope.tag == .Enumerator) {
+                var maybe_id = grab(parser);
+
+                if (has_attributes) {
+                    parser.c.report_error(maybe_id.position, "unexpected attributes for an enumerator value", .{});
+                    advance(parser);
+                }
+
+                maybe_id = grab(parser);
+                advance(parser);
+
+                const symbol = insert_symbol(parser, maybe_id);
+                symbol.as = .{ .Enum_Field = .{
+                    .value = null,
+                    .computed_value = 0,
+                } };
+
+                return symbol;
+            } else return null,
+        },
+        else => return null,
+    }
+}
+
+fn parse_variable(parser: *Parser) *Ast.Symbol {
+    const has_symbol = try_parse_variable(parser);
+
+    if (has_symbol) |symbol| return symbol;
+
+    parser.c.report_fatal_error(grab(parser).position, "token doesn't start a variable", .{});
+}
+
+fn try_parse_symbol(parser: *Parser) ?*Ast.Symbol {
+    switch (peek(parser)) {
+        .Alias => {
+            advance(parser);
+
+            const id = eat_symbol_declaration(parser);
+            const typ = parse_type(parser);
+
+            const symbol = insert_symbol(parser, id);
+            symbol.as = .{ .Type = typ };
+
+            return symbol;
+        },
+        .Struct,
+        .Union,
+        .Enum,
+        => {
+            const typ, const has_id = parse_structure_union_or_enumerator(parser);
+
+            if (has_id == null) {
+                parser.c.report_fatal_error(typ.position, "expected identifier declaration", .{});
+            }
+
+            const symbol = insert_symbol(parser, has_id.?);
+            symbol.as = .{ .Type = &typ.as.Type };
+
+            return symbol;
+        },
+        .Proc => {
+            advance(parser);
+
+            const id = eat_symbol_declaration(parser);
+
+            switch (parse_procedure_or_its_type(parser, id.position)) {
+                .Procedure => |Procedure| {
+                    const symbol = insert_symbol(parser, id);
+                    symbol.as = .{ .Procedure = Procedure };
+
+                    {
+                        const node = parser.ast.create(Ast.SymbolList.Node);
+                        node.* = .{ .data = symbol };
+                        parser.ast.local_procedures.append(node);
+                    }
+
+                    return symbol;
+                },
+                .Procedure_Type => |typ| {
+                    parser.c.report_fatal_error(typ.position, "expected body for a procedure", .{});
+                },
+            }
+        },
+        else => return try_parse_variable(parser),
+    }
+}
+
+fn parse_symbol(parser: *Parser) *Ast.Symbol {
+    const has_symbol = try_parse_symbol(parser);
+
+    if (has_symbol) |symbol| return symbol;
+
+    parser.c.report_fatal_error(grab(parser).position, "token doesn't start a symbol", .{});
+}
+
+fn parse_symbol_list(parser: *Parser, fields: *Ast.SymbolList, rest: ?*Ast.SymbolList) void {
     var tt = peek(parser);
     while (tt != .End_Of_File and tt != .Right_Parenthesis and tt != .Right_Brace) {
-        const symbol = parse_symbol(parser, how_to_parse);
+        const symbol = parse_symbol(parser);
         var expect_comma = false;
 
         {
@@ -1473,6 +1516,8 @@ pub fn parse(c: *Compiler) Ast {
 }
 
 const exit = nostd.exit;
+
+const FilePosition = Lexer.FilePosition;
 
 const std = @import("std");
 const nostd = @import("nostd.zig");

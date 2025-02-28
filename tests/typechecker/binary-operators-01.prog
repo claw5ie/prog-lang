@@ -1,4 +1,4 @@
-main: proc() void
+proc main: () void
 {
   true && 42;
   42 || 69;

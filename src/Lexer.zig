@@ -111,7 +111,7 @@ pub const symbols = symbols: {
     break :symbols ss;
 };
 
-pub const lookahead = 2;
+pub const lookahead = 3;
 const token_buffer_count = 4;
 
 pub fn putback(lexer: *Lexer, token: Token) void {

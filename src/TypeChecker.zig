@@ -162,8 +162,9 @@ fn check_symbol(t: *TypeChecker, symbol: *Ast.Symbol) void {
 
     const fns = struct {
         pub fn compute_variable_initializer(_t: *TypeChecker, _symbol: *Ast.Symbol) void {
-            if (_symbol.attributes.is_global or _symbol.attributes.is_const) {
-                const Variable = &_symbol.as.Variable;
+            const Variable = &_symbol.as.Variable;
+
+            if (Variable.attributes.is_static or Variable.attributes.is_const) {
                 const value = Variable.value.?;
 
                 // TODO: compute initializer always when it's constant.
@@ -192,7 +193,7 @@ fn check_symbol(t: *TypeChecker, symbol: *Ast.Symbol) void {
                     }
 
                     fns.compute_variable_initializer(t, symbol);
-                } else if (symbol.attributes.is_const) {
+                } else if (Variable.attributes.is_const) {
                     t.c.report_error(symbol.position, "constant expression needs initializer", .{});
                     exit(1);
                 }
@@ -806,11 +807,12 @@ fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpre
     const fns = struct {
         pub fn check_expression_symbol(_t: *TypeChecker, _expression: *Ast.Expression, symbol: *Ast.Symbol) TypecheckExpressionResult {
             _expression.as = .{ .Symbol = symbol };
-            _expression.flags.is_const = symbol.attributes.is_const;
-            _expression.flags.is_static = symbol.attributes.is_static;
 
             switch (symbol.as) {
                 .Variable => |*Variable| {
+                    _expression.flags.is_const = Variable.attributes.is_const;
+                    _expression.flags.is_static = Variable.attributes.is_static;
+
                     check_symbol(_t, symbol); // TODO: allow cyclic references when using #type_of/#alignment_of, etc.
 
                     _expression.flags.is_lvalue = true;

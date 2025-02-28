@@ -176,7 +176,7 @@ fn generate_global_symbol(generator: *IRGenerator, symbol: *Ast.Symbol) void {
 fn generate_local_symbol(generator: *IRGenerator, symbol: *Ast.Symbol) void {
     switch (symbol.as) {
         .Variable => |*Variable| {
-            if (!(symbol.attributes.is_static or symbol.attributes.is_const)) {
+            if (!(Variable.attributes.is_static or Variable.attributes.is_const)) {
                 Variable.storage = grab_local_from_type(generator, Variable.typ.?.data);
             }
 
