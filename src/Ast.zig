@@ -147,7 +147,7 @@ pub fn lookup_integer_type(ast: *Ast, integer: Type.IntegerType) *Type {
     return typ;
 }
 
-pub fn find_symbol_in_scope(ast: *Ast, key: Symbol.Key, skip_local_variables: bool, offset: usize) ?*Ast.Symbol {
+pub fn find_symbol_in_scope(ast: *Ast, key: Symbol.Key, skip_local_variables: bool, offset: usize) ?*Symbol {
     const has_symbol = ast.symbol_table.find(key);
 
     if (has_symbol) |symbol| {
@@ -172,11 +172,11 @@ pub fn find_symbol_in_scope(ast: *Ast, key: Symbol.Key, skip_local_variables: bo
     return null;
 }
 
-pub fn find_symbol(ast: *Ast, key: Ast.Symbol.Key, offset: usize) ?*Ast.Symbol {
-    return find_symbol_with_scope_bound(ast, key, &Ast.global_scope, offset);
+pub fn find_symbol(ast: *Ast, key: Symbol.Key, offset: usize) ?*Symbol {
+    return find_symbol_with_scope_bound(ast, key, &global_scope, offset);
 }
 
-pub fn find_symbol_with_scope_bound(ast: *Ast, key: Ast.Symbol.Key, scope_bound: *Ast.Scope, offset: usize) ?*Ast.Symbol {
+pub fn find_symbol_with_scope_bound(ast: *Ast, key: Symbol.Key, scope_bound: *Scope, offset: usize) ?*Symbol {
     var skip_local_variables = false;
     var k = key;
     while (true) {
@@ -500,18 +500,18 @@ pub const Type = struct {
     };
 
     pub const As = union(enum) {
-        Struct: Type.Struct,
-        Union: Type.Struct,
-        Enum: Type.Enum,
-        Proc: Type.Proc,
-        Array: Type.Array,
-        Field: Type.Field,
+        Struct: Struct,
+        Union: Struct,
+        Enum: Enum,
+        Proc: Proc,
+        Array: Array,
+        Field: Field,
         Pointer: *Type,
-        Integer: Type.IntegerType,
+        Integer: IntegerType,
         Bool: void,
         Void: void,
-        Identifier: Type.Identifier,
-        Type_Of: *Ast.Expression,
+        Identifier: Identifier,
+        Type_Of: *Expression,
     };
 
     pub const Struct = struct {
@@ -583,25 +583,25 @@ pub const Expression = struct {
     typechecking: Stage,
 
     pub const As = union(enum) {
-        Binary_Op: Expression.BinaryOp,
-        Unary_Op: Expression.UnaryOp,
+        Binary_Op: BinaryOp,
+        Unary_Op: UnaryOp,
         Ref: *Expression,
         Deref: *Expression,
-        If: Expression.If,
-        Field: Expression.Field,
-        Call: Expression.Call,
-        Constructor: Expression.Constructor,
-        Subscript: Expression.Subscript,
-        Byte_Size_Of: *Ast.Expression,
-        Alignment_Of: *Ast.Expression,
-        As: Expression.Cast,
-        Cast: Expression.Cast,
+        If: If,
+        Field: Field,
+        Call: Call,
+        Constructor: Constructor,
+        Subscript: Subscript,
+        Byte_Size_Of: *Expression,
+        Alignment_Of: *Expression,
+        As: Cast,
+        Cast: Cast,
         Type: Type,
         Integer: u64,
         Boolean: bool,
         Null: void,
         Symbol: *Symbol,
-        Identifier: Expression.Identifier,
+        Identifier: Identifier,
     };
 
     pub const BinaryOp = struct {
@@ -698,15 +698,15 @@ pub const Statement = struct {
     pub const As = union(enum) {
         Print: *Expression,
         Block: StatementList,
-        If: Statement.If,
-        While: Statement.While,
-        Do_While: Statement.While,
+        If: If,
+        While: While,
+        Do_While: While,
         Break: void,
         Continue: void,
-        Switch: Statement.Switch,
+        Switch: Switch,
         Return: ?*Expression,
         Symbol: *Symbol,
-        Assign: Statement.Assign,
+        Assign: Assign,
         Expression: *Expression,
     };
 
@@ -752,12 +752,12 @@ pub const Symbol = struct {
     typechecking: Stage,
 
     pub const As = union(enum) {
-        Variable: Symbol.Variable,
-        Parameter: Symbol.Parameter,
-        Procedure: Symbol.Procedure,
-        Struct_Field: Symbol.StructField,
-        Union_Field: Symbol.StructField,
-        Enum_Field: Symbol.EnumField,
+        Variable: Variable,
+        Parameter: Parameter,
+        Procedure: Procedure,
+        Struct_Field: StructField,
+        Union_Field: StructField,
+        Enum_Field: EnumField,
         Type: *Type,
     };
 
@@ -830,8 +830,8 @@ pub const SymbolTable = struct {
         return table.map.get(key);
     }
 
-    pub const Key = Ast.Symbol.Key;
-    pub const Value = *Ast.Symbol;
+    pub const Key = Symbol.Key;
+    pub const Value = *Symbol;
 
     pub const InsertResult = HashMap.GetOrPutResult;
 
