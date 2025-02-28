@@ -558,7 +558,7 @@ fn check_type(t: *TypeChecker, typ: *Ast.Type) void {
                 t.c.report_error(typ.position, "enum can't be represented in <= 64 bits", .{});
                 exit(1);
             }
-            const integer_type = Ast.lookup_integer_type(bits, is_signed);
+            const integer_type = t.ast.lookup_integer_type(.{ .bits = bits, .is_signed = is_signed });
 
             Enum.integer_type = integer_type;
             data.byte_size = integer_type.data.byte_size;
@@ -1382,7 +1382,7 @@ fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpre
                 expression.as = .{ .Integer = byte_size };
                 expression.flags.is_const = true;
 
-                break :result .{ .typ = Ast.integer_type_from_u64(byte_size), .tag = .Value };
+                break :result .{ .typ = t.ast.integer_type_from_u64(byte_size), .tag = .Value };
             },
             .Alignment_Of => |subexpression| {
                 const subexpression_result = check_expression(t, subexpression);
@@ -1394,7 +1394,7 @@ fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpre
                 expression.as = .{ .Integer = alignment };
                 expression.flags.is_const = true;
 
-                break :result .{ .typ = Ast.integer_type_from_u64(alignment), .tag = .Value };
+                break :result .{ .typ = t.ast.integer_type_from_u64(alignment), .tag = .Value };
             },
             .As => |As| {
                 check_type(t, As.typ);
@@ -1566,7 +1566,7 @@ fn safe_cast_two_integers(t: *TypeChecker, lhs: *Ast.Expression, lhs_type: *Ast.
             const bits = @max(lInteger.bits, rInteger.bits) + 1;
             if (bits <= 64) {
                 which_side_to_cast = .Both;
-                casted = Ast.lookup_integer_type(bits, true);
+                casted = t.ast.lookup_integer_type(.{ .bits = bits, .is_signed = true });
             }
         },
         .UEU, .IEI => {
@@ -1625,9 +1625,9 @@ fn safe_cast_to_integer(t: *TypeChecker, expression: *Ast.Expression, expression
         .Void,
         => return null,
         .Enum => |Enum| Enum.integer_type,
-        .Proc, .Pointer => Ast.lookup_integer_type(64, false),
+        .Proc, .Pointer => t.ast.lookup_integer_type(.{ .bits = 64, .is_signed = false }),
         .Integer => expression_type,
-        .Bool => Ast.lookup_integer_type(1, false),
+        .Bool => t.ast.lookup_integer_type(.{ .bits = 1, .is_signed = false }),
         .Field, .Identifier, .Type_Of => unreachable,
     };
 
@@ -1639,7 +1639,7 @@ fn safe_cast_to_integer(t: *TypeChecker, expression: *Ast.Expression, expression
                     // NOTE[reinterp-expression]: Reinterpret the value, no need to cast it.
                 } else if (Integer.bits < 64) {
                     should_cast = true;
-                    typ = Ast.lookup_integer_type(Integer.bits + 1, true);
+                    typ = t.ast.lookup_integer_type(.{ .bits = Integer.bits + 1, .is_signed = true });
                 } else {
                     return null;
                 }
@@ -1797,7 +1797,7 @@ fn make_expression_pointer_mul_integer(t: *TypeChecker, expression: *Ast.Express
     rhs.* = .{
         .position = expression.position,
         .as = .{ .Integer = size },
-        .typ = Ast.integer_type_from_u64(size),
+        .typ = t.ast.integer_type_from_u64(size),
         .flags = .{
             .is_const = true,
         },

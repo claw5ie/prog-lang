@@ -358,7 +358,7 @@ fn parse_base_expression(parser: *Parser) *Ast.Expression {
             }
         },
         .Integer_Type => |Integer_Type| {
-            const typ = Ast.lookup_integer_type(Integer_Type.bits, Integer_Type.is_signed);
+            const typ = parser.ast.lookup_integer_type(.{ .bits = Integer_Type.bits, .is_signed = Integer_Type.is_signed });
             const expression = parser.ast.create(Ast.Expression);
             expression.* = .{
                 .position = token.position,
@@ -496,7 +496,7 @@ fn parse_base_expression(parser: *Parser) *Ast.Expression {
             return expression;
         },
         .Integer_Literal => |value| {
-            const typ = Ast.integer_type_from_u64(value);
+            const typ = parser.ast.integer_type_from_u64(value);
             const expression = parser.ast.create(Ast.Expression);
             expression.* = .{
                 .position = token.position,

@@ -14,7 +14,6 @@ pub var global_scope: Scope = .{
 };
 
 pub var void_pointer_type: *Type = undefined;
-pub var integer_types = [_]?*Type{null} ** 130;
 pub var bool_type: *Type = undefined;
 pub var void_type: *Type = undefined;
 
@@ -90,12 +89,6 @@ pub fn init(c: *Compiler) Ast {
 
 pub fn deinit(ast: *Ast) void {
     ast.arena.deinit();
-    for (integer_types) |has_type| {
-        if (has_type) |typ| {
-            nostd.general_allocator.destroy(typ.data);
-            nostd.general_allocator.destroy(typ);
-        }
-    }
     ast.symbol_table.deinit();
 }
 
@@ -105,48 +98,53 @@ pub fn create(ast: *Ast, comptime T: type) *T {
     };
 }
 
-pub fn integer_type_from_u64(value: u64) *Type {
+pub fn integer_type_from_u64(ast: *Ast, value: u64) *Type {
     const bits = nostd.highest_bit_count(value);
-    return lookup_integer_type(bits, false);
+    return lookup_integer_type(ast, .{ .bits = bits, .is_signed = false });
 }
 
-pub fn lookup_integer_type(bits: u8, is_signed: bool) *Type {
-    std.debug.assert(bits <= 64);
+pub fn lookup_integer_type(ast: *Ast, integer: Type.IntegerType) *Type {
+    std.debug.assert(integer.bits <= 64 and if (integer.is_signed) integer.bits != 0 else true);
 
-    const index = 65 * @as(u8, @intFromBool(is_signed)) + bits;
-    if (integer_types[index] == null) {
-        const byte_size = @max(1, nostd.round_to_next_pow2(bits) / 8);
-        const data = nostd.general_allocator.create(Type.SharedData) catch {
-            exit(1);
-        };
-        data.* = .{
-            .as = .{ .Integer = .{
-                .bits = bits,
-                .is_signed = is_signed,
-            } },
-            .byte_size = byte_size,
-            .alignment = switch (byte_size) {
-                1 => .Byte,
-                2 => .Word,
-                4 => .Dword,
-                8 => .Qword,
-                else => unreachable,
-            },
-            .stages = default_stages_done,
-        };
-        const typ = nostd.general_allocator.create(Type) catch {
-            exit(1);
-        };
-        typ.* = .{
-            .position = .{ .line = 1, .column = 1, .offset = 0 },
-            .data = data,
-            .symbol = null,
-        };
+    const state = struct {
+        pub const unsigned_integer_type_count = (64 - 0) + 1; // u0 to u64
+        pub const signed_integer_type_count = (64 - 1) + 1; // i1 to i64
+        pub const total_integer_type_count = unsigned_integer_type_count + signed_integer_type_count;
+        pub var integer_types = [1]?*Type{null} ** total_integer_type_count;
+    };
 
-        integer_types[index] = typ;
+    const index = if (integer.is_signed)
+        state.unsigned_integer_type_count + integer.bits - 1 // - 1 because signed integers start at bits = 1
+    else
+        integer.bits;
+
+    if (state.integer_types[index]) |typ| {
+        return typ;
     }
 
-    return integer_types[index].?;
+    const byte_size = @max(1, nostd.round_to_next_pow2(integer.bits) / 8);
+    const data = create(ast, Type.SharedData);
+    data.* = .{
+        .as = .{ .Integer = integer },
+        .byte_size = byte_size,
+        .alignment = switch (byte_size) {
+            1 => .Byte,
+            2 => .Word,
+            4 => .Dword,
+            8 => .Qword,
+            else => unreachable,
+        },
+        .stages = default_stages_done,
+    };
+    const typ = create(ast, Type);
+    typ.* = .{
+        .position = .{ .line = 1, .column = 1, .offset = 0 },
+        .data = data,
+        .symbol = null,
+    };
+    state.integer_types[index] = typ;
+
+    return typ;
 }
 
 pub fn find_symbol_in_scope(ast: *Ast, key: Symbol.Key, skip_local_variables: bool, offset: usize) ?*Ast.Symbol {
