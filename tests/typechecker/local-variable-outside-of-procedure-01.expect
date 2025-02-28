@@ -1,0 +1,1 @@
+tests/typechecker/local-variable-outside-of-procedure-01.prog:6:5: error: symbol 'i' is not defined

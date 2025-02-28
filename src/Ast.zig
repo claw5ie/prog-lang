@@ -147,14 +147,12 @@ pub fn lookup_integer_type(ast: *Ast, integer: Type.IntegerType) *Type {
     return typ;
 }
 
-pub fn find_symbol_in_scope(ast: *Ast, key: Symbol.Key, skip_local_variables: bool, offset: usize) ?*Symbol {
-    const has_symbol = ast.symbol_table.find(key);
-
-    if (has_symbol) |symbol| {
+pub fn find_symbol_in_scope(ast: *Ast, key: Symbol.Key, symbol_offset: usize, skip_local_variables: bool) ?*Symbol {
+    if (ast.symbol_table.find(key)) |symbol| {
         switch (symbol.as) {
             .Variable => |Variable| {
                 if (Variable.attributes.is_const or Variable.attributes.is_static or
-                    (!skip_local_variables and symbol.position.offset < offset))
+                    (!skip_local_variables and symbol.position.offset < symbol_offset))
                 {
                     return symbol;
                 }
@@ -172,25 +170,18 @@ pub fn find_symbol_in_scope(ast: *Ast, key: Symbol.Key, skip_local_variables: bo
     return null;
 }
 
-pub fn find_symbol(ast: *Ast, key: Symbol.Key, offset: usize) ?*Symbol {
-    return find_symbol_with_scope_bound(ast, key, &global_scope, offset);
-}
-
-pub fn find_symbol_with_scope_bound(ast: *Ast, key: Symbol.Key, scope_bound: *Scope, offset: usize) ?*Symbol {
+pub fn find_symbol(ast: *Ast, key: Symbol.Key, symbol_offset: usize) ?*Symbol {
+    var _key = key;
     var skip_local_variables = false;
-    var k = key;
+
     while (true) {
-        const has_symbol = find_symbol_in_scope(ast, k, skip_local_variables, offset);
-        if (has_symbol) |symbol| {
+        if (find_symbol_in_scope(ast, _key, symbol_offset, skip_local_variables)) |symbol| {
             return symbol;
-        } else if (k.scope.parent) |parent| {
-            skip_local_variables = skip_local_variables or k.scope == scope_bound;
-            k.scope = parent;
-        } else {
-            break;
-        }
+        } else if (_key.scope.parent) |parent| {
+            skip_local_variables = skip_local_variables or _key.scope.tag == .Procedure;
+            _key.scope = parent;
+        } else return null;
     }
-    return null;
 }
 
 // Assume 'expression' is heap allocated and can be reused.

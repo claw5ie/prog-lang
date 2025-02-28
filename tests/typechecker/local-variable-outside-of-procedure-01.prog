@@ -1,0 +1,8 @@
+proc main: () void
+{
+  i: i32 = 0;
+  proc foo: () void
+  {
+    i;
+  }
+}
