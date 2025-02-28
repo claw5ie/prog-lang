@@ -770,6 +770,17 @@ fn check_expression_only(t: *TypeChecker, expression: *Ast.Expression) *Ast.Type
     return result.typ;
 }
 
+const TypecheckExpressionResult = struct {
+    typ: *Ast.Type,
+    tag: Tag,
+
+    pub const Tag = enum {
+        Value,
+        Type,
+        Non_Value,
+    };
+};
+
 // Types are typechecked lazily (only when used). 'cause if a type is not fully formed (like ambiguous pointer/array), we need to typecheck it from the top level.
 fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpressionResult {
     switch (expression.typechecking) {
@@ -1474,6 +1485,74 @@ fn reject_symbol(t: *TypeChecker, statement: *Ast.Statement) void {
     }
 }
 
+const Sign = enum {
+    Signed,
+    Unsigned,
+    Both,
+};
+
+fn safe_cast_to_integer(t: *TypeChecker, expression: *Ast.Expression, expression_type: *Ast.Type, what_sign: Sign) ?*Ast.Type {
+    var should_cast = false;
+    var typ: *Ast.Type = switch (expression_type.data.as) {
+        .Struct,
+        .Union,
+        .Array,
+        .Void,
+        => return null,
+        .Enum => |Enum| Enum.integer_type,
+        .Proc, .Pointer => t.ast.lookup_integer_type(.{ .bits = 64, .is_signed = false }),
+        .Integer => expression_type,
+        .Bool => t.ast.lookup_integer_type(.{ .bits = 1, .is_signed = false }),
+        .Field, .Identifier, .Type_Of => unreachable,
+    };
+
+    {
+        const Integer = &typ.data.as.Integer;
+        switch (what_sign) {
+            .Signed => {
+                if (Integer.is_signed) {
+                    // NOTE[reinterp-expression]: Reinterpret the value, no need to cast it.
+                } else if (Integer.bits < 64) {
+                    should_cast = true;
+                    typ = t.ast.lookup_integer_type(.{ .bits = Integer.bits + 1, .is_signed = true });
+                } else {
+                    return null;
+                }
+            },
+            .Unsigned => {
+                if (Integer.is_signed) {
+                    return null;
+                }
+                // NOTE[reinterp-expression].
+            },
+            .Both => {
+                // NOTE[reinterp-expression].
+            },
+        }
+    }
+
+    if (should_cast) {
+        const subexpression = t.ast.create(Ast.Expression);
+        subexpression.* = expression.*;
+        expression.* = .{
+            .position = subexpression.position,
+            .as = .{ .Cast = .{
+                .typ = typ,
+                .expression = subexpression,
+            } },
+            .typ = typ,
+            .flags = .{
+                .is_const = subexpression.flags.is_const,
+            },
+            .typechecking = .Done,
+        };
+    }
+
+    expression.typ = typ;
+
+    return typ;
+}
+
 fn safe_cast_two_integers(t: *TypeChecker, lhs: *Ast.Expression, lhs_type: *Ast.Type, rhs: *Ast.Expression, rhs_type: *Ast.Type) ?*Ast.Type {
     const casted_lhs = safe_cast_to_integer(t, lhs, lhs_type, .Both);
     const casted_rhs = safe_cast_to_integer(t, rhs, rhs_type, .Both);
@@ -1592,68 +1671,6 @@ fn safe_cast_two_integers(t: *TypeChecker, lhs: *Ast.Expression, lhs_type: *Ast.
     }
 
     return casted;
-}
-
-fn safe_cast_to_integer(t: *TypeChecker, expression: *Ast.Expression, expression_type: *Ast.Type, what_sign: Sign) ?*Ast.Type {
-    var should_cast = false;
-    var typ: *Ast.Type = switch (expression_type.data.as) {
-        .Struct,
-        .Union,
-        .Array,
-        .Void,
-        => return null,
-        .Enum => |Enum| Enum.integer_type,
-        .Proc, .Pointer => t.ast.lookup_integer_type(.{ .bits = 64, .is_signed = false }),
-        .Integer => expression_type,
-        .Bool => t.ast.lookup_integer_type(.{ .bits = 1, .is_signed = false }),
-        .Field, .Identifier, .Type_Of => unreachable,
-    };
-
-    {
-        const Integer = &typ.data.as.Integer;
-        switch (what_sign) {
-            .Signed => {
-                if (Integer.is_signed) {
-                    // NOTE[reinterp-expression]: Reinterpret the value, no need to cast it.
-                } else if (Integer.bits < 64) {
-                    should_cast = true;
-                    typ = t.ast.lookup_integer_type(.{ .bits = Integer.bits + 1, .is_signed = true });
-                } else {
-                    return null;
-                }
-            },
-            .Unsigned => {
-                if (Integer.is_signed) {
-                    return null;
-                }
-                // NOTE[reinterp-expression].
-            },
-            .Both => {
-                // NOTE[reinterp-expression].
-            },
-        }
-    }
-
-    if (should_cast) {
-        const subexpression = t.ast.create(Ast.Expression);
-        subexpression.* = expression.*;
-        expression.* = .{
-            .position = subexpression.position,
-            .as = .{ .Cast = .{
-                .typ = typ,
-                .expression = subexpression,
-            } },
-            .typ = typ,
-            .flags = .{
-                .is_const = subexpression.flags.is_const,
-            },
-            .typechecking = .Done,
-        };
-    }
-
-    expression.typ = typ;
-
-    return typ;
 }
 
 fn safe_cast(t: *TypeChecker, expression: *Ast.Expression, expression_type: *Ast.Type, cast_to: *Ast.Type) bool {
@@ -1813,20 +1830,3 @@ const Interpreter = @import("Interpreter.zig");
 const Alignment = nostd.Alignment;
 const IRD = IR.Decoded;
 const IRE = IR.Encoded;
-
-const TypecheckExpressionResult = struct {
-    typ: *Ast.Type,
-    tag: Tag,
-
-    pub const Tag = enum {
-        Value,
-        Type,
-        Non_Value,
-    };
-};
-
-const Sign = enum {
-    Signed,
-    Unsigned,
-    Both,
-};
