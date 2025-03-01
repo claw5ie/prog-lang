@@ -93,6 +93,28 @@ proc main: () void
 
     Foo.foo();
   }
+
+  {
+    a: = i32[2 + 2](0, 0, 0, 0);
+
+    i: i32 = 0;
+    while (i < 4)
+    {
+      a[i] = i;
+      i = i + 1;
+    }
+
+    (&a[1])^ = 42;
+    ptr: = &a[2] + 1;
+    ptr^ = 69;
+
+    i = 0;
+    while (i < 4)
+    {
+      #print a[i];
+      i = i + 1;
+    }
+  }
 }
 
 proc foo: (x: u32) void

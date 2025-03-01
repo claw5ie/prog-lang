@@ -183,7 +183,7 @@ fn check_symbol(t: *TypeChecker, symbol: *Ast.Symbol) void {
                 if (Variable.value) |value| {
                     const value_type = check_expression_only(t, value);
 
-                    if (!safe_cast(t, value, value_type, typ)) {
+                    if (!safe_cast(t, value, typ)) {
                         t.c.report_error(value.position, "expected '{}', but got '{}'", .{ typ, value_type });
                         t.c.report_note(typ.position, "expected type is here", .{});
                         t.c.report_note(value.position, "expression is here", .{});
@@ -500,12 +500,11 @@ fn check_type(t: *TypeChecker, typ: *Ast.Type) void {
 
                     if (enum_field.value) |value| {
                         const value_type = check_expression_only(t, value);
-                        const new_value_type = safe_cast_to_integer(t, value, value_type, .Both);
-                        if (new_value_type == null) {
+                        if (!safe_cast_to_integer(t, value, .Any)) {
                             t.c.report_error(value.position, "expected integer, but got '{}'\n", .{value_type});
                             exit(1);
                         }
-                        is_signed = is_signed or new_value_type.?.is_signed();
+                        is_signed = is_signed or value.typ.is_signed();
                         enum_field.computed_value = compute_simple_expression(t, value);
                     }
 
@@ -568,7 +567,7 @@ fn check_type(t: *TypeChecker, typ: *Ast.Type) void {
             check_type(t, Array.subtype);
 
             const size_type = check_expression_only(t, Array.size);
-            if (safe_cast_to_integer(t, Array.size, size_type, .Unsigned) == null) {
+            if (!safe_cast_to_integer(t, Array.size, .Unsigned)) {
                 t.c.report_error(typ.position, "expected unsigned integer, but got '{}'", .{size_type});
                 exit(1);
             }
@@ -631,7 +630,7 @@ fn check_statement(t: *TypeChecker, statement: *Ast.Statement) void {
         },
         .If => |If| {
             const condition_type = check_expression_only(t, If.condition);
-            if (!safe_cast(t, If.condition, condition_type, Ast.bool_type)) {
+            if (!safe_cast(t, If.condition, Ast.bool_type)) {
                 t.c.report_error(If.condition.position, "expected 'bool', but got '{}'", .{condition_type});
                 exit(1);
             }
@@ -646,7 +645,7 @@ fn check_statement(t: *TypeChecker, statement: *Ast.Statement) void {
         },
         .While, .Do_While => |While| {
             const condition_type = check_expression_only(t, While.condition);
-            if (!safe_cast(t, While.condition, condition_type, Ast.bool_type)) {
+            if (!safe_cast(t, While.condition, Ast.bool_type)) {
                 t.c.report_error(While.condition.position, "expected 'bool', but got '{}'", .{condition_type});
                 exit(1);
             }
@@ -687,7 +686,7 @@ fn check_statement(t: *TypeChecker, statement: *Ast.Statement) void {
                         .Case => |case| {
                             const value_type = check_expression_only(t, case.value);
 
-                            if (!safe_cast(t, case.value, value_type, condition_type)) {
+                            if (!safe_cast(t, case.value, condition_type)) {
                                 t.c.report_error(case.value.position, "mismatched types: '{}' and '{}'", .{ condition_type, value_type });
                                 t.c.report_note(case.value.position, "switch case is here", .{});
                                 t.c.report_note(Switch.condition.position, "switch condition is here", .{});
@@ -722,7 +721,7 @@ fn check_statement(t: *TypeChecker, statement: *Ast.Statement) void {
                 } else {
                     const expression_type = check_expression_only(t, expression);
 
-                    if (!safe_cast(t, expression, expression_type, return_type)) {
+                    if (!safe_cast(t, expression, return_type)) {
                         t.c.report_error(expression.position, "mismatched types: '{}' and '{}'", .{ return_type, expression_type });
                         t.c.report_note(return_type.position, "return type is here", .{});
                         t.c.report_note(expression.position, "expression is here", .{});
@@ -750,7 +749,7 @@ fn check_statement(t: *TypeChecker, statement: *Ast.Statement) void {
 
             const rhs_type = check_expression_only(t, Assign.rhs);
 
-            if (!safe_cast(t, Assign.rhs, rhs_type, lhs_type)) {
+            if (!safe_cast(t, Assign.rhs, lhs_type)) {
                 t.c.report_error(statement.position, "expected '{}', but got '{}'", .{ lhs_type, rhs_type });
                 exit(1);
             }
@@ -840,9 +839,11 @@ fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpre
                     Binary_Op.rhs.flags.is_const;
 
                 switch (Binary_Op.tag) {
-                    .Or, .And => {
-                        if (!safe_cast(t, Binary_Op.lhs, lhs_type, Ast.bool_type) or
-                            !safe_cast(t, Binary_Op.rhs, rhs_type, Ast.bool_type))
+                    .Or,
+                    .And,
+                    => {
+                        if (!safe_cast(t, Binary_Op.lhs, Ast.bool_type) or
+                            !safe_cast(t, Binary_Op.rhs, Ast.bool_type))
                         {
                             t.c.report_error(Binary_Op.position, "mismatched types: '{}' and '{}'", .{ lhs_type, rhs_type });
                             break :result .{ .typ = Ast.bool_type, .tag = .Value };
@@ -888,19 +889,25 @@ fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpre
 
                         break :result .{ .typ = Ast.bool_type, .tag = .Value };
                     },
-                    .Eq, .Neq => {
-                        if (!((lhs_flags.is_comparable and safe_cast(t, Binary_Op.rhs, rhs_type, lhs_type)) or
-                            (rhs_flags.is_comparable and safe_cast(t, Binary_Op.lhs, lhs_type, rhs_type))))
+                    .Eq,
+                    .Neq,
+                    => {
+                        if (!((lhs_flags.is_comparable and safe_cast(t, Binary_Op.rhs, lhs_type)) or
+                            (rhs_flags.is_comparable and safe_cast(t, Binary_Op.lhs, rhs_type))))
                         {
                             t.c.report_error(Binary_Op.position, "can't compare '{}' and '{}'", .{ lhs_type, rhs_type });
                         }
 
                         break :result .{ .typ = Ast.bool_type, .tag = .Value };
                     },
-                    .Lt, .Leq, .Gt, .Geq => {
+                    .Lt,
+                    .Leq,
+                    .Gt,
+                    .Geq,
+                    => {
                         if (!lhs_flags.is_ordered or !rhs_flags.is_ordered) {
                             t.c.report_error(Binary_Op.position, "expression of type '{}' is not comparable", .{lhs_type});
-                        } else if (!symetric_safe_cast(t, Binary_Op.lhs, lhs_type, Binary_Op.rhs, rhs_type)) {
+                        } else if (!ranked_safe_cast(t, Binary_Op.lhs, Binary_Op.rhs)) {
                             t.c.report_error(Binary_Op.position, "mismatched types: '{}' and '{}'", .{ lhs_type, rhs_type });
                         }
 
@@ -910,44 +917,44 @@ fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpre
                         if (lhs_flags.is_void_pointer or rhs_flags.is_void_pointer) {
                             t.c.report_error(Binary_Op.position, "can't add 'void' pointers", .{});
                             exit(1);
-                        } else if (lhs_flags.is_pointer and safe_cast_to_integer(t, Binary_Op.rhs, rhs_type, .Unsigned) != null) {
+                        } else if (lhs_flags.is_pointer and safe_cast_to_integer(t, Binary_Op.rhs, .Unsigned)) {
                             Binary_Op.rhs = make_expression_pointer_mul_integer(t, Binary_Op.rhs, lhs_type.data.as.Pointer.data);
                             break :result .{ .typ = lhs_type, .tag = .Value };
-                        } else if (rhs_flags.is_pointer and safe_cast_to_integer(t, Binary_Op.lhs, lhs_type, .Unsigned) != null) {
+                        } else if (rhs_flags.is_pointer and safe_cast_to_integer(t, Binary_Op.lhs, .Unsigned)) {
                             Binary_Op.lhs = make_expression_pointer_mul_integer(t, Binary_Op.lhs, rhs_type.data.as.Pointer.data);
                             break :result .{ .typ = rhs_type, .tag = .Value };
                         } else {
-                            const casted = safe_cast_two_integers(t, Binary_Op.lhs, lhs_type, Binary_Op.rhs, rhs_type);
-                            if (casted == null) {
+                            if (!safe_cast_to_two_compatible_integers(t, Binary_Op.lhs, Binary_Op.rhs)) {
                                 t.c.report_error(Binary_Op.position, "expected integer/pointer: '{}' and '{}'", .{ lhs_type, rhs_type });
                                 exit(1);
                             }
-                            break :result .{ .typ = casted.?, .tag = .Value };
+                            break :result .{ .typ = Binary_Op.lhs.typ, .tag = .Value };
                         }
                     },
                     .Sub => {
                         if (lhs_flags.is_void_pointer) {
                             t.c.report_error(Binary_Op.position, "can't subtract 'void' pointer", .{});
                             exit(1);
-                        } else if (lhs_flags.is_pointer and safe_cast_to_integer(t, Binary_Op.rhs, rhs_type, .Unsigned) != null) {
+                        } else if (lhs_flags.is_pointer and safe_cast_to_integer(t, Binary_Op.rhs, .Unsigned)) {
                             Binary_Op.rhs = make_expression_pointer_mul_integer(t, Binary_Op.rhs, lhs_type.data.as.Pointer.data);
                             break :result .{ .typ = lhs_type, .tag = .Value };
                         } else {
-                            const casted = safe_cast_two_integers(t, Binary_Op.lhs, lhs_type, Binary_Op.rhs, rhs_type);
-                            if (casted == null) {
+                            if (!safe_cast_to_two_compatible_integers(t, Binary_Op.lhs, Binary_Op.rhs)) {
                                 t.c.report_error(Binary_Op.position, "expected integer/pointer: '{}' and '{}'", .{ lhs_type, rhs_type });
                                 exit(1);
                             }
-                            break :result .{ .typ = casted.?, .tag = .Value };
+                            break :result .{ .typ = Binary_Op.lhs.typ, .tag = .Value };
                         }
                     },
-                    .Mul, .Div, .Mod => {
-                        const casted = safe_cast_two_integers(t, Binary_Op.lhs, lhs_type, Binary_Op.rhs, rhs_type);
-                        if (casted == null) {
+                    .Mul,
+                    .Div,
+                    .Mod,
+                    => {
+                        if (!safe_cast_to_two_compatible_integers(t, Binary_Op.lhs, Binary_Op.rhs)) {
                             t.c.report_error(Binary_Op.position, "expected integer/pointer: '{}' and '{}'", .{ lhs_type, rhs_type });
                             exit(1);
                         }
-                        break :result .{ .typ = casted.?, .tag = .Value };
+                        break :result .{ .typ = Binary_Op.lhs.typ, .tag = .Value };
                     },
                 }
             },
@@ -958,23 +965,21 @@ fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpre
 
                 switch (Unary_Op.tag) {
                     .Pos => {
-                        const casted = safe_cast_to_integer(t, Unary_Op.subexpression, subexpression_type, .Both);
-                        if (casted == null) {
+                        if (!safe_cast_to_integer(t, Unary_Op.subexpression, .Any)) {
                             t.c.report_error(Unary_Op.subexpression.position, "expected integer, but got '{}'", .{subexpression_type});
                             exit(1);
                         }
-                        break :result .{ .typ = casted.?, .tag = .Value };
+                        break :result .{ .typ = Unary_Op.subexpression.typ, .tag = .Value };
                     },
                     .Neg => {
-                        const casted = safe_cast_to_integer(t, Unary_Op.subexpression, subexpression_type, .Signed);
-                        if (casted == null) {
+                        if (!safe_cast_to_integer(t, Unary_Op.subexpression, .Signed)) {
                             t.c.report_error(Unary_Op.subexpression.position, "expected integer, but got '{}'", .{subexpression_type});
                             exit(1);
                         }
-                        break :result .{ .typ = casted.?, .tag = .Value };
+                        break :result .{ .typ = Unary_Op.subexpression.typ, .tag = .Value };
                     },
                     .Not => {
-                        if (!safe_cast(t, Unary_Op.subexpression, subexpression_type, Ast.bool_type)) {
+                        if (!safe_cast(t, Unary_Op.subexpression, Ast.bool_type)) {
                             t.c.report_error(Unary_Op.subexpression.position, "expected 'bool', but got '{}'", .{subexpression_type});
                         }
 
@@ -1050,7 +1055,7 @@ fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpre
             .If => |If| {
                 const condition_type = check_expression_only(t, If.condition);
 
-                if (!safe_cast(t, If.condition, condition_type, Ast.bool_type)) {
+                if (!safe_cast(t, If.condition, Ast.bool_type)) {
                     t.c.report_error(If.condition.position, "expected 'bool', but got '{}'", .{condition_type});
                     exit(1);
                 }
@@ -1058,7 +1063,7 @@ fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpre
                 const true_branch_type = check_expression_only(t, If.true_branch);
                 const false_branch_type = check_expression_only(t, If.false_branch);
 
-                if (!symetric_safe_cast(t, If.true_branch, true_branch_type, If.false_branch, false_branch_type)) {
+                if (!ranked_safe_cast(t, If.true_branch, If.false_branch)) {
                     t.c.report_error(If.condition.position, "mismatched types: '{}' and '{}'", .{ true_branch_type, false_branch_type });
                     exit(1);
                 }
@@ -1091,7 +1096,7 @@ fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpre
                                         switch (symbol.as) {
                                             .Struct_Field, .Union_Field => |Field| {
                                                 const rhs_type = check_expression_only(t, Designator.rhs);
-                                                if (!safe_cast(t, Designator.rhs, rhs_type, Field.typ)) {
+                                                if (!safe_cast(t, Designator.rhs, Field.typ)) {
                                                     t.c.report_error(Designator.rhs.position, "expected '{}', but got '{}'", .{ Field.typ, rhs_type });
                                                     exit(1);
                                                 }
@@ -1129,7 +1134,7 @@ fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpre
                                     },
                                     .Expression => |arg| {
                                         const arg_type = check_expression_only(t, arg);
-                                        if (!safe_cast(t, arg, arg_type, Array.subtype)) {
+                                        if (!safe_cast(t, arg, Array.subtype)) {
                                             t.c.report_error(arg.position, "expected '{}', but got '{}'", .{ Array.subtype, arg_type });
                                             exit(1);
                                         }
@@ -1159,7 +1164,7 @@ fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpre
                                 .Expression => |arg| {
                                     const arg_type = check_expression_only(t, arg);
 
-                                    if (!safe_cast(t, arg, arg_type, typ)) {
+                                    if (!safe_cast(t, arg, typ)) {
                                         t.c.report_error(expression.position, "expected '{}', but got '{}'", .{ typ, arg_type });
                                         exit(1);
                                     }
@@ -1218,7 +1223,7 @@ fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpre
                             .Expression => |arg| {
                                 const arg_type = check_expression_only(t, arg);
 
-                                if (!safe_cast(t, arg, arg_type, param_type)) {
+                                if (!safe_cast(t, arg, param_type)) {
                                     t.c.report_error(arg.position, "expected '{}', but got '{}'", .{ param_type, arg_type });
                                     exit(1);
                                 }
@@ -1262,7 +1267,7 @@ fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpre
                     const subexpression_type = subexpression_result.typ;
                     const index_type = check_expression_only(t, Subscript.index);
 
-                    if (safe_cast_to_integer(t, Subscript.index, index_type, .Both) == null) {
+                    if (!safe_cast_to_integer(t, Subscript.index, .Any)) {
                         t.c.report_error(Subscript.subexpression.position, "expected integer, but got '{}'", .{index_type});
                         exit(1);
                     }
@@ -1388,7 +1393,7 @@ fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpre
             .As => |As| {
                 check_type(t, As.typ);
                 const expression_type = check_expression_only(t, As.expression);
-                if (!safe_cast(t, As.expression, expression_type, As.typ)) {
+                if (!safe_cast(t, As.expression, As.typ)) {
                     t.c.report_error(As.expression.position, "can't reinterpret '{}' as '{}'", .{ As.typ, expression_type });
                     exit(1);
                 }
@@ -1397,8 +1402,9 @@ fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpre
             },
             .Cast => |Cast| {
                 check_type(t, Cast.typ);
+
                 const expression_type = check_expression_only(t, Cast.expression);
-                if (!can_unsafe_cast(t, Cast.expression, expression_type, Cast.typ)) {
+                if (!unsafe_cast(t, Cast.expression, Cast.typ)) {
                     t.c.report_error(Cast.expression.position, "can't cast '{}' to '{}'", .{ expression_type, Cast.typ });
                     exit(1);
                 }
@@ -1486,90 +1492,127 @@ fn reject_symbol(t: *TypeChecker, statement: *Ast.Statement) void {
 }
 
 const Sign = enum {
-    Signed,
+    Any,
     Unsigned,
-    Both,
+    Signed,
 };
 
-fn safe_cast_to_integer(t: *TypeChecker, expression: *Ast.Expression, expression_type: *Ast.Type, what_sign: Sign) ?*Ast.Type {
-    var should_cast = false;
-    var typ: *Ast.Type = switch (expression_type.data.as) {
+const CastResult = union(enum) {
+    Cant_Cast: void,
+    Has_Necessary_Type_Already: *Ast.Type,
+    Need_Implicit_Cast: *Ast.Type,
+    Need_Explicit_Cast: *Ast.Type,
+
+    pub fn get_type(result: CastResult) *Ast.Type {
+        return switch (result) {
+            .Cant_Cast => unreachable,
+            .Has_Necessary_Type_Already,
+            .Need_Implicit_Cast,
+            .Need_Explicit_Cast,
+            => |typ| typ,
+        };
+    }
+};
+
+fn perform_cast(t: *TypeChecker, result: CastResult, expression: *Ast.Expression) bool {
+    switch (result) {
+        .Cant_Cast => return false,
+        .Has_Necessary_Type_Already => return true,
+        .Need_Implicit_Cast => |typ| {
+            expression.typ = typ;
+            return true;
+        },
+        .Need_Explicit_Cast => |typ| {
+            const subexpression = t.ast.create(Ast.Expression);
+            subexpression.* = expression.*;
+            expression.* = .{
+                .position = subexpression.position,
+                .as = .{ .Cast = .{
+                    .typ = typ,
+                    .expression = subexpression,
+                } },
+                .typ = typ,
+                .flags = .{
+                    .is_const = subexpression.flags.is_const,
+                },
+                .typechecking = .Done,
+            };
+            return true;
+        },
+    }
+}
+
+fn can_safe_cast_to_integer(t: *TypeChecker, typ: *Ast.Type, sign: Sign) CastResult {
+    const result: CastResult = switch (typ.data.as) {
         .Struct,
         .Union,
         .Array,
         .Void,
-        => return null,
-        .Enum => |Enum| Enum.integer_type,
-        .Proc, .Pointer => t.ast.lookup_integer_type(.{ .bits = 64, .is_signed = false }),
-        .Integer => expression_type,
-        .Bool => t.ast.lookup_integer_type(.{ .bits = 1, .is_signed = false }),
-        .Field, .Identifier, .Type_Of => unreachable,
+        => return .Cant_Cast,
+        .Enum => |Enum| .{ .Has_Necessary_Type_Already = Enum.integer_type },
+        .Proc,
+        .Pointer,
+        => .{ .Need_Implicit_Cast = t.ast.lookup_integer_type(.{ .bits = 64, .is_signed = false }) },
+        .Integer => .{ .Has_Necessary_Type_Already = typ },
+        .Bool => .{ .Need_Implicit_Cast = t.ast.lookup_integer_type(.{ .bits = 1, .is_signed = false }) },
+        .Field,
+        .Identifier,
+        .Type_Of,
+        => unreachable,
     };
 
-    {
-        const Integer = &typ.data.as.Integer;
-        switch (what_sign) {
-            .Signed => {
-                if (Integer.is_signed) {
-                    // NOTE[reinterp-expression]: Reinterpret the value, no need to cast it.
-                } else if (Integer.bits < 64) {
-                    should_cast = true;
-                    typ = t.ast.lookup_integer_type(.{ .bits = Integer.bits + 1, .is_signed = true });
-                } else {
-                    return null;
-                }
-            },
-            .Unsigned => {
-                if (Integer.is_signed) {
-                    return null;
-                }
-                // NOTE[reinterp-expression].
-            },
-            .Both => {
-                // NOTE[reinterp-expression].
-            },
-        }
-    }
+    const integer_type = result.get_type();
+    const Integer = &integer_type.data.as.Integer;
 
-    if (should_cast) {
-        const subexpression = t.ast.create(Ast.Expression);
-        subexpression.* = expression.*;
-        expression.* = .{
-            .position = subexpression.position,
-            .as = .{ .Cast = .{
-                .typ = typ,
-                .expression = subexpression,
-            } },
-            .typ = typ,
-            .flags = .{
-                .is_const = subexpression.flags.is_const,
-            },
-            .typechecking = .Done,
+    // TODO: shuffle cases.
+    switch (sign) {
+        .Signed => {
+            if (Integer.is_signed) {
+                return result;
+            } else if (Integer.bits < 64) {
+                const new_integer_type = t.ast.lookup_integer_type(.{ .bits = Integer.bits + 1, .is_signed = true });
+                return .{ .Need_Explicit_Cast = new_integer_type };
+            } else {
+                return .Cant_Cast;
+            }
+        },
+        .Unsigned => {
+            if (Integer.is_signed) {
+                return .Cant_Cast;
+            } else {
+                return result;
+            }
+        },
+        .Any => return result,
+    }
+}
+
+fn safe_cast_to_integer(t: *TypeChecker, expression: *Ast.Expression, sign: Sign) bool {
+    const result = can_safe_cast_to_integer(t, expression.typ, sign);
+    return perform_cast(t, result, expression);
+}
+
+const DoubleCastResult = struct {
+    lhs: CastResult,
+    rhs: CastResult,
+};
+
+fn can_safe_cast_to_two_compatible_integers(t: *TypeChecker, lhs: *Ast.Type, rhs: *Ast.Type) DoubleCastResult {
+    const lhs_result = can_safe_cast_to_integer(t, lhs, .Any);
+    const rhs_result = can_safe_cast_to_integer(t, rhs, .Any);
+
+    if (lhs_result == .Cant_Cast or rhs_result == .Cant_Cast) {
+        return .{
+            .lhs = .Cant_Cast,
+            .rhs = .Cant_Cast,
         };
     }
 
-    expression.typ = typ;
+    const lhs_type = lhs_result.get_type();
+    const rhs_type = rhs_result.get_type();
 
-    return typ;
-}
-
-fn safe_cast_two_integers(t: *TypeChecker, lhs: *Ast.Expression, lhs_type: *Ast.Type, rhs: *Ast.Expression, rhs_type: *Ast.Type) ?*Ast.Type {
-    const casted_lhs = safe_cast_to_integer(t, lhs, lhs_type, .Both);
-    const casted_rhs = safe_cast_to_integer(t, rhs, rhs_type, .Both);
-
-    if (casted_lhs == null and casted_rhs == null) {
-        return null;
-    }
-
-    const new_lhs_type = casted_lhs.?;
-    const new_rhs_type = casted_rhs.?;
-
-    if (new_lhs_type.equal(new_rhs_type)) {
-        return new_lhs_type;
-    }
-
-    const lInteger = &new_lhs_type.data.as.Integer;
-    const rInteger = &new_rhs_type.data.as.Integer;
+    const lInteger = &lhs_type.data.as.Integer;
+    const rInteger = &rhs_type.data.as.Integer;
 
     const Case = enum(u8) {
         ULU = 0,
@@ -1601,196 +1644,243 @@ fn safe_cast_two_integers(t: *TypeChecker, lhs: *Ast.Expression, lhs_type: *Ast.
         break :case @enumFromInt(3 * (2 * left_sign + right_sign) + order);
     };
 
-    const Side = enum {
-        None,
-        Left,
-        Right,
-        Both,
-    };
-
-    var casted: ?*Ast.Type = null;
-    var which_side_to_cast: Side = .None;
     switch (case) {
-        .ULU, .ILI, .ULI => {
-            which_side_to_cast = .Left;
-            casted = new_rhs_type;
+        .ULU,
+        .ILI,
+        .ULI,
+        => return .{
+            .lhs = .{ .Need_Explicit_Cast = rhs_type },
+            .rhs = rhs_result,
         },
-        .UGU, .IGI, .IGU => {
-            which_side_to_cast = .Right;
-            casted = new_lhs_type;
+        .UGU,
+        .IGI,
+        .IGU,
+        => return .{
+            .lhs = lhs_result,
+            .rhs = .{ .Need_Explicit_Cast = lhs_type },
         },
-        .UGI, .UEI, .ILU, .IEU => {
+        .UGI,
+        .UEI,
+        .ILU,
+        .IEU,
+        => {
             const bits = @max(lInteger.bits, rInteger.bits) + 1;
+
             if (bits <= 64) {
-                which_side_to_cast = .Both;
-                casted = t.ast.lookup_integer_type(.{ .bits = bits, .is_signed = true });
+                const new_type = t.ast.lookup_integer_type(.{ .bits = bits, .is_signed = true });
+
+                return .{
+                    .lhs = .{ .Need_Explicit_Cast = new_type },
+                    .rhs = .{ .Need_Explicit_Cast = new_type },
+                };
+            } else {
+                return .{
+                    .lhs = .Cant_Cast,
+                    .rhs = .Cant_Cast,
+                };
             }
         },
-        .UEU, .IEI => {
-            which_side_to_cast = .None;
-            casted = new_lhs_type;
+        .UEU,
+        .IEI,
+        => return .{
+            .lhs = lhs_result,
+            .rhs = rhs_result,
         },
     }
-
-    // Should we undo the cast if integers are incompatible?
-
-    if (which_side_to_cast == .Left or which_side_to_cast == .Both) {
-        const typ = casted.?;
-        const subexpression = t.ast.create(Ast.Expression);
-        subexpression.* = lhs.*;
-        lhs.* = .{
-            .position = subexpression.position,
-            .as = .{ .Cast = .{
-                .typ = typ,
-                .expression = subexpression,
-            } },
-            .typ = typ,
-            .flags = .{
-                .is_const = subexpression.flags.is_const,
-            },
-            .typechecking = .Done,
-        };
-    }
-
-    if (which_side_to_cast == .Right or which_side_to_cast == .Both) {
-        const typ = casted.?;
-        const subexpression = t.ast.create(Ast.Expression);
-        subexpression.* = rhs.*;
-        rhs.* = .{
-            .position = subexpression.position,
-            .as = .{ .Cast = .{
-                .typ = typ,
-                .expression = subexpression,
-            } },
-            .typ = typ,
-            .flags = .{
-                .is_const = subexpression.flags.is_const,
-            },
-            .typechecking = .Done,
-        };
-    }
-
-    return casted;
 }
 
-fn safe_cast(t: *TypeChecker, expression: *Ast.Expression, expression_type: *Ast.Type, cast_to: *Ast.Type) bool {
-    if (expression_type.equal(cast_to)) {
-        return true;
-    }
-
-    const can_cast = can_cast: {
-        switch (cast_to.data.as) {
-            .Struct,
-            .Union,
-            .Enum,
-            .Array,
-            .Void,
-            => {},
-            .Proc => {
-                const is_void_pointer = expression_type.compare().is_void_pointer;
-                if (is_void_pointer) {
-                    break :can_cast true;
-                }
-            },
-            .Pointer => |dsubtype| {
-                switch (expression_type.data.as) {
-                    .Array => |Array| {
-                        if (Array.subtype.equal(dsubtype)) {
-                            break :can_cast true;
-                        }
-                    },
-                    .Pointer => |ssubtype| {
-                        if (dsubtype.equal(Ast.void_type) or ssubtype.equal(Ast.void_type)) {
-                            return true; // Don't need to cast.
-                        }
-                    },
-                    else => {},
-                }
-            },
-            .Integer => |dInteger| {
-                const casted = safe_cast_to_integer(t, expression, expression_type, if (dInteger.is_signed) .Signed else .Unsigned);
-
-                if (casted) |typ| {
-                    const sInteger = &typ.data.as.Integer;
-                    if (dInteger.bits >= sInteger.bits) { // TODO: 'safe_cast_two_integers' does more general version of this. Should reuse it somehow?
-                        if (dInteger.is_signed == sInteger.is_signed) {
-                            break :can_cast true;
-                        } else if (dInteger.is_signed and sInteger.bits < 64) {
-                            break :can_cast true;
-                        }
-                    }
-                }
-            },
-            .Bool => {
-                switch (expression_type.data.as) {
-                    .Integer => |Integer| {
-                        if (Integer.bits == 0 or (Integer.bits == 1 and !Integer.is_signed)) {
-                            break :can_cast true;
-                        }
-                    },
-                    else => {},
-                }
-            },
-            .Field, .Identifier, .Type_Of => unreachable,
-        }
-
-        break :can_cast false;
-    };
-
-    if (can_cast) {
-        const subexpression = t.ast.create(Ast.Expression);
-        subexpression.* = expression.*;
-        expression.* = .{
-            .position = subexpression.position,
-            .as = .{ .Cast = .{
-                .typ = cast_to,
-                .expression = subexpression,
-            } },
-            .typ = cast_to,
-            .flags = .{
-                .is_const = subexpression.flags.is_const,
-            },
-            .typechecking = .Done,
-        };
-    }
-
-    return can_cast;
+fn safe_cast_to_two_compatible_integers(t: *TypeChecker, lhs: *Ast.Expression, rhs: *Ast.Expression) bool {
+    const result = can_safe_cast_to_two_compatible_integers(t, lhs.typ, rhs.typ);
+    return perform_cast(t, result.lhs, lhs) and perform_cast(t, result.rhs, rhs);
 }
 
-fn symetric_safe_cast(t: *TypeChecker, lhs: *Ast.Expression, lhs_type: *Ast.Type, rhs: *Ast.Expression, rhs_type: *Ast.Type) bool {
-    return safe_cast(t, lhs, lhs_type, rhs_type) or safe_cast(t, rhs, rhs_type, lhs_type);
-}
-
-fn can_unsafe_cast(t: *TypeChecker, expression: *Ast.Expression, expression_type: *Ast.Type, cast_to: *Ast.Type) bool {
-    if (safe_cast(t, expression, expression_type, cast_to)) {
-        return true;
+fn can_safe_cast(t: *TypeChecker, typ: *Ast.Type, cast_to: *Ast.Type) CastResult {
+    if (typ.equal(cast_to)) {
+        return .{ .Has_Necessary_Type_Already = typ };
     }
-
-    var can_cast = false;
 
     switch (cast_to.data.as) {
-        .Struct, .Union, .Proc, .Array, .Void => {},
-        .Pointer, .Enum, .Integer, .Bool => {
-            switch (expression_type.data.as) {
+        .Struct, // TODO: could consider two structures/unions/enumerators with the same layout to be equal.
+        .Union,
+        .Enum, // TODO: it is possible to convert integers to enumerator under certain conditions.
+        .Array, // TODO: arrays of the same type can be safely casted to array with smaller size. Also, '[1]type' can be cast to 'type'.
+        .Void,
+        => return .Cant_Cast,
+        .Proc => {
+            if (typ.equal(Ast.void_pointer_type)) {
+                return .{ .Need_Implicit_Cast = cast_to };
+            } else {
+                return .Cant_Cast;
+            }
+        },
+        .Pointer => {
+            switch (typ.data.as) {
+                .Proc,
+                .Pointer,
+                => {
+                    if (cast_to.equal(Ast.void_pointer_type)) {
+                        return .{ .Need_Implicit_Cast = cast_to };
+                    } else if (typ.equal(Ast.void_pointer_type)) {
+                        return .{ .Need_Implicit_Cast = cast_to };
+                    } else {
+                        return .Cant_Cast;
+                    }
+                },
+                else => return .Cant_Cast,
+            }
+        },
+        .Integer => {
+            const result = can_safe_cast_to_two_compatible_integers(t, cast_to, typ);
+
+            if (result.lhs == .Has_Necessary_Type_Already) {
+                return result.rhs;
+            }
+
+            return .Cant_Cast;
+        },
+        .Bool => {
+            switch (typ.data.as) {
+                .Integer => |Integer| {
+                    if (!Integer.is_signed) {
+                        if (Integer.bits == 1) {
+                            return .{ .Need_Implicit_Cast = cast_to };
+                        } else if (Integer.bits == 0) {
+                            return .{ .Need_Explicit_Cast = cast_to };
+                        } else {
+                            return .Cant_Cast;
+                        }
+                    } else {
+                        return .Cant_Cast;
+                    }
+                },
+                else => return .Cant_Cast, // TODO: enumerator can be converted to boolean under certain conditions.
+            }
+        },
+        .Field,
+        .Identifier,
+        .Type_Of,
+        => unreachable,
+    }
+}
+
+fn safe_cast(t: *TypeChecker, expression: *Ast.Expression, cast_to: *Ast.Type) bool {
+    const result = can_safe_cast(t, expression.typ, cast_to);
+    return perform_cast(t, result, expression);
+}
+
+fn can_ranked_safe_cast(t: *TypeChecker, lhs: *Ast.Type, rhs: *Ast.Type) DoubleCastResult {
+    if (lhs.equal(rhs)) {
+        return .{
+            .lhs = .{ .Has_Necessary_Type_Already = lhs },
+            .rhs = .{ .Has_Necessary_Type_Already = rhs },
+        };
+    }
+
+    const lhs_rank = lhs.compare().rank;
+    const rhs_rank = rhs.compare().rank;
+
+    if (lhs_rank == Ast.Type.Flags.invalid_rank or
+        rhs_rank == Ast.Type.Flags.invalid_rank)
+    {
+        return .{
+            .lhs = .Cant_Cast,
+            .rhs = .Cant_Cast,
+        };
+    }
+
+    if (lhs_rank < rhs_rank) {
+        var result = can_safe_cast(t, rhs, lhs);
+
+        if (result != .Cant_Cast) {
+            return .{
+                .lhs = .{ .Has_Necessary_Type_Already = lhs },
+                .rhs = result,
+            };
+        } else {
+            result = can_safe_cast(t, lhs, rhs);
+
+            return .{
+                .lhs = result,
+                .rhs = .{ .Has_Necessary_Type_Already = rhs },
+            };
+        }
+    } else if (lhs_rank > rhs_rank) {
+        var result = can_safe_cast(t, lhs, rhs);
+
+        if (result != .Cant_Cast) {
+            return .{
+                .lhs = result,
+                .rhs = .{ .Has_Necessary_Type_Already = rhs },
+            };
+        } else {
+            result = can_safe_cast(t, rhs, lhs);
+
+            return .{
+                .lhs = .{ .Has_Necessary_Type_Already = lhs },
+                .rhs = result,
+            };
+        }
+    } else if (lhs.data.as == .Integer and rhs.data.as == .Integer) {
+        return can_safe_cast_to_two_compatible_integers(t, lhs, rhs);
+    } else {
+        return .{
+            .lhs = .Cant_Cast,
+            .rhs = .Cant_Cast,
+        };
+    }
+}
+
+fn ranked_safe_cast(t: *TypeChecker, lhs: *Ast.Expression, rhs: *Ast.Expression) bool {
+    const result = can_ranked_safe_cast(t, lhs.typ, rhs.typ);
+    return perform_cast(t, result.lhs, lhs) and perform_cast(t, result.rhs, rhs);
+}
+
+fn can_unsafe_cast(t: *TypeChecker, typ: *Ast.Type, cast_to: *Ast.Type) CastResult {
+    const result = can_safe_cast(t, typ, cast_to);
+
+    if (result != .Cant_Cast) {
+        return result;
+    }
+
+    switch (cast_to.data.as) {
+        .Struct,
+        .Union,
+        .Array,
+        .Void,
+        => return .Cant_Cast,
+        .Proc,
+        .Pointer,
+        .Enum,
+        .Integer,
+        .Bool,
+        => {
+            switch (typ.data.as) {
+                .Proc,
                 .Pointer,
                 .Enum,
                 .Integer,
                 .Bool,
-                => can_cast = true,
-                else => {},
+                => return .{ .Need_Explicit_Cast = cast_to },
+                else => return .Cant_Cast,
             }
         },
-        .Field, .Identifier, .Type_Of => unreachable,
+        .Field,
+        .Identifier,
+        .Type_Of,
+        => unreachable,
     }
-
-    return can_cast;
 }
 
-fn make_expression_pointer_mul_integer(t: *TypeChecker, expression: *Ast.Expression, data: *Ast.Type.SharedData) *Ast.Expression {
+fn unsafe_cast(t: *TypeChecker, expression: *Ast.Expression, cast_to: *Ast.Type) bool {
+    const result = can_unsafe_cast(t, expression.typ, cast_to);
+    return perform_cast(t, result, expression);
+}
+
+fn make_expression_pointer_mul_integer(t: *TypeChecker, offset_expression: *Ast.Expression, data: *Ast.Type.SharedData) *Ast.Expression {
     const size = nostd.align_up(data.byte_size, data.alignment);
-    const rhs = t.ast.create(Ast.Expression);
-    rhs.* = .{
-        .position = expression.position,
+    const size_expression = t.ast.create(Ast.Expression);
+    size_expression.* = .{
+        .position = offset_expression.position,
         .as = .{ .Integer = size },
         .typ = t.ast.integer_type_from_u64(size),
         .flags = .{
@@ -1798,22 +1888,26 @@ fn make_expression_pointer_mul_integer(t: *TypeChecker, expression: *Ast.Express
         },
         .typechecking = .Done,
     };
-    std.debug.assert(symetric_safe_cast(t, expression, expression.typ, rhs, rhs.typ));
+
+    // cast to two unsigned integers can never fail.
+    std.debug.assert(safe_cast_to_two_compatible_integers(t, offset_expression, size_expression));
+
     const new_expression = t.ast.create(Ast.Expression);
     new_expression.* = .{
-        .position = expression.position,
+        .position = offset_expression.position,
         .as = .{ .Binary_Op = .{
-            .lhs = expression,
-            .rhs = rhs,
+            .lhs = offset_expression,
+            .rhs = size_expression,
             .tag = .Mul,
             .position = undefined,
         } },
-        .typ = expression.typ,
+        .typ = offset_expression.typ,
         .flags = .{
-            .is_const = expression.flags.is_const,
+            .is_const = offset_expression.flags.is_const,
         },
         .typechecking = .Done,
     };
+
     return new_expression;
 }
 

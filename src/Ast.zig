@@ -349,21 +349,35 @@ pub const Type = struct {
     pub fn compare(self: *Type) Flags {
         var flags = Flags{};
 
+        // bool:    rank 1
+        // enum     rank 2
+        // pointer: rank 3
+        // proc:    rank 4
+        // integer: rank 5
+        // else:    rank 0 -> cant cast
+
         switch (self.data.as) {
-            .Struct, .Union, .Array, .Void => {},
+            .Struct,
+            .Union,
+            .Array,
+            .Void,
+            => {},
             .Enum => {
                 flags.is_comparable = true;
                 flags.is_ordered = true;
+                flags.rank = 2;
             },
             .Proc => {
                 flags.is_comparable = true;
                 flags.is_pointer = true;
+                flags.rank = 4;
             },
             .Pointer => |subtype| {
                 flags.is_comparable = true;
                 flags.is_ordered = true;
                 flags.is_pointer = true;
                 flags.can_be_dereferenced = true;
+                flags.rank = 3;
 
                 switch (subtype.data.as) {
                     .Struct => flags.is_pointer_to_struct = true,
@@ -379,9 +393,16 @@ pub const Type = struct {
             .Integer => {
                 flags.is_comparable = true;
                 flags.is_ordered = true;
+                flags.rank = 5;
             },
-            .Bool => flags.is_comparable = true,
-            .Field, .Identifier, .Type_Of => unreachable,
+            .Bool => {
+                flags.is_comparable = true;
+                flags.rank = 1;
+            },
+            .Field,
+            .Identifier,
+            .Type_Of,
+            => unreachable,
         }
 
         return flags;
@@ -554,6 +575,11 @@ pub const Type = struct {
         is_pointer_to_struct: bool = false,
         is_pointer_to_union: bool = false,
         is_pointer_to_array: bool = false,
+        rank: Rank = invalid_rank,
+
+        pub const Rank = u8;
+
+        pub const invalid_rank: Rank = 0;
     };
 
     pub const Stages = struct {
