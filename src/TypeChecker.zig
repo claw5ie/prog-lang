@@ -1564,8 +1564,15 @@ fn can_safe_cast_to_integer(t: *TypeChecker, typ: *Ast.Type, sign: Sign) CastRes
     const integer_type = result.get_type();
     const Integer = &integer_type.data.as.Integer;
 
-    // TODO: shuffle cases.
     switch (sign) {
+        .Any => return result,
+        .Unsigned => {
+            if (Integer.is_signed) {
+                return .Cant_Cast;
+            } else {
+                return result;
+            }
+        },
         .Signed => {
             if (Integer.is_signed) {
                 return result;
@@ -1576,14 +1583,6 @@ fn can_safe_cast_to_integer(t: *TypeChecker, typ: *Ast.Type, sign: Sign) CastRes
                 return .Cant_Cast;
             }
         },
-        .Unsigned => {
-            if (Integer.is_signed) {
-                return .Cant_Cast;
-            } else {
-                return result;
-            }
-        },
-        .Any => return result,
     }
 }
 
