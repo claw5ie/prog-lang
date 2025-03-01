@@ -782,16 +782,6 @@ const TypecheckExpressionResult = struct {
 
 // Types are typechecked lazily (only when used). 'cause if a type is not fully formed (like ambiguous pointer/array), we need to typecheck it from the top level.
 fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpressionResult {
-    switch (expression.typechecking) {
-        .None => expression.typechecking = .Going,
-        .Going => {
-            t.c.report_error(expression.position, "found cyclic reference", .{});
-            exit(1);
-        },
-        .Done => return .{ .typ = expression.typ, .tag = if (expression.as == .Type) .Type else .Value }, // Non values should be filtered at this point?
-    }
-    defer expression.typechecking = .Done;
-
     const fns = struct {
         pub fn check_expression_symbol(_t: *TypeChecker, _expression: *Ast.Expression, symbol: *Ast.Symbol) TypecheckExpressionResult {
             _expression.as = .{ .Symbol = symbol };
@@ -859,7 +849,6 @@ fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpre
                                     .flags = .{
                                         .is_const = true,
                                     },
-                                    .typechecking = .Done,
                                 };
                                 expression.as = .{ .If = .{
                                     .condition = Binary_Op.lhs,
@@ -876,7 +865,6 @@ fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpre
                                     .flags = .{
                                         .is_const = true,
                                     },
-                                    .typechecking = .Done,
                                 };
                                 expression.as = .{ .If = .{
                                     .condition = Binary_Op.lhs,
@@ -1535,7 +1523,6 @@ fn perform_cast(t: *TypeChecker, result: CastResult, expression: *Ast.Expression
                 .flags = .{
                     .is_const = subexpression.flags.is_const,
                 },
-                .typechecking = .Done,
             };
             return true;
         },
@@ -1885,7 +1872,6 @@ fn make_expression_pointer_mul_integer(t: *TypeChecker, offset_expression: *Ast.
         .flags = .{
             .is_const = true,
         },
-        .typechecking = .Done,
     };
 
     // cast to two unsigned integers can never fail.
@@ -1904,7 +1890,6 @@ fn make_expression_pointer_mul_integer(t: *TypeChecker, offset_expression: *Ast.
         .flags = .{
             .is_const = offset_expression.flags.is_const,
         },
-        .typechecking = .Done,
     };
 
     return new_expression;

@@ -597,7 +597,6 @@ pub const Expression = struct {
     as: As,
     typ: *Type,
     flags: Flags,
-    typechecking: Stage,
 
     pub const As = union(enum) {
         Binary_Op: BinaryOp,

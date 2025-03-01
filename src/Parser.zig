@@ -143,7 +143,6 @@ fn parse_structure_union_or_enumerator(parser: *Parser) struct { *Ast.Expression
                 } },
                 .typ = Ast.void_type,
                 .flags = .{},
-                .typechecking = .None,
             };
 
             {
@@ -175,7 +174,6 @@ fn parse_structure_union_or_enumerator(parser: *Parser) struct { *Ast.Expression
                 } },
                 .typ = Ast.void_type,
                 .flags = .{},
-                .typechecking = .None,
             };
 
             {
@@ -212,7 +210,6 @@ fn parse_structure_union_or_enumerator(parser: *Parser) struct { *Ast.Expression
                 } },
                 .typ = Ast.void_type,
                 .flags = .{},
-                .typechecking = .None,
             };
 
             {
@@ -348,7 +345,6 @@ fn parse_base_expression(parser: *Parser) *Ast.Expression {
                         .as = .{ .Type = Type },
                         .typ = Ast.void_type,
                         .flags = .{},
-                        .typechecking = .None,
                     };
                     return expression;
                 },
@@ -369,7 +365,6 @@ fn parse_base_expression(parser: *Parser) *Ast.Expression {
                 } },
                 .typ = Ast.void_type,
                 .flags = .{},
-                .typechecking = .None,
             };
             return expression;
         },
@@ -384,7 +379,6 @@ fn parse_base_expression(parser: *Parser) *Ast.Expression {
                 } },
                 .typ = Ast.void_type,
                 .flags = .{},
-                .typechecking = .None,
             };
             return expression;
         },
@@ -399,7 +393,6 @@ fn parse_base_expression(parser: *Parser) *Ast.Expression {
                 } },
                 .typ = Ast.void_type,
                 .flags = .{},
-                .typechecking = .None,
             };
             return expression;
         },
@@ -424,7 +417,6 @@ fn parse_base_expression(parser: *Parser) *Ast.Expression {
                 } },
                 .typ = Ast.void_type,
                 .flags = .{},
-                .typechecking = .None,
             };
             return expression;
         },
@@ -439,7 +431,6 @@ fn parse_base_expression(parser: *Parser) *Ast.Expression {
                 .as = .{ .Byte_Size_Of = arguments[0] },
                 .typ = Ast.void_type,
                 .flags = .{},
-                .typechecking = .None,
             };
 
             return expression;
@@ -454,7 +445,6 @@ fn parse_base_expression(parser: *Parser) *Ast.Expression {
                 .as = .{ .Alignment_Of = arguments[0] },
                 .typ = Ast.void_type,
                 .flags = .{},
-                .typechecking = .None,
             };
 
             return expression;
@@ -473,7 +463,6 @@ fn parse_base_expression(parser: *Parser) *Ast.Expression {
                 } },
                 .typ = typ,
                 .flags = .{},
-                .typechecking = .None,
             };
             return expression;
         },
@@ -491,7 +480,6 @@ fn parse_base_expression(parser: *Parser) *Ast.Expression {
                 } },
                 .typ = typ,
                 .flags = .{},
-                .typechecking = .None,
             };
             return expression;
         },
@@ -503,7 +491,6 @@ fn parse_base_expression(parser: *Parser) *Ast.Expression {
                 .as = .{ .Integer = value },
                 .typ = typ,
                 .flags = .{},
-                .typechecking = .None,
             };
             return expression;
         },
@@ -514,7 +501,6 @@ fn parse_base_expression(parser: *Parser) *Ast.Expression {
                 .as = .{ .Boolean = value },
                 .typ = Ast.bool_type,
                 .flags = .{},
-                .typechecking = .None,
             };
             return expression;
         },
@@ -525,7 +511,6 @@ fn parse_base_expression(parser: *Parser) *Ast.Expression {
                 .as = .Null,
                 .typ = Ast.void_pointer_type,
                 .flags = .{},
-                .typechecking = .None,
             };
             return expression;
         },
@@ -539,7 +524,6 @@ fn parse_base_expression(parser: *Parser) *Ast.Expression {
                 } },
                 .typ = Ast.void_type,
                 .flags = .{},
-                .typechecking = .None,
             };
             return expression;
         },
@@ -559,7 +543,6 @@ fn parse_base_expression(parser: *Parser) *Ast.Expression {
                 .as = .{ .Ref = subexpression },
                 .typ = Ast.void_type,
                 .flags = .{},
-                .typechecking = .None,
             };
             return expression;
         },
@@ -583,7 +566,6 @@ fn parse_base_expression(parser: *Parser) *Ast.Expression {
                 } },
                 .typ = Ast.void_type,
                 .flags = .{},
-                .typechecking = .None,
             };
             return expression;
         },
@@ -596,7 +578,6 @@ fn parse_base_expression(parser: *Parser) *Ast.Expression {
                 .as = .{ .Ref = subsubexpression },
                 .typ = Ast.void_type,
                 .flags = .{},
-                .typechecking = .None,
             };
             subexpression.position.column += 1;
             subexpression.position.offset += 1;
@@ -606,7 +587,6 @@ fn parse_base_expression(parser: *Parser) *Ast.Expression {
                 .as = .{ .Ref = subexpression },
                 .typ = Ast.void_type,
                 .flags = .{},
-                .typechecking = .None,
             };
             return expression;
         },
@@ -630,7 +610,6 @@ fn parse_base_expression(parser: *Parser) *Ast.Expression {
                 } },
                 .typ = Ast.void_type,
                 .flags = .{},
-                .typechecking = .None,
             };
 
             return expression;
@@ -659,7 +638,6 @@ fn parse_highest_precedence_expression(parser: *Parser) *Ast.Expression {
                     } },
                     .typ = Ast.void_type,
                     .flags = .{},
-                    .typechecking = .None,
                 };
                 base = new_base;
             },
@@ -672,7 +650,6 @@ fn parse_highest_precedence_expression(parser: *Parser) *Ast.Expression {
                     .as = .{ .Deref = base },
                     .typ = Ast.void_type,
                     .flags = .{},
-                    .typechecking = .None,
                 };
                 base = new_base;
             },
@@ -691,7 +668,6 @@ fn parse_highest_precedence_expression(parser: *Parser) *Ast.Expression {
                     } },
                     .typ = Ast.void_type,
                     .flags = .{},
-                    .typechecking = .None,
                 };
                 const new_base = parser.ast.create(Ast.Expression);
                 new_base.* = .{
@@ -702,7 +678,6 @@ fn parse_highest_precedence_expression(parser: *Parser) *Ast.Expression {
                     } },
                     .typ = Ast.void_type,
                     .flags = .{},
-                    .typechecking = .None,
                 };
                 base = new_base;
             },
@@ -720,7 +695,6 @@ fn parse_highest_precedence_expression(parser: *Parser) *Ast.Expression {
                     } },
                     .typ = Ast.void_type,
                     .flags = .{},
-                    .typechecking = .None,
                 };
                 base = new_base;
             },
@@ -797,7 +771,6 @@ fn parse_binary_expression(parser: *Parser, min_precedence: PrecedenceType) *Ast
                 } },
                 .typ = Ast.void_type,
                 .flags = .{},
-                .typechecking = .None,
             };
             lhs = new_lhs;
 
