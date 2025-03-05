@@ -83,7 +83,6 @@ pub const Scope = struct {
 pub const Expression = struct {
     position: FilePosition,
     as: As,
-    typechecking_context: ?*anyopaque = null,
 
     pub const As = union(enum) {
         Structure: Structure,
@@ -106,7 +105,7 @@ pub const Expression = struct {
         Unary_Operator: UnaryOperator,
         Binary_Operator: BinaryOperator,
 
-        Byte_Size_Of: *Expression,
+        Size_Of: *Expression,
         Alignment_Of: *Expression,
         As: Cast,
         Cast: Cast,
@@ -264,7 +263,6 @@ pub const Symbol = struct {
     position: FilePosition,
     key: Key,
     as: As,
-    typechecking_context: ?*anyopaque = null,
 
     pub const As = union(enum) {
         Alias: *Expression,

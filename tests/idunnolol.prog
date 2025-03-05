@@ -1,0 +1,11 @@
+alias A: proc(i: i32) void { };
+
+alias B: struct {
+  x: i32;
+  y: bool;
+};
+
+proc main: () void
+{
+  a: i32 = proc(i: i32, j: bool) i32 { }(0, 32);
+}

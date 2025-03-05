@@ -312,14 +312,14 @@ fn parse_base_expression(parser: *Parser) *Ast.Expression {
             return expression;
         },
 
-        .Byte_Size_Of => {
+        .Size_Of => {
             var arguments: [1]*Ast.Expression = undefined;
             parse_fixed_size_expression_list(parser, &arguments);
 
             const expression = parser.ast.create(Ast.Expression);
             expression.* = .{
                 .position = token.position,
-                .as = .{ .Byte_Size_Of = arguments[0] },
+                .as = .{ .Size_Of = arguments[0] },
             };
 
             return expression;
@@ -912,6 +912,7 @@ fn parse_statement(parser: *Parser) *Ast.Statement {
         else => {
             putback(parser, tok);
 
+            // TODO: can't create unnamed types and procedures.
             if (try_parse_symbol(parser)) |symbol| {
                 maybe_eat_semicolon(parser, symbol);
 

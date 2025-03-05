@@ -1,5 +1,19 @@
 // Comment
 
+// alias: A: B;
+// alias: B: i32;
+
+// alias A: @TypeOf(B);
+// alias B: @TypeOf(A);
+
+// alias: A: B;
+// alias: B: C^^;
+// alias: C: i32;
+
+// struct A: {
+//    x: A^;
+// }
+
 #const a := 42;
 
 g_a: u1 = 1;

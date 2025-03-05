@@ -22,6 +22,7 @@ pub fn compile() void {
     switch (options.mode) {
         .Build => {
             const Parser = @import("Parser.zig");
+            const TypeChecker = @import("TypeChecker.zig");
 
             var buffer = [1]u8{0} ** std.posix.PATH_MAX;
 
@@ -57,13 +58,14 @@ pub fn compile() void {
             // var ir = IR.init();
             // var ir_generator = IRGenerator.init(&ast, &ir);
 
-            // TypeChecker.check(&compiler, &ast, &ir_generator);
+            var typed_ast = TypeChecker.check(&compiler, &ast);
             // ir_generator.generate();
             // ir.write_to_file(output_filepath);
 
             // ir_generator.deinit();
             // ir.deinit();
             ast.deinit();
+            typed_ast.deinit();
         },
         .Run => {
             var ir = IR.read_from_file(options.has_input_filepath.?);
