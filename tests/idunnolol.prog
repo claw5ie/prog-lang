@@ -1,11 +1,56 @@
-alias A: proc(i: i32) void { };
+// alias A: B^;
+// alias B: A;
 
-alias B: struct {
-  x: i32;
-  y: bool;
-};
+// alias B: C;
+// alias C: D;
+// alias D: E;
 
-proc main: () void
-{
-  a: i32 = proc(i: i32, j: bool) i32 { }(0, 32);
-}
+// E: i32 = 52;
+
+alias A: B;
+alias B: bool;
+
+// a: A = 42;
+a: B = 42;
+
+// a: = 42;
+// alias b: a;
+// b + 2 == a + 2;
+
+// alias A: B;
+// alias B: C;
+// alias C: i32;
+
+// alias A: A^[2];
+
+// alias A: A[2];
+
+// 3 states:
+//   just visited. Empty symbol.
+//   Only has type.
+//   Done.
+
+// alias a: b;
+// alias b: c;
+// alias c: i32;
+
+// alias a: b;
+// alias b: c;
+// alias c: d;
+
+// d: i32 = 25;
+
+// alias A: B;
+// struct B: { }
+
+// alias A: proc(i: i32) void { };
+
+// alias B: struct {
+//   x: i32;
+//   y: bool;
+// };
+
+// proc main: () void
+// {
+//   a: i32 = proc(i: i32, j: bool) i32 { }(0, 32);
+// }

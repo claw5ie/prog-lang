@@ -30,12 +30,15 @@ pub fn find_symbol_in_scope(ast: *Ast, key: Symbol.Key, symbol_offset: usize, sk
                     return symbol;
                 }
             },
-            .Parameter,
+            .Alias,
+            .Structure,
+            .Union,
+            .Enumerator,
             .Procedure,
-            .Struct_Field,
+            .Structure_Field,
             .Union_Field,
-            .Enum_Field,
-            .Type,
+            .Enumerator_Value,
+            .Parameter,
             => return symbol,
         }
     }
@@ -263,6 +266,7 @@ pub const Symbol = struct {
     position: FilePosition,
     key: Key,
     as: As,
+    type_checking_context: ?*anyopaque = null,
 
     pub const As = union(enum) {
         Alias: *Expression,

@@ -41,6 +41,14 @@ inline fn unsafe_cast(t: *TypeChecker, expression: *TypedExpression, cast_to: *c
     return t.typed_ast.unsafe_cast(expression, cast_to);
 }
 
+fn find_symbol(t: *TypeChecker, key: Ast.Symbol.Key, position: FilePosition) *Ast.Symbol {
+    if (t.ast.find_symbol(key, position.offset)) |symbol| {
+        return symbol;
+    } else {
+        t.c.report_fatal_error(position, "symbol '{s}' is not defined", .{key.name});
+    }
+}
+
 fn add_or_subtract_pointer_and_integer(t: *TypeChecker, pointer_expression: *TypedExpression, offset_expression: *TypedExpression, operation: enum { Add, Subtract }) *TypedExpression {
     const size = pointer_expression.typ.as.Pointer.size;
 
@@ -520,9 +528,46 @@ fn check_any_expression(t: *TypeChecker, expression: *Ast.Expression) CheckAnyEx
         .Void_Type => {
             return .{ .Type = void_type };
         },
-        .Member_Access,
-        .Identifier,
-        => unreachable,
+        .Member_Access => unreachable,
+        .Identifier => |Identifier| {
+            const symbol = find_symbol(t, Identifier, expression.position);
+            var new_symbol = check_symbol(t, symbol);
+
+            if (new_symbol.as == .Alias) {
+                new_symbol = new_symbol.as.Alias;
+            }
+
+            switch (new_symbol.as) {
+                .Type => |new_type| return .{ .Type = new_type },
+                .Procedure => |Procedure| {
+                    const new_expression = t.typed_ast.create(TypedExpression);
+                    new_expression.* = .{
+                        .flags = .{
+                            .is_lvalue = false,
+                            .is_const = true,
+                            .is_static = true,
+                        },
+                        .typ = Procedure.typ,
+                        .as = .{ .Symbol = new_symbol },
+                    };
+                    return .{ .Value = new_expression };
+                },
+                .Variable => |Variable| {
+                    const new_expression = t.typed_ast.create(TypedExpression);
+                    new_expression.* = .{
+                        .flags = .{
+                            .is_lvalue = true,
+                            .is_const = Variable.attributes.is_const,
+                            .is_static = Variable.attributes.is_static,
+                        },
+                        .typ = Variable.typ,
+                        .as = .{ .Symbol = new_symbol },
+                    };
+                    return .{ .Value = new_expression };
+                },
+                .Alias => unreachable,
+            }
+        },
         .Type_Of => |subexpression| {
             return switch (check_any_expression(t, subexpression)) {
                 .Value => |new_subexpression| .{ .Type = new_subexpression.typ },
@@ -1090,36 +1135,87 @@ fn compute_simple_expression(t: *TypeChecker, position: FilePosition, expression
     };
 }
 
-fn check_symbol(t: *TypeChecker, symbol: *Ast.Symbol) *TypedSymbol {
+fn check_alias(t: *TypeChecker, symbol: *Ast.Symbol) *TypedSymbol {
+    if (symbol.type_checking_context) |context| {
+        const new_symbol: *TypedSymbol = @ptrCast(@alignCast(context));
+        return new_symbol;
+    }
+
     switch (symbol.as) {
         .Alias => |expression| {
-            switch (check_any_expression(t, expression)) {
-                .Value => |new_expression| {
-                    if (!new_expression.flags.is_const) {
-                        t.c.report_fatal_error(expression.position, "expected constant expression", .{});
-                    }
-
-                    const new_symbol = t.typed_ast.create(TypedSymbol);
-                    new_symbol.* = .{
-                        .as = .{ .Variable = .{
-                            .attributes = .{
-                                .is_const = true,
-                                .is_static = false,
-                            },
-                            .typ = new_expression.typ,
-                            .value = new_expression,
-                        } },
-                    };
+            switch (expression.as) {
+                .Identifier => |Identifier| {
+                    const subsymbol = find_symbol(t, Identifier, expression.position);
+                    const new_symbol = check_alias(t, subsymbol);
+                    symbol.type_checking_context = new_symbol;
                     return new_symbol;
                 },
-                .Type => |new_type| {
+                .Structure,
+                .Union,
+                .Enumerator,
+                .Procedure_Type,
+                .Subscript,
+                .Dereference,
+                .Integer_Type,
+                .Boolean_Type,
+                .Void_Type,
+                .Member_Access,
+                .Type_Of,
+                => {
+                    const new_type = check_type(t, expression);
                     const new_symbol = t.typed_ast.create(TypedSymbol);
                     new_symbol.* = .{
                         .as = .{ .Type = new_type },
                     };
+                    symbol.type_checking_context = new_symbol;
                     return new_symbol;
                 },
+                else => {
+                    t.c.report_fatal_error(expression.position, "expected a type, but got an expression", .{});
+                },
             }
+        },
+        .Structure,
+        .Union,
+        .Enumerator,
+        => {
+            const new_symbol = check_symbol(t, symbol);
+            symbol.type_checking_context = new_symbol;
+            return new_symbol;
+        },
+        .Procedure,
+        .Variable,
+        => {
+            const new_subsymbol = check_symbol(t, symbol);
+            const new_symbol = t.typed_ast.create(TypedSymbol);
+            new_symbol.* = .{
+                .as = .{ .Alias = new_subsymbol },
+            };
+            symbol.type_checking_context = new_symbol;
+            return new_symbol;
+        },
+
+        .Structure_Field,
+        .Union_Field,
+        => {
+            t.c.report_fatal_error(symbol.position, "can't alias structure/union fields", .{});
+        },
+        // TODO:
+        .Enumerator_Value,
+        .Parameter,
+        => unreachable,
+    }
+}
+
+fn check_symbol(t: *TypeChecker, symbol: *Ast.Symbol) *TypedSymbol {
+    if (symbol.type_checking_context) |context| {
+        const new_symbol: *TypedSymbol = @ptrCast(@alignCast(context));
+        return new_symbol;
+    }
+
+    switch (symbol.as) {
+        .Alias => {
+            return check_alias(t, symbol);
         },
         .Structure => |Structure| {
             const typ = check_structure(t, Structure);

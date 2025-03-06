@@ -709,6 +709,7 @@ pub const Expression = struct {
 
         Integer_Literal: u64,
         Null_Literal: void,
+        Symbol: *Symbol,
     };
 
     pub const Subscript = struct {
@@ -784,6 +785,7 @@ pub const Symbol = struct {
     as: As,
 
     pub const As = union(enum) {
+        Alias: *Symbol,
         Type: *const Type,
         Procedure: Procedure,
         Variable: Variable,
