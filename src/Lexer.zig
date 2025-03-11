@@ -55,7 +55,7 @@ pub const keywords = [_]Keyword{
 };
 
 pub const hashed_keywords = [_]Keyword{
-    Keyword.make(.Size_Of),
+    Keyword.make(.Byte_Size_Of),
     Keyword.make(.Alignment_Of),
     Keyword.make(.As),
     Keyword.make(.Cast),
@@ -384,7 +384,7 @@ pub const Token = struct {
         Void_Type,
         Type_Of,
 
-        Size_Of,
+        Byte_Size_Of,
         Alignment_Of,
         As,
         Cast,
@@ -455,7 +455,7 @@ pub const Token = struct {
                 .Void_Type => "'void'",
                 .Type_Of => "'#type_of'",
 
-                .Size_Of => "'#size_of'",
+                .Byte_Size_Of => "'#byte_size_of'",
                 .Alignment_Of => "'#alignment_of'",
                 .As => "'#as'",
                 .Cast => "'#cast'",
@@ -540,7 +540,7 @@ pub const Token = struct {
         Void_Type: void,
         Type_Of: void,
 
-        Size_Of: void,
+        Byte_Size_Of: void,
         Alignment_Of: void,
         As: void,
         Cast: void,

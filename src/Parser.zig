@@ -1,4 +1,4 @@
-current_scope: *const Ast.Scope,
+current_scope: *Ast.Scope,
 lexer: Lexer,
 ast: Ast,
 c: *Compiler,
@@ -49,24 +49,25 @@ fn pop_scope(parser: *Parser) void {
     parser.current_scope = parser.current_scope.parent.?;
 }
 
+fn parse_type(parser: *Parser) *Ast.Type {
+    return parser.ast.expression_to_type(parse_expression(parser));
+}
+
 fn maybe_eat_semicolon(parser: *Parser, symbol: *Ast.Symbol) void {
     switch (symbol.as) {
-        .Alias,
-        .Structure_Field,
-        .Union_Field,
-        .Enumerator_Value,
         .Variable,
+        .Struct_Field,
+        .Union_Field,
+        .Enum_Field,
         => expect(parser, .Semicolon),
-        .Structure,
-        .Union,
-        .Enumerator,
-        .Procedure,
         .Parameter,
+        .Procedure,
+        .Type,
         => {},
     }
 }
 
-fn parse_structure_union_or_enumerator_body(parser: *Parser, tag: Ast.Scope.Tag) Ast.Expression.Structure {
+fn parse_structure_union_or_enumerator_body(parser: *Parser, tag: Ast.Scope.Tag) Ast.Type.Struct {
     push_scope(parser, tag);
 
     expect(parser, .Left_Brace);
@@ -85,17 +86,13 @@ fn parse_structure_union_or_enumerator_body(parser: *Parser, tag: Ast.Scope.Tag)
             const node = parser.ast.create(Ast.SymbolList.Node);
             node.* = .{ .data = symbol };
             switch (symbol.as) {
-                .Structure_Field,
+                .Struct_Field,
                 .Union_Field,
-                .Enumerator_Value,
+                .Enum_Field,
                 => fields.append(node),
-
-                .Alias,
-                .Structure,
-                .Union,
-                .Enumerator,
-                .Procedure,
                 .Variable,
+                .Procedure,
+                .Type,
                 => rest.append(node),
                 .Parameter,
                 => unreachable,
@@ -120,13 +117,7 @@ fn parse_structure_union_or_enumerator_body(parser: *Parser, tag: Ast.Scope.Tag)
     };
 }
 
-const StructureOrUnionOrEnumerator = union(enum) {
-    Structure: Ast.Expression.Structure,
-    Union: Ast.Expression.Union,
-    Enumerator: Ast.Expression.Enumerator,
-};
-
-fn parse_structure_union_or_enumerator(parser: *Parser) struct { StructureOrUnionOrEnumerator, ?Token } {
+fn parse_structure_union_or_enumerator(parser: *Parser) struct { *Ast.Expression, ?Token } {
     const token = grab(parser);
     advance(parser);
 
@@ -135,27 +126,107 @@ fn parse_structure_union_or_enumerator(parser: *Parser) struct { StructureOrUnio
             const has_id = maybe_eat_symbol_declaration(parser);
             const body = parse_structure_union_or_enumerator_body(parser, .Structure);
 
-            return .{ .{ .Structure = body }, has_id };
+            const data = parser.ast.create(Ast.Type.SharedData);
+            data.* = .{
+                .as = .{ .Struct = body },
+                .byte_size = 0,
+                .alignment = .Byte,
+                .stages = Ast.default_stages_none,
+            };
+            const expression = parser.ast.create(Ast.Expression);
+            expression.* = .{
+                .position = token.position,
+                .as = .{ .Type = .{
+                    .position = token.position,
+                    .data = data,
+                    .symbol = null,
+                } },
+                .typ = Ast.void_type,
+                .flags = .{},
+            };
+
+            {
+                const node = parser.ast.create(Ast.TypeList.Node);
+                node.* = .{ .data = &expression.as.Type };
+                parser.ast.namespaces.append(node);
+            }
+
+            return .{ expression, has_id };
         },
         .Union => {
             const has_id = maybe_eat_symbol_declaration(parser);
             const body = parse_structure_union_or_enumerator_body(parser, .Union);
 
-            return .{ .{ .Union = body }, has_id };
+            const data = parser.ast.create(Ast.Type.SharedData);
+            data.* = .{
+                .as = .{ .Union = body },
+                .byte_size = 0,
+                .alignment = .Byte,
+                .stages = Ast.default_stages_none,
+            };
+            const expression = parser.ast.create(Ast.Expression);
+            expression.* = .{
+                .position = token.position,
+                .as = .{ .Type = .{
+                    .position = token.position,
+                    .data = data,
+                    .symbol = null,
+                } },
+                .typ = Ast.void_type,
+                .flags = .{},
+            };
+
+            {
+                const node = parser.ast.create(Ast.TypeList.Node);
+                node.* = .{ .data = &expression.as.Type };
+                parser.ast.namespaces.append(node);
+            }
+
+            return .{ expression, has_id };
         },
         .Enum => {
             const has_id = maybe_eat_symbol_declaration(parser);
             const body = parse_structure_union_or_enumerator_body(parser, .Enumerator);
 
-            return .{ .{ .Enumerator = body }, has_id };
+            const data = parser.ast.create(Ast.Type.SharedData);
+            data.* = .{
+                .as = .{ .Enum = .{
+                    .fields = body.fields,
+                    .rest = body.rest,
+                    .integer_type = Ast.void_type,
+                    .scope = body.scope,
+                } },
+                .byte_size = 0,
+                .alignment = .Byte,
+                .stages = Ast.default_stages_none,
+            };
+            const expression = parser.ast.create(Ast.Expression);
+            expression.* = .{
+                .position = token.position,
+                .as = .{ .Type = .{
+                    .position = token.position,
+                    .data = data,
+                    .symbol = null,
+                } },
+                .typ = Ast.void_type,
+                .flags = .{},
+            };
+
+            {
+                const node = parser.ast.create(Ast.TypeList.Node);
+                node.* = .{ .data = &expression.as.Type };
+                parser.ast.namespaces.append(node);
+            }
+
+            return .{ expression, has_id };
         },
         else => unreachable,
     }
 }
 
 const ProcedureOrItsType = union(enum) {
-    Procedure_Type: Ast.Expression.ProcedureType,
-    Procedure: Ast.Expression.Procedure,
+    Procedure_Type: Ast.Type,
+    Procedure: Ast.Symbol.Procedure,
 };
 
 fn parse_procedure_or_its_type(parser: *Parser, position: FilePosition) ProcedureOrItsType {
@@ -184,9 +255,11 @@ fn parse_procedure_or_its_type(parser: *Parser, position: FilePosition) Procedur
                     parser.c.report_fatal_error(symbol.position, "expected type for a parameter", .{});
                 }
 
-                const _Variable = Variable;
+                const tmp = Variable;
                 symbol.as = .{ .Parameter = .{
-                    .typ = _Variable.typ.?,
+                    .typ = tmp.typ.?,
+                    .value = tmp.value,
+                    .storage = null,
                 } };
             },
             else => unreachable,
@@ -207,30 +280,42 @@ fn parse_procedure_or_its_type(parser: *Parser, position: FilePosition) Procedur
 
     expect(parser, .Right_Parenthesis);
 
-    const return_type = parse_expression(parser);
+    const return_type = parse_type(parser);
 
-    const procedure_type = Ast.Expression.ProcedureType{
-        .parameters = parameters,
-        .return_type = return_type,
-        .scope = parser.current_scope,
+    const data = parser.ast.create(Ast.Type.SharedData);
+    data.* = .{
+        .as = .{ .Proc = .{
+            .params = parameters,
+            .return_type = return_type,
+            .scope = parser.current_scope,
+        } },
+        .byte_size = Ast.pointer_byte_size,
+        .alignment = Ast.pointer_alignment,
+        .stages = Ast.default_stages_none,
     };
 
     if (peek(parser) == .Left_Brace) {
         const block = parse_statement_list(parser);
 
-        const typ = parser.ast.create(Ast.Expression);
+        const typ = parser.ast.create(Ast.Type);
         typ.* = .{
             .position = position,
-            .as = .{ .Procedure_Type = procedure_type },
+            .data = data,
+            .symbol = null,
         };
 
         return .{ .Procedure = .{
             .typ = typ,
             .block = block,
+            .labels = null,
         } };
     }
 
-    return .{ .Procedure_Type = procedure_type };
+    return .{ .Procedure_Type = .{
+        .position = position,
+        .data = data,
+        .symbol = null,
+    } };
 }
 
 fn parse_base_expression(parser: *Parser) *Ast.Expression {
@@ -243,43 +328,43 @@ fn parse_base_expression(parser: *Parser) *Ast.Expression {
         .Enum,
         => {
             putback(parser, token);
-            const result, const has_id = parse_structure_union_or_enumerator(parser);
+            const typ, const has_id = parse_structure_union_or_enumerator(parser);
 
             if (has_id) |id| {
                 parser.c.report_error(id.position, "unexpected identifier declaration for an unnamed type", .{});
             }
 
-            const expression = parser.ast.create(Ast.Expression);
-            expression.* = .{
-                .position = token.position,
-                .as = switch (result) {
-                    .Structure => |Structure| .{ .Structure = Structure },
-                    .Union => |Union| .{ .Union = Union },
-                    .Enumerator => |Enumerator| .{ .Enumerator = Enumerator },
-                },
-            };
-
-            return expression;
+            return typ;
         },
         .Proc => {
-            const result = parse_procedure_or_its_type(parser, token.position);
-
-            const expression = parser.ast.create(Ast.Expression);
-            expression.* = .{
-                .position = token.position,
-                .as = switch (result) {
-                    .Procedure_Type => |Procedure_Type| .{ .Procedure_Type = Procedure_Type },
-                    .Procedure => |Procedure| .{ .Procedure = Procedure },
+            switch (parse_procedure_or_its_type(parser, token.position)) {
+                .Procedure_Type => |Type| {
+                    const expression = parser.ast.create(Ast.Expression);
+                    expression.* = .{
+                        .position = token.position,
+                        .as = .{ .Type = Type },
+                        .typ = Ast.void_type,
+                        .flags = .{},
+                    };
+                    return expression;
                 },
-            };
-
-            return expression;
+                .Procedure => {
+                    parser.c.report_fatal_error(token.position, "unnamed procedures are not supported", .{});
+                },
+            }
         },
         .Integer_Type => |Integer_Type| {
+            const typ = parser.ast.lookup_integer_type(.{ .bits = Integer_Type.bits, .is_signed = Integer_Type.is_signed });
             const expression = parser.ast.create(Ast.Expression);
             expression.* = .{
                 .position = token.position,
-                .as = .{ .Integer_Type = Integer_Type },
+                .as = .{ .Type = .{
+                    .position = token.position,
+                    .data = typ.data,
+                    .symbol = null,
+                } },
+                .typ = Ast.void_type,
+                .flags = .{},
             };
             return expression;
         },
@@ -287,7 +372,13 @@ fn parse_base_expression(parser: *Parser) *Ast.Expression {
             const expression = parser.ast.create(Ast.Expression);
             expression.* = .{
                 .position = token.position,
-                .as = .Boolean_Type,
+                .as = .{ .Type = .{
+                    .position = token.position,
+                    .data = Ast.bool_type.data,
+                    .symbol = null,
+                } },
+                .typ = Ast.void_type,
+                .flags = .{},
             };
             return expression;
         },
@@ -295,7 +386,13 @@ fn parse_base_expression(parser: *Parser) *Ast.Expression {
             const expression = parser.ast.create(Ast.Expression);
             expression.* = .{
                 .position = token.position,
-                .as = .Void_Type,
+                .as = .{ .Type = .{
+                    .position = token.position,
+                    .data = Ast.void_type.data,
+                    .symbol = null,
+                } },
+                .typ = Ast.void_type,
+                .flags = .{},
             };
             return expression;
         },
@@ -303,23 +400,37 @@ fn parse_base_expression(parser: *Parser) *Ast.Expression {
             var arguments: [1]*Ast.Expression = undefined;
             parse_fixed_size_expression_list(parser, &arguments);
 
+            const data = parser.ast.create(Ast.Type.SharedData);
+            data.* = .{
+                .as = .{ .Type_Of = arguments[0] },
+                .byte_size = 0,
+                .alignment = .Byte,
+                .stages = Ast.default_stages_none,
+            };
             const expression = parser.ast.create(Ast.Expression);
             expression.* = .{
                 .position = token.position,
-                .as = .{ .Type_Of = arguments[0] },
+                .as = .{ .Type = .{
+                    .position = token.position,
+                    .data = data,
+                    .symbol = null,
+                } },
+                .typ = Ast.void_type,
+                .flags = .{},
             };
-
             return expression;
         },
 
-        .Size_Of => {
+        .Byte_Size_Of => {
             var arguments: [1]*Ast.Expression = undefined;
             parse_fixed_size_expression_list(parser, &arguments);
 
             const expression = parser.ast.create(Ast.Expression);
             expression.* = .{
                 .position = token.position,
-                .as = .{ .Size_Of = arguments[0] },
+                .as = .{ .Byte_Size_Of = arguments[0] },
+                .typ = Ast.void_type,
+                .flags = .{},
             };
 
             return expression;
@@ -332,6 +443,8 @@ fn parse_base_expression(parser: *Parser) *Ast.Expression {
             expression.* = .{
                 .position = token.position,
                 .as = .{ .Alignment_Of = arguments[0] },
+                .typ = Ast.void_type,
+                .flags = .{},
             };
 
             return expression;
@@ -340,37 +453,44 @@ fn parse_base_expression(parser: *Parser) *Ast.Expression {
             var arguments: [2]*Ast.Expression = undefined;
             parse_fixed_size_expression_list(parser, &arguments);
 
+            const typ = parser.ast.expression_to_type(arguments[0]);
             const expression = parser.ast.create(Ast.Expression);
             expression.* = .{
                 .position = token.position,
                 .as = .{ .As = .{
-                    .typ = arguments[0],
+                    .typ = typ,
                     .expression = arguments[1],
                 } },
+                .typ = typ,
+                .flags = .{},
             };
-
             return expression;
         },
         .Cast => {
             var arguments: [2]*Ast.Expression = undefined;
             parse_fixed_size_expression_list(parser, &arguments);
 
+            const typ = parser.ast.expression_to_type(arguments[0]);
             const expression = parser.ast.create(Ast.Expression);
             expression.* = .{
                 .position = token.position,
                 .as = .{ .Cast = .{
-                    .typ = arguments[0],
+                    .typ = typ,
                     .expression = arguments[1],
                 } },
+                .typ = typ,
+                .flags = .{},
             };
-
             return expression;
         },
         .Integer_Literal => |value| {
+            const typ = parser.ast.integer_type_from_u64(value);
             const expression = parser.ast.create(Ast.Expression);
             expression.* = .{
                 .position = token.position,
-                .as = .{ .Integer_Literal = value },
+                .as = .{ .Integer = value },
+                .typ = typ,
+                .flags = .{},
             };
             return expression;
         },
@@ -378,7 +498,9 @@ fn parse_base_expression(parser: *Parser) *Ast.Expression {
             const expression = parser.ast.create(Ast.Expression);
             expression.* = .{
                 .position = token.position,
-                .as = .{ .Boolean_Literal = value },
+                .as = .{ .Boolean = value },
+                .typ = Ast.bool_type,
+                .flags = .{},
             };
             return expression;
         },
@@ -386,7 +508,9 @@ fn parse_base_expression(parser: *Parser) *Ast.Expression {
             const expression = parser.ast.create(Ast.Expression);
             expression.* = .{
                 .position = token.position,
-                .as = .Null_Literal,
+                .as = .Null,
+                .typ = Ast.void_pointer_type,
+                .flags = .{},
             };
             return expression;
         },
@@ -398,6 +522,8 @@ fn parse_base_expression(parser: *Parser) *Ast.Expression {
                     .name = name,
                     .scope = parser.current_scope,
                 } },
+                .typ = Ast.void_type,
+                .flags = .{},
             };
             return expression;
         },
@@ -414,7 +540,9 @@ fn parse_base_expression(parser: *Parser) *Ast.Expression {
             const expression = parser.ast.create(Ast.Expression);
             expression.* = .{
                 .position = subexpression.position,
-                .as = .{ .Reference = subexpression },
+                .as = .{ .Ref = subexpression },
+                .typ = Ast.void_type,
+                .flags = .{},
             };
             return expression;
         },
@@ -427,15 +555,17 @@ fn parse_base_expression(parser: *Parser) *Ast.Expression {
             const expression = parser.ast.create(Ast.Expression);
             expression.* = .{
                 .position = subexpression.position,
-                .as = .{ .Unary_Operator = .{
+                .as = .{ .Unary_Op = .{
                     .subexpression = subexpression,
                     .tag = switch (token.as) {
                         .Not => .Not,
-                        .Plus => .Plus,
-                        .Minus => .Minus,
+                        .Plus => .Pos,
+                        .Minus => .Neg,
                         else => unreachable,
                     },
                 } },
+                .typ = Ast.void_type,
+                .flags = .{},
             };
             return expression;
         },
@@ -445,15 +575,43 @@ fn parse_base_expression(parser: *Parser) *Ast.Expression {
             const subexpression = parser.ast.create(Ast.Expression);
             subexpression.* = .{
                 .position = token.position,
-                .as = .{ .Reference = subsubexpression },
+                .as = .{ .Ref = subsubexpression },
+                .typ = Ast.void_type,
+                .flags = .{},
             };
             subexpression.position.column += 1;
             subexpression.position.offset += 1;
             const expression = parser.ast.create(Ast.Expression);
             expression.* = .{
                 .position = token.position,
-                .as = .{ .Reference = subexpression },
+                .as = .{ .Ref = subexpression },
+                .typ = Ast.void_type,
+                .flags = .{},
             };
+            return expression;
+        },
+
+        .If => {
+            const condition = parse_expression(parser);
+            if (peek(parser) == .Then) {
+                advance(parser);
+            }
+            const true_branch = parse_expression(parser);
+            expect(parser, .Else);
+            const false_branch = parse_expression(parser);
+
+            const expression = parser.ast.create(Ast.Expression);
+            expression.* = .{
+                .position = token.position,
+                .as = .{ .If = .{
+                    .condition = condition,
+                    .true_branch = true_branch,
+                    .false_branch = false_branch,
+                } },
+                .typ = Ast.void_type,
+                .flags = .{},
+            };
+
             return expression;
         },
         else => {
@@ -463,71 +621,23 @@ fn parse_base_expression(parser: *Parser) *Ast.Expression {
     }
 }
 
-const Argument = Ast.Expression.ProcedureCall.Argument;
-const ArgumentList = Ast.Expression.ProcedureCall.ArgumentList;
-
-fn parse_argument_list(parser: *Parser) ArgumentList {
-    expect(parser, .Left_Parenthesis);
-
-    var arguments = ArgumentList{};
-
-    var tt = peek(parser);
-    while (tt != .End_Of_File and tt != .Right_Parenthesis) {
-        const argument: Argument = argument: {
-            switch (tt) {
-                .Dot => {
-                    advance(parser);
-                    const name = parser.ast.create(Token);
-                    name.* = grab(parser);
-                    expect(parser, .Identifier);
-                    expect(parser, .Equal);
-                    const value = parse_expression(parser);
-
-                    break :argument .{ .Field_Designator = .{
-                        .name = name,
-                        .value = value,
-                    } };
-                },
-                else => {
-                    const expression = parse_expression(parser);
-                    break :argument .{ .Expression = expression };
-                },
-            }
-        };
-
-        {
-            const node = parser.ast.create(ArgumentList.Node);
-            node.* = .{ .data = argument };
-            arguments.append(node);
-        }
-
-        tt = peek(parser);
-        if (tt != .End_Of_File and tt != .Right_Parenthesis) {
-            expect(parser, .Comma);
-            tt = peek(parser);
-        }
-    }
-
-    expect(parser, .Right_Parenthesis);
-
-    return arguments;
-}
-
 fn parse_highest_precedence_expression(parser: *Parser) *Ast.Expression {
     var base = parse_base_expression(parser);
 
     while (true) {
         switch (peek(parser)) {
             .Left_Parenthesis => {
-                const arguments = parse_argument_list(parser);
+                const args = parse_expression_list(parser);
 
                 const new_base = parser.ast.create(Ast.Expression);
                 new_base.* = .{
                     .position = base.position,
-                    .as = .{ .Procedure_Call = .{
-                        .lhs = base,
-                        .arguments = arguments,
+                    .as = .{ .Call = .{
+                        .subexpression = base,
+                        .args = args,
                     } },
+                    .typ = Ast.void_type,
+                    .flags = .{},
                 };
                 base = new_base;
             },
@@ -537,24 +647,37 @@ fn parse_highest_precedence_expression(parser: *Parser) *Ast.Expression {
                 const new_base = parser.ast.create(Ast.Expression);
                 new_base.* = .{
                     .position = base.position,
-                    .as = .{ .Dereference = base },
+                    .as = .{ .Deref = base },
+                    .typ = Ast.void_type,
+                    .flags = .{},
                 };
                 base = new_base;
             },
             .Dot => {
                 advance(parser);
 
-                const name = parser.ast.create(Token);
-                name.* = grab(parser);
+                const id = grab(parser);
                 expect(parser, .Identifier);
 
+                const field = parser.ast.create(Ast.Expression);
+                field.* = .{
+                    .position = id.position,
+                    .as = .{ .Identifier = .{
+                        .name = id.as.Identifier,
+                        .scope = parser.current_scope,
+                    } },
+                    .typ = Ast.void_type,
+                    .flags = .{},
+                };
                 const new_base = parser.ast.create(Ast.Expression);
                 new_base.* = .{
                     .position = base.position,
-                    .as = .{ .Member_Access = .{
-                        .lhs = base,
-                        .name = name,
+                    .as = .{ .Field = .{
+                        .subexpression = base,
+                        .field = field,
                     } },
+                    .typ = Ast.void_type,
+                    .flags = .{},
                 };
                 base = new_base;
             },
@@ -567,9 +690,11 @@ fn parse_highest_precedence_expression(parser: *Parser) *Ast.Expression {
                 new_base.* = .{
                     .position = base.position,
                     .as = .{ .Subscript = .{
-                        .lhs = base,
+                        .subexpression = base,
                         .index = index,
                     } },
+                    .typ = Ast.void_type,
+                    .flags = .{},
                 };
                 base = new_base;
             },
@@ -623,7 +748,7 @@ fn parse_binary_expression(parser: *Parser, min_precedence: PrecedenceType) *Ast
             const new_lhs = parser.ast.create(Ast.Expression);
             new_lhs.* = .{
                 .position = lhs.position,
-                .as = .{ .Binary_Operator = .{
+                .as = .{ .Binary_Op = .{
                     .position = position,
                     .lhs = lhs,
                     .rhs = rhs,
@@ -644,6 +769,8 @@ fn parse_binary_expression(parser: *Parser, min_precedence: PrecedenceType) *Ast
                         else => unreachable,
                     },
                 } },
+                .typ = Ast.void_type,
+                .flags = .{},
             };
             lhs = new_lhs;
 
@@ -693,6 +820,48 @@ fn parse_fixed_size_expression_list(parser: *Parser, dst: []*Ast.Expression) voi
     if (count != dst.len) {
         parser.c.report_fatal_error(position, "expected {} arguments, but got {}", .{ dst.len, count });
     }
+}
+
+fn parse_expression_list(parser: *Parser) Ast.ExpressionList {
+    expect(parser, .Left_Parenthesis);
+
+    var list = Ast.ExpressionList{};
+
+    var tt = peek(parser);
+    while (tt != .End_Of_File and tt != .Right_Parenthesis) {
+        const expression_node = parser.ast.create(Ast.ExpressionListNode);
+        expression_node.* = expression_node: {
+            const lhs = parse_expression(parser);
+            if (peek(parser) == .Equal) {
+                advance(parser);
+                const rhs = parse_expression(parser);
+
+                break :expression_node .{ .Designator = .{
+                    .lhs = lhs,
+                    .rhs = rhs,
+                } };
+            }
+            break :expression_node .{ .Expression = lhs };
+        };
+
+        {
+            const node = parser.ast.create(Ast.ExpressionList.Node);
+            node.* = .{
+                .data = expression_node,
+            };
+            list.append(node);
+        }
+
+        tt = peek(parser);
+        if (tt != .End_Of_File and tt != .Right_Parenthesis) {
+            expect(parser, .Comma);
+            tt = peek(parser);
+        }
+    }
+
+    expect(parser, .Right_Parenthesis);
+
+    return list;
 }
 
 fn parse_statement_switch(parser: *Parser) Ast.Statement.Switch.CaseList {
@@ -912,7 +1081,6 @@ fn parse_statement(parser: *Parser) *Ast.Statement {
         else => {
             putback(parser, tok);
 
-            // TODO: can't create unnamed types and procedures.
             if (try_parse_symbol(parser)) |symbol| {
                 maybe_eat_semicolon(parser, symbol);
 
@@ -998,8 +1166,9 @@ fn insert_symbol(parser: *Parser, id: Token) *Ast.Symbol {
     const symbol = parser.ast.create(Ast.Symbol);
     symbol.* = .{
         .position = id.position,
-        .key = key,
         .as = undefined,
+        .key = key,
+        .typechecking = .None,
     };
     insert_result.value_ptr.* = symbol;
 
@@ -1048,14 +1217,14 @@ fn try_parse_variable(parser: *Parser) ?*Ast.Symbol {
 
                 const id = eat_symbol_declaration(parser);
 
-                var has_type: ?*Ast.Expression = null;
+                var has_type: ?*Ast.Type = null;
                 var has_value: ?*Ast.Expression = null;
 
                 if (peek(parser) == .Equal) {
                     advance(parser);
                     has_value = parse_expression(parser);
                 } else {
-                    has_type = parse_expression(parser);
+                    has_type = parse_type(parser);
 
                     if (peek(parser) == .Equal) {
                         advance(parser);
@@ -1076,6 +1245,7 @@ fn try_parse_variable(parser: *Parser) ?*Ast.Symbol {
                         },
                         .typ = has_type,
                         .value = has_value,
+                        .storage = null,
                     } };
                 } else as: {
                     switch (symbol.key.scope.tag) {
@@ -1093,6 +1263,7 @@ fn try_parse_variable(parser: *Parser) ?*Ast.Symbol {
                                 },
                                 .typ = has_type,
                                 .value = has_value,
+                                .storage = null,
                             } };
                         },
                         .Structure => {
@@ -1100,9 +1271,10 @@ fn try_parse_variable(parser: *Parser) ?*Ast.Symbol {
                                 parser.c.report_error(symbol.position, "expected type for a structure field", .{});
                             }
 
-                            break :as .{ .Structure_Field = .{
+                            break :as .{ .Struct_Field = .{
                                 .typ = has_type.?,
                                 .value = has_value,
+                                .offset = 0,
                             } };
                         },
                         .Union => {
@@ -1113,6 +1285,7 @@ fn try_parse_variable(parser: *Parser) ?*Ast.Symbol {
                             break :as .{ .Union_Field = .{
                                 .typ = has_type.?,
                                 .value = has_value,
+                                .offset = 0,
                             } };
                         },
                         .Enumerator => {
@@ -1120,8 +1293,9 @@ fn try_parse_variable(parser: *Parser) ?*Ast.Symbol {
                                 parser.c.report_error(typ.position, "unexpected type for an enumerator value", .{});
                             }
 
-                            break :as .{ .Enumerator_Value = .{
+                            break :as .{ .Enum_Field = .{
                                 .value = has_value,
+                                .computed_value = 0,
                             } };
                         },
                         .Procedure,
@@ -1134,6 +1308,7 @@ fn try_parse_variable(parser: *Parser) ?*Ast.Symbol {
                                 },
                                 .typ = has_type,
                                 .value = has_value,
+                                .storage = null,
                             } };
                         },
                     }
@@ -1141,13 +1316,21 @@ fn try_parse_variable(parser: *Parser) ?*Ast.Symbol {
 
                 return symbol;
             },
-            else => if (!has_attributes and parser.current_scope.tag == .Enumerator) {
-                const id = grab(parser);
+            else => if (parser.current_scope.tag == .Enumerator) {
+                var maybe_id = grab(parser);
+
+                if (has_attributes) {
+                    parser.c.report_error(maybe_id.position, "unexpected attributes for an enumerator value", .{});
+                    advance(parser);
+                }
+
+                maybe_id = grab(parser);
                 advance(parser);
 
-                const symbol = insert_symbol(parser, id);
-                symbol.as = .{ .Enumerator_Value = .{
+                const symbol = insert_symbol(parser, maybe_id);
+                symbol.as = .{ .Enum_Field = .{
                     .value = null,
+                    .computed_value = 0,
                 } };
 
                 return symbol;
@@ -1166,17 +1349,15 @@ fn parse_variable(parser: *Parser) *Ast.Symbol {
 }
 
 fn try_parse_symbol(parser: *Parser) ?*Ast.Symbol {
-    const token = grab(parser);
-
-    switch (token.as) {
+    switch (peek(parser)) {
         .Alias => {
             advance(parser);
 
             const id = eat_symbol_declaration(parser);
-            const expression = parse_expression(parser);
+            const typ = parse_type(parser);
 
             const symbol = insert_symbol(parser, id);
-            symbol.as = .{ .Alias = expression };
+            symbol.as = .{ .Type = typ };
 
             return symbol;
         },
@@ -1184,18 +1365,14 @@ fn try_parse_symbol(parser: *Parser) ?*Ast.Symbol {
         .Union,
         .Enum,
         => {
-            const result, const has_id = parse_structure_union_or_enumerator(parser);
+            const typ, const has_id = parse_structure_union_or_enumerator(parser);
 
             if (has_id == null) {
-                parser.c.report_fatal_error(token.position, "expected identifier declaration", .{});
+                parser.c.report_fatal_error(typ.position, "expected identifier declaration", .{});
             }
 
             const symbol = insert_symbol(parser, has_id.?);
-            symbol.as = switch (result) {
-                .Structure => |Structure| .{ .Structure = Structure },
-                .Union => |Union| .{ .Union = Union },
-                .Enumerator => |Enumerator| .{ .Enumerator = Enumerator },
-            };
+            symbol.as = .{ .Type = &typ.as.Type };
 
             return symbol;
         },
@@ -1208,10 +1385,17 @@ fn try_parse_symbol(parser: *Parser) ?*Ast.Symbol {
                 .Procedure => |Procedure| {
                     const symbol = insert_symbol(parser, id);
                     symbol.as = .{ .Procedure = Procedure };
+
+                    {
+                        const node = parser.ast.create(Ast.SymbolList.Node);
+                        node.* = .{ .data = symbol };
+                        parser.ast.local_procedures.append(node);
+                    }
+
                     return symbol;
                 },
-                .Procedure_Type => {
-                    parser.c.report_fatal_error(token.position, "expected body for a procedure", .{});
+                .Procedure_Type => |typ| {
+                    parser.c.report_fatal_error(typ.position, "expected body for a procedure", .{});
                 },
             }
         },
@@ -1274,7 +1458,7 @@ fn parse_top_level(parser: *Parser) void {
                 node.* = .{
                     .data = symbol,
                 };
-                parser.ast.symbols.append(node);
+                parser.ast.globals.append(node);
             },
             else => {
                 parser.c.report_error(statement.position, "expected symbol definition", .{});
@@ -1295,11 +1479,7 @@ pub fn parse(c: *Compiler) Ast {
         .lexer = .{
             .c = c,
         },
-        .ast = .{
-            .symbols = .{},
-            .symbol_table = Ast.SymbolTable.init(nostd.general_allocator),
-            .arena = Ast.ArenaAllocator.init(std.heap.page_allocator),
-        },
+        .ast = Ast.init(c),
         .c = c,
     };
 
