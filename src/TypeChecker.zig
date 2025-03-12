@@ -363,60 +363,9 @@ fn shallow_check(t: *TypeChecker, typ: *Ast.Type) void {
     }
 }
 
-fn void_array_check(t: *TypeChecker, typ: *Ast.Type) void {
-    shallow_check(t, typ);
-
-    const data = typ.data;
-    switch (data.stages.void_array_check) {
-        .None => data.stages.void_array_check = .Going,
-        .Going, .Done => return,
-    }
-    defer data.stages.void_array_check = .Done;
-
-    switch (data.as) {
-        .Struct, .Union => |Struct| {
-            var it = Struct.fields.first;
-            while (it) |node| {
-                switch (node.data.as) {
-                    .Struct_Field, .Union_Field => |Field| {
-                        void_array_check(t, Field.typ);
-                    },
-                    else => unreachable,
-                }
-                it = node.next;
-            }
-        },
-        .Proc => |Proc| {
-            var it = Proc.params.first;
-            while (it) |node| {
-                const Parameter = &node.data.as.Parameter;
-                void_array_check(t, Parameter.typ);
-                it = node.next;
-            }
-            void_array_check(t, Proc.return_type);
-        },
-        .Array => |Array| {
-            void_array_check(t, Array.subtype);
-            reject_void_type(t, Array.subtype);
-        },
-        .Pointer => |subtype| {
-            void_array_check(t, subtype);
-        },
-        .Enum,
-        .Integer,
-        .Bool,
-        .Void,
-        => {},
-        .Field,
-        .Identifier,
-        .Type_Of,
-        => unreachable,
-    }
-}
-
 // TODO: don't go through all stages when the top one is done.
 fn check_type(t: *TypeChecker, typ: *Ast.Type) void {
-    void_array_check(t, typ);
+    shallow_check(t, typ);
 
     const data = typ.data;
     switch (data.stages.full_check) {
@@ -565,6 +514,10 @@ fn check_type(t: *TypeChecker, typ: *Ast.Type) void {
         },
         .Array => |*Array| {
             check_type(t, Array.subtype);
+
+            if (Array.subtype.data.as == .Void) {
+                t.c.report_fatal_error(Array.subtype.position, "can't have array of 'void'", .{});
+            }
 
             const size_type = check_expression_only(t, Array.size);
             if (!safe_cast_to_integer(t, Array.size, .Unsigned)) {

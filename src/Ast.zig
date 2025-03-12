@@ -22,14 +22,12 @@ pub const pointer_alignment: Alignment = .Qword;
 pub const default_stages_none = Type.Stages{
     .unpacking = .None,
     .shallow_check = .None,
-    .void_array_check = .None,
     .full_check = .None,
 };
 
 pub const default_stages_done = Type.Stages{
     .unpacking = .Done,
     .shallow_check = .Done,
-    .void_array_check = .Done,
     .full_check = .Done,
 };
 
@@ -490,7 +488,6 @@ pub const Type = struct {
     pub const Stages = struct {
         unpacking: Stage,
         shallow_check: Stage,
-        void_array_check: Stage,
         full_check: Stage,
     };
 };
