@@ -1211,6 +1211,13 @@ fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpre
                             break :result .{ .typ = &expression.as.Type, .tag = .Type };
                         },
                         else => {
+                            const old_enum_type = t.enum_type;
+                            defer t.enum_type = old_enum_type;
+
+                            if (subexpression_result.typ.data.as == .Enum) {
+                                t.enum_type = subexpression_result.typ;
+                            }
+
                             break :result check_expression_symbol(t, expression, symbol);
                         },
                     }

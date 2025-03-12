@@ -6,6 +6,17 @@ g_a: u1 = 1;
 
 proc main: () void
 {
+
+  enum A:
+  {
+    A: = 42;
+    B;
+  }
+
+  a: A = A.A;
+  #print a;
+  #print A.B;
+
   {
     #print g_a || false;
     #print 42 == false;
