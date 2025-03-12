@@ -704,6 +704,7 @@ const TypecheckExpressionResult = struct {
     typ: *Ast.Type,
     tag: Tag,
 
+    // TODO: non values don't work properly.
     pub const Tag = enum {
         Value,
         Type,
@@ -746,6 +747,7 @@ pub fn check_expression_symbol(t: *TypeChecker, expression: *Ast.Expression, sym
     }
 }
 
+// TODO: revisit some flags.
 // Types are typechecked lazily (only when used). 'cause if a type is not fully formed (like ambiguous pointer/array), we need to typecheck it from the top level.
 fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpressionResult {
     const result: TypecheckExpressionResult = result: {
