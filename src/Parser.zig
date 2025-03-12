@@ -49,8 +49,101 @@ fn pop_scope(parser: *Parser) void {
     parser.current_scope = parser.current_scope.parent.?;
 }
 
+// Assume 'expression' is heap allocated and can be reused.
+pub fn expression_to_type(parser: *Parser, expression: *Ast.Expression) *Ast.Type {
+    switch (expression.as) {
+        .Deref => |subexpression| {
+            const subtype = expression_to_type(parser, subexpression);
+
+            const data = parser.ast.create(Ast.Type.SharedData);
+            data.* = .{
+                .as = .{ .Pointer = subtype },
+                .byte_size = Ast.pointer_byte_size,
+                .alignment = Ast.pointer_alignment,
+                .stages = Ast.default_stages_none,
+            };
+            expression.as = .{ .Type = .{
+                .position = expression.position,
+                .data = data,
+                .symbol = null,
+            } };
+
+            return &expression.as.Type;
+        },
+        .Field => |Field| {
+            const subtype = expression_to_type(parser, Field.subexpression);
+
+            const data = parser.ast.create(Ast.Type.SharedData);
+            data.* = .{
+                .as = .{ .Field = .{
+                    .subtype = subtype,
+                    .field = Field.field,
+                } },
+                .byte_size = 0,
+                .alignment = .Byte,
+                .stages = Ast.default_stages_none,
+            };
+            expression.as = .{ .Type = .{
+                .position = expression.position,
+                .data = data,
+                .symbol = null,
+            } };
+
+            return &expression.as.Type;
+        },
+        .Subscript => |Subscript| {
+            const subtype = expression_to_type(parser, Subscript.subexpression);
+
+            const data = parser.ast.create(Ast.Type.SharedData);
+            data.* = .{
+                .as = .{ .Array = .{
+                    .subtype = subtype,
+                    .size = Subscript.index,
+                    .computed_size = 0,
+                } },
+                .byte_size = 0,
+                .alignment = .Byte,
+                .stages = Ast.default_stages_none,
+            };
+            expression.as = .{ .Type = .{
+                .position = expression.position,
+                .data = data,
+                .symbol = null,
+            } };
+
+            return &expression.as.Type;
+        },
+        .Type => |*typ| {
+            return typ;
+        },
+        .Identifier => |Identifier| {
+            const data = parser.ast.create(Ast.Type.SharedData);
+            data.* = .{
+                .as = .{ .Identifier = .{
+                    .name = Identifier.name,
+                    .scope = Identifier.scope,
+                } },
+                .byte_size = 0,
+                .alignment = .Byte,
+                .stages = Ast.default_stages_none,
+            };
+            expression.as = .{ .Type = .{
+                .position = expression.position,
+                .data = data,
+                .symbol = null,
+            } };
+
+            return &expression.as.Type;
+        },
+        else => {
+            parser.c.report_error(expression.position, "expected expressionession, not a type", .{});
+            exit(1);
+        },
+    }
+}
+
 fn parse_type(parser: *Parser) *Ast.Type {
-    return parser.ast.expression_to_type(parse_expression(parser));
+    return expression_to_type(parser, parse_expression(parser));
 }
 
 fn maybe_eat_semicolon(parser: *Parser, symbol: *Ast.Symbol) void {
@@ -453,7 +546,7 @@ fn parse_base_expression(parser: *Parser) *Ast.Expression {
             var arguments: [2]*Ast.Expression = undefined;
             parse_fixed_size_expression_list(parser, &arguments);
 
-            const typ = parser.ast.expression_to_type(arguments[0]);
+            const typ = expression_to_type(parser, arguments[0]);
             const expression = parser.ast.create(Ast.Expression);
             expression.* = .{
                 .position = token.position,
@@ -470,7 +563,7 @@ fn parse_base_expression(parser: *Parser) *Ast.Expression {
             var arguments: [2]*Ast.Expression = undefined;
             parse_fixed_size_expression_list(parser, &arguments);
 
-            const typ = parser.ast.expression_to_type(arguments[0]);
+            const typ = expression_to_type(parser, arguments[0]);
             const expression = parser.ast.create(Ast.Expression);
             expression.* = .{
                 .position = token.position,
@@ -1479,7 +1572,7 @@ pub fn parse(c: *Compiler) Ast {
         .lexer = .{
             .c = c,
         },
-        .ast = Ast.init(c),
+        .ast = Ast.init(),
         .c = c,
     };
 

@@ -4,7 +4,6 @@ namespaces: TypeList,
 main: ?*Symbol,
 symbol_table: SymbolTable,
 arena: ArenaAllocator,
-c: *Compiler,
 
 const Ast = @This();
 
@@ -34,7 +33,7 @@ pub const default_stages_done = Type.Stages{
     .full_check = .Done,
 };
 
-pub fn init(c: *Compiler) Ast {
+pub fn init() Ast {
     const state = struct {
         pub var s_void_pointer_type_data = Type.SharedData{
             .as = .{ .Pointer = &s_void_type },
@@ -83,7 +82,6 @@ pub fn init(c: *Compiler) Ast {
         .main = null,
         .symbol_table = SymbolTable.init(nostd.general_allocator),
         .arena = ArenaAllocator.init(std.heap.page_allocator),
-        .c = c,
     };
 }
 
@@ -181,99 +179,6 @@ pub fn find_symbol(ast: *Ast, key: Symbol.Key, symbol_offset: usize) ?*Symbol {
             skip_local_variables = skip_local_variables or _key.scope.tag == .Procedure;
             _key.scope = parent;
         } else return null;
-    }
-}
-
-// Assume 'expression' is heap allocated and can be reused.
-pub fn expression_to_type(ast: *Ast, expression: *Expression) *Type {
-    switch (expression.as) {
-        .Deref => |subexpression| {
-            const subtype = expression_to_type(ast, subexpression);
-
-            const data = ast.create(Type.SharedData);
-            data.* = .{
-                .as = .{ .Pointer = subtype },
-                .byte_size = pointer_byte_size,
-                .alignment = pointer_alignment,
-                .stages = default_stages_none,
-            };
-            expression.as = .{ .Type = .{
-                .position = expression.position,
-                .data = data,
-                .symbol = null,
-            } };
-
-            return &expression.as.Type;
-        },
-        .Field => |Field| {
-            const subtype = expression_to_type(ast, Field.subexpression);
-
-            const data = ast.create(Type.SharedData);
-            data.* = .{
-                .as = .{ .Field = .{
-                    .subtype = subtype,
-                    .field = Field.field,
-                } },
-                .byte_size = 0,
-                .alignment = .Byte,
-                .stages = default_stages_none,
-            };
-            expression.as = .{ .Type = .{
-                .position = expression.position,
-                .data = data,
-                .symbol = null,
-            } };
-
-            return &expression.as.Type;
-        },
-        .Subscript => |Subscript| {
-            const subtype = expression_to_type(ast, Subscript.subexpression);
-
-            const data = ast.create(Type.SharedData);
-            data.* = .{
-                .as = .{ .Array = .{
-                    .subtype = subtype,
-                    .size = Subscript.index,
-                    .computed_size = 0,
-                } },
-                .byte_size = 0,
-                .alignment = .Byte,
-                .stages = default_stages_none,
-            };
-            expression.as = .{ .Type = .{
-                .position = expression.position,
-                .data = data,
-                .symbol = null,
-            } };
-
-            return &expression.as.Type;
-        },
-        .Type => |*typ| {
-            return typ;
-        },
-        .Identifier => |Identifier| {
-            const data = ast.create(Type.SharedData);
-            data.* = .{
-                .as = .{ .Identifier = .{
-                    .name = Identifier.name,
-                    .scope = Identifier.scope,
-                } },
-                .byte_size = 0,
-                .alignment = .Byte,
-                .stages = default_stages_none,
-            };
-            expression.as = .{ .Type = .{
-                .position = expression.position,
-                .data = data,
-                .symbol = null,
-            } };
-
-            return &expression.as.Type;
-        },
-        else => {
-            ast.c.report_error(expression.position, "expected expressionession, not a type", .{});
-            exit(1);
-        },
     }
 }
 
