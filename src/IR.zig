@@ -1,5 +1,5 @@
-instructions: ByteList,
-globals: ByteList,
+instructions: ByteList, // TODO: should be aligned by u32?
+globals: ByteList, // TODO: should be aligned by u64?
 
 const IR = @This();
 

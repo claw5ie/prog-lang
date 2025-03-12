@@ -1,4 +1,4 @@
-stack: []u8,
+stack: []u8, // TODO: should be aligned by u64?
 rsp: u64,
 rbp: u64,
 vtable: Vtable,
