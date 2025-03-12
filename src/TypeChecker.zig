@@ -140,6 +140,22 @@ fn check_symbol_type(t: *TypeChecker, symbol: *Ast.Symbol) void {
     }
 }
 
+fn compute_variable_initializer(t: *TypeChecker, symbol: *Ast.Symbol) void {
+    const Variable = &symbol.as.Variable;
+
+    if (Variable.attributes.is_static or Variable.attributes.is_const) {
+        const value = Variable.value.?;
+
+        // TODO: compute initializer always when it's constant.
+        if (value.flags.is_const) {
+            const storage = t.generator.grab_static_variable_storage(Variable);
+            compute_expression_to_operand(t, storage, value);
+        } else {
+            t.c.report_fatal_error(value.position, "expression is not a constant", .{});
+        }
+    }
+}
+
 fn check_symbol(t: *TypeChecker, symbol: *Ast.Symbol) void {
     switch (symbol.typechecking) {
         .None => symbol.typechecking = .Going,
@@ -151,24 +167,6 @@ fn check_symbol(t: *TypeChecker, symbol: *Ast.Symbol) void {
     defer symbol.typechecking = .Done;
 
     check_symbol_type(t, symbol);
-
-    const fns = struct {
-        pub fn compute_variable_initializer(_t: *TypeChecker, _symbol: *Ast.Symbol) void {
-            const Variable = &_symbol.as.Variable;
-
-            if (Variable.attributes.is_static or Variable.attributes.is_const) {
-                const value = Variable.value.?;
-
-                // TODO: compute initializer always when it's constant.
-                if (value.flags.is_const) {
-                    const storage = _t.generator.grab_static_variable_storage(Variable);
-                    compute_expression_to_operand(_t, storage, value);
-                } else {
-                    _t.c.report_fatal_error(value.position, "expression is not a constant", .{});
-                }
-            }
-        }
-    };
 
     switch (symbol.as) {
         .Variable => |*Variable| {
@@ -183,7 +181,7 @@ fn check_symbol(t: *TypeChecker, symbol: *Ast.Symbol) void {
                         exit(1);
                     }
 
-                    fns.compute_variable_initializer(t, symbol);
+                    compute_variable_initializer(t, symbol);
                 } else if (Variable.attributes.is_const) {
                     t.c.report_fatal_error(symbol.position, "constant expression needs initializer", .{});
                 }
@@ -193,7 +191,7 @@ fn check_symbol(t: *TypeChecker, symbol: *Ast.Symbol) void {
 
                 Variable.typ = value_type;
 
-                fns.compute_variable_initializer(t, symbol);
+                compute_variable_initializer(t, symbol);
             } else {
                 unreachable;
             }
@@ -221,6 +219,17 @@ fn check_symbol(t: *TypeChecker, symbol: *Ast.Symbol) void {
     }
 }
 
+fn unpack_symbol(t: *TypeChecker, typ: *Ast.Type, symbol: *Ast.Symbol) void {
+    if (symbol.as != .Type) {
+        t.c.report_fatal_error(typ.position, "symbol '{s}' is not a type", .{symbol.key.name});
+    }
+
+    const new_typ = symbol.as.Type;
+    unpack(t, new_typ);
+    typ.data = new_typ.data;
+    typ.symbol = symbol;
+}
+
 fn unpack(t: *TypeChecker, typ: *Ast.Type) void {
     const old_data = typ.data;
     switch (old_data.stages.unpacking) {
@@ -231,19 +240,6 @@ fn unpack(t: *TypeChecker, typ: *Ast.Type) void {
         .Done => return,
     }
     defer old_data.stages.unpacking = .Done;
-
-    const fns = struct {
-        pub fn unpack_symbol(_t: *TypeChecker, _typ: *Ast.Type, symbol: *Ast.Symbol) void {
-            if (symbol.as != .Type) {
-                _t.c.report_fatal_error(_typ.position, "symbol '{s}' is not a type", .{symbol.key.name});
-            }
-
-            const new_typ = symbol.as.Type;
-            unpack(_t, new_typ);
-            _typ.data = new_typ.data;
-            _typ.symbol = symbol;
-        }
-    };
 
     switch (old_data.as) {
         .Array => |Array| {
@@ -272,7 +268,7 @@ fn unpack(t: *TypeChecker, typ: *Ast.Type) void {
 
             const symbol = resolve_identifier(t, Field.field, scope);
 
-            fns.unpack_symbol(t, typ, symbol);
+            unpack_symbol(t, typ, symbol);
         },
         .Pointer => |subtype| {
             unpack(t, subtype);
@@ -284,7 +280,7 @@ fn unpack(t: *TypeChecker, typ: *Ast.Type) void {
             }, typ.position.offset);
 
             if (has_symbol) |symbol| {
-                fns.unpack_symbol(t, typ, symbol);
+                unpack_symbol(t, typ, symbol);
             } else {
                 t.c.report_fatal_error(typ.position, "symbol '{s}' is not defined", .{Identifier.name});
             }
@@ -705,43 +701,41 @@ const TypecheckExpressionResult = struct {
     };
 };
 
+pub fn check_expression_symbol(t: *TypeChecker, expression: *Ast.Expression, symbol: *Ast.Symbol) TypecheckExpressionResult {
+    expression.as = .{ .Symbol = symbol };
+
+    switch (symbol.as) {
+        .Variable => |*Variable| {
+            expression.flags.is_const = Variable.attributes.is_const;
+            expression.flags.is_static = Variable.attributes.is_static;
+
+            check_symbol(t, symbol); // TODO: allow cyclic references when using #type_of/#alignment_of, etc.
+
+            expression.flags.is_lvalue = true;
+
+            return .{ .typ = Variable.typ.?, .tag = .Value };
+        },
+        .Parameter => |Parameter| {
+            expression.flags.is_lvalue = true;
+            return .{ .typ = Parameter.typ, .tag = .Value };
+        },
+        .Procedure => |Procedure| {
+            return .{ .typ = Procedure.typ, .tag = .Value };
+        },
+        .Type => |Type| {
+            return .{ .typ = Type, .tag = .Type };
+        },
+        .Struct_Field, .Union_Field => |Field| {
+            return .{ .typ = Field.typ, .tag = .Non_Value };
+        },
+        .Enum_Field => {
+            return .{ .typ = t.enum_type.?, .tag = .Value };
+        },
+    }
+}
+
 // Types are typechecked lazily (only when used). 'cause if a type is not fully formed (like ambiguous pointer/array), we need to typecheck it from the top level.
 fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpressionResult {
-    const fns = struct {
-        pub fn check_expression_symbol(_t: *TypeChecker, _expression: *Ast.Expression, symbol: *Ast.Symbol) TypecheckExpressionResult {
-            _expression.as = .{ .Symbol = symbol };
-
-            switch (symbol.as) {
-                .Variable => |*Variable| {
-                    _expression.flags.is_const = Variable.attributes.is_const;
-                    _expression.flags.is_static = Variable.attributes.is_static;
-
-                    check_symbol(_t, symbol); // TODO: allow cyclic references when using #type_of/#alignment_of, etc.
-
-                    _expression.flags.is_lvalue = true;
-
-                    return .{ .typ = Variable.typ.?, .tag = .Value };
-                },
-                .Parameter => |Parameter| {
-                    _expression.flags.is_lvalue = true;
-                    return .{ .typ = Parameter.typ, .tag = .Value };
-                },
-                .Procedure => |Procedure| {
-                    return .{ .typ = Procedure.typ, .tag = .Value };
-                },
-                .Type => |Type| {
-                    return .{ .typ = Type, .tag = .Type };
-                },
-                .Struct_Field, .Union_Field => |Field| {
-                    return .{ .typ = Field.typ, .tag = .Non_Value };
-                },
-                .Enum_Field => {
-                    return .{ .typ = _t.enum_type.?, .tag = .Value };
-                },
-            }
-        }
-    };
-
     const result: TypecheckExpressionResult = result: {
         switch (expression.as) {
             .Binary_Op => |*Binary_Op| {
@@ -1217,7 +1211,7 @@ fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpre
                             break :result .{ .typ = &expression.as.Type, .tag = .Type };
                         },
                         else => {
-                            break :result fns.check_expression_symbol(t, expression, symbol);
+                            break :result check_expression_symbol(t, expression, symbol);
                         },
                     }
                 } else {
@@ -1317,7 +1311,7 @@ fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpre
                 if (has_symbol) |symbol| {
                     check_symbol_type(t, symbol);
 
-                    break :result fns.check_expression_symbol(t, expression, symbol);
+                    break :result check_expression_symbol(t, expression, symbol);
                 } else {
                     t.c.report_fatal_error(expression.position, "symbol '{s}' is not defined", .{Identifier.name});
                 }
