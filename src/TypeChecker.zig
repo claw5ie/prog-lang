@@ -446,7 +446,7 @@ fn check_type(t: *TypeChecker, typ: *Ast.Type) void {
                 it = node.next;
             }
 
-            data.byte_size = size;
+            data.byte_size = nostd.align_up(size, alignment);
             data.alignment = alignment;
 
             // NOTE[check-fields-in-namespace]: should deduplicate?
@@ -474,7 +474,7 @@ fn check_type(t: *TypeChecker, typ: *Ast.Type) void {
                 it = node.next;
             }
 
-            data.byte_size = size;
+            data.byte_size = nostd.align_up(size, alignment);
             data.alignment = alignment;
 
             // NOTE[check-fields-in-namespace].
@@ -1863,7 +1863,7 @@ fn unsafe_cast(t: *TypeChecker, expression: *Ast.Expression, cast_to: *Ast.Type)
 }
 
 fn make_expression_pointer_mul_integer(t: *TypeChecker, offset_expression: *Ast.Expression, data: *Ast.Type.SharedData) *Ast.Expression {
-    const size = nostd.align_up(data.byte_size, data.alignment);
+    const size = data.byte_size;
     const size_expression = t.ast.create(Ast.Expression);
     size_expression.* = .{
         .position = offset_expression.position,

@@ -603,7 +603,6 @@ pub fn generate_expression(generator: *IRGenerator, has_dst: ?IRE.Operand, expre
                         _ = generate_expression(generator, new_dst, arg);
 
                         offset += size;
-                        offset = nostd.align_up(offset, Array.subtype.data.alignment);
                         it = node.next;
                     }
                 },
@@ -630,7 +629,7 @@ pub fn generate_expression(generator: *IRGenerator, has_dst: ?IRE.Operand, expre
 
             {
                 const index = generate_expression(generator, null, Subscript.index);
-                const offset = nostd.align_up(expression.typ.data.byte_size, expression.typ.data.alignment);
+                const offset = expression.typ.data.byte_size;
                 generate_instr3(generator, .umul, dst, index, .{ .Imm = offset });
             }
 
