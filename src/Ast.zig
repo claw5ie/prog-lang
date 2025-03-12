@@ -692,7 +692,7 @@ pub const Symbol = struct {
         attributes: Attributes,
         typ: ?*Type,
         value: ?*Expression,
-        storage: ?IR.Encoded.Operand,
+        storage: ?IR.BigOperand,
 
         pub const Attributes = packed struct {
             is_const: bool,
@@ -703,7 +703,7 @@ pub const Symbol = struct {
     pub const Parameter = struct {
         typ: *Type,
         value: ?*Expression,
-        storage: ?IR.Encoded.Operand,
+        storage: ?IR.BigOperand,
     };
 
     pub const Procedure = struct {
@@ -712,8 +712,8 @@ pub const Symbol = struct {
         labels: ?LabelPair,
 
         pub const LabelPair = struct {
-            start: IR.Encoded.Label,
-            end: IR.Encoded.Label,
+            start: IR.Label,
+            end: IR.Label,
         };
     };
 

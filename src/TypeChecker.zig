@@ -72,15 +72,15 @@ fn compute_simple_expression(t: *TypeChecker, expression: *Ast.Expression) u64 {
     return t.interp.read(address, @intCast(expression.typ.data.byte_size), expression.typ.is_signed());
 }
 
-fn compute_expression_to_operand(t: *TypeChecker, dst: IRE.Operand, expression: *Ast.Expression) void {
+fn compute_expression_to_operand(t: *TypeChecker, dst: IR.BigOperand, expression: *Ast.Expression) void {
     std.debug.assert(dst.is_lvalue());
     const op = compute_expression(t, expression);
-    const dst_address = t.interp.grab_value_from_operand(dst.addr_of().decode(), false);
+    const dst_address = t.interp.grab_value_from_operand(dst.addr_of().to_operand(), false);
     const src_address = t.interp.grab_value_from_operand(op, false);
     t.interp.write_big(dst_address, src_address, expression.typ.data.byte_size);
 }
 
-fn compute_expression(t: *TypeChecker, expression: *Ast.Expression) IRD.Operand {
+fn compute_expression(t: *TypeChecker, expression: *Ast.Expression) IR.Operand {
     std.debug.assert(expression.flags.is_const);
 
     var old_generator = t.generator.*;
@@ -88,17 +88,17 @@ fn compute_expression(t: *TypeChecker, expression: *Ast.Expression) IRD.Operand 
     const dst = t.generator.grab_local_from_type(expression.typ.data);
     std.debug.assert(dst.is_lvalue());
     _ = t.generator.generate_expression(dst, expression);
-    t.generator.generate_instr0(.exit);
+    t.generator.generate_instruction(.exit, .{});
     t.generator.remove_labels();
     t.interp.reset();
     t.interp.interpret();
 
-    t.generator.ir.instrs.clearRetainingCapacity();
+    t.generator.ir.instructions.clearRetainingCapacity();
 
     old_generator.labels = t.generator.labels;
     t.generator.* = old_generator;
 
-    return dst.addr_of().decode();
+    return dst.addr_of().to_operand();
 }
 
 fn check_symbol_type(t: *TypeChecker, symbol: *Ast.Symbol) void {
@@ -1818,5 +1818,3 @@ const IRGenerator = @import("IRGenerator.zig");
 const Interpreter = @import("Interpreter.zig");
 
 const Alignment = nostd.Alignment;
-const IRD = IR.Decoded;
-const IRE = IR.Encoded;

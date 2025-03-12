@@ -2,10 +2,10 @@ labels: LabelMap,
 next_local: u64,
 biggest_next_local: u64,
 next_global: u64,
-next_label: IR.Encoded.Label,
-loop_condition_label: ?IR.Encoded.Label,
-loop_end_label: ?IR.Encoded.Label,
-return_label: ?IR.Encoded.Label,
+next_label: IR.Label,
+loop_condition_label: ?IR.Label,
+loop_end_label: ?IR.Label,
+return_label: ?IR.Label,
 ast: *Ast,
 ir: *IR,
 
@@ -37,29 +37,29 @@ pub fn deinit(generator: *IRGenerator) void {
 
 pub fn generate(generator: *IRGenerator) void {
     generate_top_level(generator);
-    generate_instr0(generator, .exit);
+    generate_instruction(generator, .exit, .{});
     remove_labels(generator);
 }
 
 pub fn remove_labels(generator: *IRGenerator) void {
     const vtable = Interpreter.init_vtable(generator.ir);
-    var instrs = &generator.ir.instrs;
+    var instructions = &generator.ir.instructions;
     var at: usize = 0;
-    while (at < instrs.items.len) {
-        var instr, const count = IRD.decode_instr(instrs.items[at..]);
+    while (at < instructions.items.len) {
+        var instruction, const count = IR.parse_instruction(instructions.items[at..]);
 
-        var update_instr = false;
-        for (instr.ops[0..instr.ops_count]) |*op| {
+        var update_instruction = false;
+        for (instruction.operands[0..instruction.operands_count]) |*op| {
             switch (op.*) {
                 .Label => |label| {
-                    op.* = .{ .Imm = vtable.start_instr + generator.labels.items[label] };
-                    update_instr = true;
+                    op.* = .{ .Imm = vtable.start_instruction + generator.labels.items[label] };
+                    update_instruction = true;
                 },
                 else => {},
             }
         }
-        if (update_instr) {
-            write_instr_at(generator, at, instr);
+        if (update_instruction) {
+            write_instruction_at(generator, at, instruction);
         }
 
         at += count;
@@ -69,8 +69,8 @@ pub fn remove_labels(generator: *IRGenerator) void {
 fn generate_top_level(generator: *IRGenerator) void {
     {
         const labels = grab_procedure_labels(generator, &generator.ast.main.?.as.Procedure);
-        generate_instr1(generator, .call, .{ .Label = labels.start });
-        generate_instr0(generator, .exit);
+        generate_instruction(generator, .call, .{IR.BigOperand{ .Label = labels.start }});
+        generate_instruction(generator, .exit, .{});
     }
 
     {
@@ -106,7 +106,7 @@ fn generate_global_symbol(generator: *IRGenerator, symbol: *Ast.Symbol) void {
         .Procedure => |*Procedure| {
             const Proc = &Procedure.typ.data.as.Proc;
 
-            var offset: IRE.Tmp.OffsetType = -IRE.FIRST_PARAM_OFFSET;
+            var offset: IR.Tmp.OffsetType = -IR.first_param_offset;
 
             if (Proc.return_type.equal(Ast.void_type)) { // TODO: replace this condition with a flag.
                 offset += 8; // There is no return pointer.
@@ -135,28 +135,15 @@ fn generate_global_symbol(generator: *IRGenerator, symbol: *Ast.Symbol) void {
             generator.return_label = labels.end;
 
             generate_label(generator, labels.start);
-            const start_proc_index = generator.ir.instrs.items.len;
-            generate_instr1(
-                generator,
-                .start_proc,
-                .{ .Imm = 0 },
-            );
+            const start_proc_index = generator.ir.instructions.items.len;
+            generate_instruction(generator, .start_proc, .{IR.BigOperand{ .Imm = 0 }});
 
             generate_statement_list(generator, Procedure.block);
 
             const stack_space_used = nostd.align_up(generator.biggest_next_local, .Qword);
             generate_label(generator, labels.end);
-            generate_instr1(
-                generator,
-                .end_proc,
-                .{ .Imm = stack_space_used },
-            );
-            generate_instr_at1(
-                generator,
-                start_proc_index,
-                .start_proc,
-                .{ .Imm = stack_space_used },
-            );
+            generate_instruction(generator, .end_proc, .{IR.BigOperand{ .Imm = stack_space_used }});
+            generate_instruction_at(generator, start_proc_index, .start_proc, .{IR.BigOperand{ .Imm = stack_space_used }});
 
             generator.next_local = 0;
             generator.biggest_next_local = 0;
@@ -233,24 +220,24 @@ fn generate_statement(generator: *IRGenerator, statement: *Ast.Statement) void {
             const src = generate_expression(generator, null, expression);
             switch (expression.typ.data.as) {
                 .Enum => {
-                    generate_instr1(
+                    generate_instruction(
                         generator,
                         if (expression.typ.is_signed()) .printi else .printu,
-                        src,
+                        .{src},
                     );
                 },
                 .Pointer => {
-                    generate_instr1(generator, .printp, src);
+                    generate_instruction(generator, .printp, .{src});
                 },
                 .Integer => {
-                    generate_instr1(
+                    generate_instruction(
                         generator,
                         if (expression.typ.is_signed()) .printi else .printu,
-                        src,
+                        .{src},
                     );
                 },
                 .Bool => {
-                    generate_instr1(generator, .printb, src);
+                    generate_instruction(generator, .printb, .{src});
                 },
                 .Struct,
                 .Union,
@@ -277,7 +264,7 @@ fn generate_statement(generator: *IRGenerator, statement: *Ast.Statement) void {
                 generate_jmpc(generator, If.condition, false_branch_label, false);
 
                 _ = generate_statement(generator, If.true_branch);
-                generate_instr1(generator, .jmp, .{ .Label = end_label });
+                generate_instruction(generator, .jmp, .{IR.BigOperand{ .Label = end_label }});
                 generate_label(generator, false_branch_label);
                 _ = generate_statement(generator, false_branch);
                 generate_label(generator, end_label);
@@ -301,7 +288,7 @@ fn generate_statement(generator: *IRGenerator, statement: *Ast.Statement) void {
             generator.loop_end_label = end_label;
 
             if (statement.as == .While) {
-                generate_instr1(generator, .jmp, .{ .Label = condition_label });
+                generate_instruction(generator, .jmp, .{IR.BigOperand{ .Label = condition_label }});
             }
             generate_label(generator, start_label);
             generate_statement(generator, While.body);
@@ -313,10 +300,10 @@ fn generate_statement(generator: *IRGenerator, statement: *Ast.Statement) void {
             generator.loop_end_label = old_loop_end_label;
         },
         .Break => {
-            generate_instr1(generator, .jmp, .{ .Label = generator.loop_end_label.? });
+            generate_instruction(generator, .jmp, .{IR.BigOperand{ .Label = generator.loop_end_label.? }});
         },
         .Continue => {
-            generate_instr1(generator, .jmp, .{ .Label = generator.loop_condition_label.? });
+            generate_instruction(generator, .jmp, .{IR.BigOperand{ .Label = generator.loop_condition_label.? }});
         },
         .Switch => |Switch| {
             const condition = generate_expression(generator, null, Switch.condition);
@@ -334,12 +321,10 @@ fn generate_statement(generator: *IRGenerator, statement: *Ast.Statement) void {
                         switch (case.*) {
                             .Case => |Case| {
                                 const src0 = generate_expression(generator, null, Case.value);
-                                generate_instr3(
+                                generate_instruction(
                                     generator,
                                     if (is_signed) .ije else .uje,
-                                    condition,
-                                    src0,
-                                    .{ .Label = label },
+                                    .{ condition, src0, IR.BigOperand{ .Label = label } },
                                 );
                                 case = Case.subcase;
                             },
@@ -356,7 +341,7 @@ fn generate_statement(generator: *IRGenerator, statement: *Ast.Statement) void {
                 generate_statement(generator, else_statement);
             }
 
-            generate_instr1(generator, .jmp, .{ .Label = end_label });
+            generate_instruction(generator, .jmp, .{IR.BigOperand{ .Label = end_label }});
 
             {
                 var label = first_label;
@@ -369,7 +354,7 @@ fn generate_statement(generator: *IRGenerator, statement: *Ast.Statement) void {
                             .Statement => |substatement| {
                                 generate_label(generator, label);
                                 generate_statement(generator, substatement);
-                                generate_instr1(generator, .jmp, .{ .Label = end_label });
+                                generate_instruction(generator, .jmp, .{IR.BigOperand{ .Label = end_label }});
                                 break;
                             },
                         }
@@ -384,9 +369,9 @@ fn generate_statement(generator: *IRGenerator, statement: *Ast.Statement) void {
         },
         .Return => |has_expression| {
             if (has_expression) |expression| {
-                const dst = IRE.Operand{ .Mem = .{
+                const dst = IR.BigOperand{ .Mem = .{
                     .base = .{
-                        .offset = -IRE.FIRST_PARAM_OFFSET,
+                        .offset = -IR.first_param_offset,
                         .size_minus_one = 8 - 1,
                         .tag = .Relative,
                     },
@@ -395,10 +380,10 @@ fn generate_statement(generator: *IRGenerator, statement: *Ast.Statement) void {
                 } };
                 // Can't move directly to 'dst', because of pointer aliasing. Example: src = foo(&src) may not generate correct code.
                 const src = generate_expression(generator, null, expression);
-                generate_instr2(generator, .mov, dst, src);
+                generate_instruction(generator, .mov, .{ dst, src });
             }
 
-            generate_instr1(generator, .jmp, .{ .Label = generator.return_label.? });
+            generate_instruction(generator, .jmp, .{IR.BigOperand{ .Label = generator.return_label.? }});
         },
         .Symbol => |symbol| {
             generate_local_symbol(generator, symbol);
@@ -421,14 +406,14 @@ fn generate_statement_list(generator: *IRGenerator, list: Ast.StatementList) voi
     }
 }
 
-pub fn generate_expression(generator: *IRGenerator, has_dst: ?IRE.Operand, expression: *Ast.Expression) IRE.Operand {
+pub fn generate_expression(generator: *IRGenerator, has_dst: ?IR.BigOperand, expression: *Ast.Expression) IR.BigOperand {
     const State = struct {
         generator: *IRGenerator,
-        has_dst: ?IRE.Operand,
+        has_dst: ?IR.BigOperand,
     };
 
     const fns = struct {
-        pub fn maybe_grab_local_from_type(state: *State, data: *Ast.Type.SharedData) *IRE.Operand {
+        pub fn maybe_grab_local_from_type(state: *State, data: *Ast.Type.SharedData) *IR.BigOperand {
             if (state.has_dst) |*dst| {
                 return dst;
             } else {
@@ -437,9 +422,9 @@ pub fn generate_expression(generator: *IRGenerator, has_dst: ?IRE.Operand, expre
             }
         }
 
-        pub fn move_to_dst(state: *State, src: IRE.Operand) void {
+        pub fn move_to_dst(state: *State, src: IR.BigOperand) void {
             if (state.has_dst) |dst| {
-                generate_instr2(state.generator, .mov, dst, src);
+                generate_instruction(state.generator, .mov, .{ dst, src });
             } else {
                 state.has_dst = src;
             }
@@ -457,7 +442,7 @@ pub fn generate_expression(generator: *IRGenerator, has_dst: ?IRE.Operand, expre
             const src1 = generate_expression(generator, null, Binary_Op.rhs);
             const dst = fns.maybe_grab_local_from_type(&state, expression.typ.data);
 
-            var opcode: IRE.Opcode = switch (Binary_Op.tag) {
+            var opcode: IR.Opcode = switch (Binary_Op.tag) {
                 .Or, .And => unreachable,
                 .Eq => .ue,
                 .Neq => .une,
@@ -479,7 +464,7 @@ pub fn generate_expression(generator: *IRGenerator, has_dst: ?IRE.Operand, expre
                 opcode = opcode.to_signed();
             }
 
-            generate_instr3(generator, opcode, dst.*, src0, src1);
+            generate_instruction(generator, opcode, .{ dst.*, src0, src1 });
         },
         .Unary_Op => |Unary_Op| {
             const src = generate_expression(generator, null, Unary_Op.subexpression);
@@ -490,11 +475,11 @@ pub fn generate_expression(generator: *IRGenerator, has_dst: ?IRE.Operand, expre
                 },
                 .Neg => {
                     const dst = fns.maybe_grab_local_from_type(&state, expression.typ.data);
-                    generate_instr2(generator, .neg, dst.*, src);
+                    generate_instruction(generator, .neg, .{ dst.*, src });
                 },
                 .Not => {
                     const dst = fns.maybe_grab_local_from_type(&state, expression.typ.data);
-                    generate_instr2(generator, .not, dst.*, src);
+                    generate_instruction(generator, .not, .{ dst.*, src });
                 },
             }
         },
@@ -516,7 +501,7 @@ pub fn generate_expression(generator: *IRGenerator, has_dst: ?IRE.Operand, expre
             const dst = fns.maybe_grab_local_from_type(&state, expression.typ.data);
 
             _ = generate_expression(generator, dst.*, If.true_branch);
-            generate_instr1(generator, .jmp, .{ .Label = end_label });
+            generate_instruction(generator, .jmp, .{IR.BigOperand{ .Label = end_label }});
             generate_label(generator, false_branch_label);
             _ = generate_expression(generator, dst.*, If.false_branch);
             generate_label(generator, end_label);
@@ -528,7 +513,7 @@ pub fn generate_expression(generator: *IRGenerator, has_dst: ?IRE.Operand, expre
             };
 
             const src = generate_expression(generator, null, Field.subexpression);
-            const new_src: IRE.Operand = if (Field.subexpression.typ.data.as != .Pointer)
+            const new_src: IR.BigOperand = if (Field.subexpression.typ.data.as != .Pointer)
                 src.bump(offset, expression.typ.data.byte_size)
             else
                 deref(generator, src, offset, expression.typ.data.byte_size);
@@ -545,22 +530,22 @@ pub fn generate_expression(generator: *IRGenerator, has_dst: ?IRE.Operand, expre
             while (it) |node| {
                 const arg = node.data.Expression;
                 const src = generate_expression(generator, null, arg);
-                generate_instr1(generator, .push, src);
+                generate_instruction(generator, .push, .{src});
                 bytes_pushed += nostd.align_up(arg.typ.data.byte_size, .Qword);
 
                 it = node.prev;
             }
 
             if (!expression.typ.equal(Ast.void_type)) {
-                generate_instr1(generator, .push, dst.addr_of());
+                generate_instruction(generator, .push, .{dst.addr_of()});
                 bytes_pushed += 8;
             }
 
             const src = generate_expression(generator, null, Call.subexpression);
-            generate_instr1(generator, .call, src);
+            generate_instruction(generator, .call, .{src});
 
             if (bytes_pushed > 0) {
-                generate_instr1(generator, .pop, .{ .Imm = bytes_pushed });
+                generate_instruction(generator, .pop, .{IR.BigOperand{ .Imm = bytes_pushed }});
             }
 
             generator.next_local = old_next_local;
@@ -630,13 +615,13 @@ pub fn generate_expression(generator: *IRGenerator, has_dst: ?IRE.Operand, expre
             {
                 const index = generate_expression(generator, null, Subscript.index);
                 const offset = expression.typ.data.byte_size;
-                generate_instr3(generator, .umul, dst, index, .{ .Imm = offset });
+                generate_instruction(generator, .umul, .{ dst, index, IR.BigOperand{ .Imm = offset } });
             }
 
             if (Subscript.subexpression.typ.data.as != .Pointer) {
-                generate_instr3(generator, .uadd, dst, dst, subexpression.addr_of());
+                generate_instruction(generator, .uadd, .{ dst, dst, subexpression.addr_of() });
             } else {
-                generate_instr3(generator, .uadd, dst, dst, subexpression);
+                generate_instruction(generator, .uadd, .{ dst, dst, subexpression });
             }
 
             const src = dst.mem_from_tmp(0, expression.typ.data.byte_size);
@@ -668,7 +653,7 @@ pub fn generate_expression(generator: *IRGenerator, has_dst: ?IRE.Operand, expre
                             .Integer => |sInteger| {
                                 if (dInteger.bits > sInteger.bits and dInteger.is_signed and sInteger.is_signed) {
                                     const dst = fns.maybe_grab_local_from_type(&state, expression.typ.data);
-                                    generate_instr3(generator, .movsx, dst.*, src, .{ .Imm = sInteger.bits });
+                                    generate_instruction(generator, .movsx, .{ dst.*, src, IR.BigOperand{ .Imm = sInteger.bits } });
                                     break :src;
                                 } else {}
                             },
@@ -683,7 +668,7 @@ pub fn generate_expression(generator: *IRGenerator, has_dst: ?IRE.Operand, expre
                 .Bool => {
                     const src = generate_expression(generator, null, Cast.expression);
                     const dst = fns.maybe_grab_local_from_type(&state, expression.typ.data);
-                    generate_instr2(generator, .setnz, dst.*, src);
+                    generate_instruction(generator, .setnz, .{ dst.*, src });
                 },
                 .Void,
                 .Field,
@@ -733,10 +718,10 @@ pub fn generate_expression(generator: *IRGenerator, has_dst: ?IRE.Operand, expre
     return state.has_dst.?;
 }
 
-fn generate_jmpc(generator: *IRGenerator, expression: *Ast.Expression, label: IRE.Label, jump_if_true: bool) void {
-    var src0: IRE.Operand = undefined;
-    var src1: IRE.Operand = .{ .Imm = 0 };
-    var opcode: IRE.Opcode = .ujne;
+fn generate_jmpc(generator: *IRGenerator, expression: *Ast.Expression, label: IR.Label, jump_if_true: bool) void {
+    var src0: IR.BigOperand = undefined;
+    var src1: IR.BigOperand = .{ .Imm = 0 };
+    var opcode: IR.Opcode = .ujne;
     var is_signed = false;
 
     _ = fill: {
@@ -795,10 +780,10 @@ fn generate_jmpc(generator: *IRGenerator, expression: *Ast.Expression, label: IR
         opcode = opcode.to_signed();
     }
 
-    generate_instr3(generator, opcode, src0, src1, .{ .Label = label });
+    generate_instruction(generator, opcode, .{ src0, src1, IR.BigOperand{ .Label = label } });
 }
 
-fn generate_label(generator: *IRGenerator, label: IRE.Label) void {
+fn generate_label(generator: *IRGenerator, label: IR.Label) void {
     var labels = &generator.labels;
 
     var capacity = labels.capacity;
@@ -809,98 +794,51 @@ fn generate_label(generator: *IRGenerator, label: IRE.Label) void {
         };
     }
 
-    labels.items[label] = generator.ir.instrs.items.len;
+    labels.items[label] = generator.ir.instructions.items.len;
 }
 
-pub fn generate_instr0(generator: *IRGenerator, opcode: IRE.Opcode) void {
-    var params = IRE.Instr{
-        .opcode = opcode,
-        .ops = .{ undefined, undefined, undefined },
-        .ops_count = 0,
-    };
-    generate_instr(generator, &params);
+pub fn generate_instruction(generator: *IRGenerator, opcode: IR.Opcode, args: anytype) void {
+    generate_instruction_at(generator, generator.ir.instructions.items.len, opcode, args);
 }
 
-pub fn generate_instr1(generator: *IRGenerator, opcode: IRE.Opcode, op0: IRE.Operand) void {
-    var params = IRE.Instr{
-        .opcode = opcode,
-        .ops = .{ op0, undefined, undefined },
-        .ops_count = 1,
-    };
-    generate_instr(generator, &params);
-}
+pub fn generate_instruction_at(generator: *IRGenerator, index: usize, opcode: IR.Opcode, args: anytype) void {
+    const ArgsType = @TypeOf(args);
+    const args_type_info = @typeInfo(ArgsType);
 
-pub fn generate_instr2(generator: *IRGenerator, opcode: IRE.Opcode, op0: IRE.Operand, op1: IRE.Operand) void {
-    var params = IRE.Instr{
-        .opcode = opcode,
-        .ops = .{ op0, op1, undefined },
-        .ops_count = 2,
-    };
-    generate_instr(generator, &params);
-}
+    if (args_type_info != .Struct) {
+        @compileError("expected tuple or struct argument, found " ++ @typeName(ArgsType));
+    }
 
-pub fn generate_instr3(generator: *IRGenerator, opcode: IRE.Opcode, op0: IRE.Operand, op1: IRE.Operand, op2: IRE.Operand) void {
-    var params = IRE.Instr{
-        .opcode = opcode,
-        .ops = .{ op0, op1, op2 },
-        .ops_count = 3,
-    };
-    generate_instr(generator, &params);
-}
+    const fields_info = args_type_info.Struct.fields;
 
-pub fn generate_instr_at0(generator: *IRGenerator, index: usize, opcode: IRE.Opcode) void {
-    var params = IRE.Instr{
-        .opcode = opcode,
-        .ops = .{ undefined, undefined, undefined },
-        .ops_count = 0,
-    };
-    generate_instr_at(generator, index, &params);
-}
+    if (fields_info.len > IR.Instruction.maximum_operands_count) {
+        // TODO: convert 'maximum_operands_count' to string?
+        @compileError("instruction can't take more than 3 arguments");
+    }
 
-pub fn generate_instr_at1(generator: *IRGenerator, index: usize, opcode: IRE.Opcode, op0: IRE.Operand) void {
-    var params = IRE.Instr{
-        .opcode = opcode,
-        .ops = .{ op0, undefined, undefined },
-        .ops_count = 1,
-    };
-    generate_instr_at(generator, index, &params);
-}
+    var new_opcode = opcode;
+    var operands_count: u8 = fields_info.len;
+    var operands: [IR.Instruction.maximum_operands_count]IR.BigOperand = undefined;
 
-pub fn generate_instr2_at(generator: *IRGenerator, index: usize, opcode: IRE.Opcode, op0: IRE.Operand, op1: IRE.Operand) void {
-    var params = IRE.Instr{
-        .opcode = opcode,
-        .ops = .{ op0, op1, undefined },
-        .ops_count = 2,
-    };
-    generate_instr_at(generator, index, &params);
-}
+    inline for (fields_info, 0..) |field, i| {
+        if (field.type != IR.BigOperand) {
+            @compileError("operand must be of type " ++ @typeName(IR.BigOperand));
+        }
+        operands[i] = args[i];
+    }
 
-pub fn generate_instr_at3(generator: *IRGenerator, index: usize, opcode: IRE.Opcode, op0: IRE.Operand, op1: IRE.Operand, op2: IRE.Operand) void {
-    var params = IRE.Instr{
-        .opcode = opcode,
-        .ops = .{ op0, op1, op2 },
-        .ops_count = 3,
-    };
-    generate_instr_at(generator, index, &params);
-}
-
-fn generate_instr(generator: *IRGenerator, params: *IRE.Instr) void {
-    generate_instr_at(generator, generator.ir.instrs.items.len, params);
-}
-
-fn generate_instr_at(generator: *IRGenerator, index: usize, p: *IRE.Instr) void {
-    std.debug.assert(is_valid_instr: {
-        if (p.ops_count != p.opcode.operand_count()) {
-            break :is_valid_instr false;
+    std.debug.assert(is_valid_instruction: {
+        if (operands_count != new_opcode.operand_count()) {
+            break :is_valid_instruction false;
         }
 
-        switch (p.opcode) {
+        switch (new_opcode) {
             .exit,
             .printp,
             .printi,
             .printu,
             .printb,
-            => break :is_valid_instr true,
+            => break :is_valid_instruction true,
             .ue,
             .une,
             .ul,
@@ -923,10 +861,10 @@ fn generate_instr_at(generator: *IRGenerator, index: usize, p: *IRE.Instr) void 
             .imul,
             .idiv,
             .imod,
-            => break :is_valid_instr p.ops[0].is_lvalue(),
+            => break :is_valid_instruction operands[0].is_lvalue(),
             .neg,
             .not,
-            => break :is_valid_instr p.ops[0].is_lvalue(),
+            => break :is_valid_instruction operands[0].is_lvalue(),
             .jmp,
             .uje,
             .ujne,
@@ -940,93 +878,98 @@ fn generate_instr_at(generator: *IRGenerator, index: usize, p: *IRE.Instr) void 
             .ijle,
             .ijg,
             .ijge,
-            => break :is_valid_instr true,
+            => break :is_valid_instruction true,
             .setnz,
             .mov,
-            => break :is_valid_instr p.ops[0].is_lvalue(),
-            .mov_big => break :is_valid_instr p.ops[0].is_lvalue() and p.ops[1].is_lvalue(),
-            .movsx => break :is_valid_instr p.ops[0].is_lvalue(),
+            => break :is_valid_instruction operands[0].is_lvalue(),
+            .mov_big => break :is_valid_instruction operands[0].is_lvalue() and operands[1].is_lvalue(),
+            .movsx => break :is_valid_instruction operands[0].is_lvalue(),
             .call,
             .push,
             .pop,
-            => break :is_valid_instr true,
-            .push_big => break :is_valid_instr p.ops[0].is_lvalue(),
+            => break :is_valid_instruction true,
+            .push_big => break :is_valid_instruction operands[0].is_lvalue(),
             .start_proc,
             .end_proc,
-            => break :is_valid_instr true,
+            => break :is_valid_instruction true,
         }
     });
 
-    switch (p.opcode) {
+    switch (new_opcode) {
         .mov => {
-            const size = p.ops[0].grab_size();
+            const size = operands[0].grab_size();
             if (size > 8) {
-                std.debug.assert(p.ops[1].grab_size() == size);
-                p.opcode = .mov_big;
-                p.ops[0] = p.ops[0].addr_of();
-                p.ops[1] = p.ops[1].addr_of();
-                p.ops[2] = .{ .Imm = size };
-                p.ops_count = 3;
+                std.debug.assert(operands[1].grab_size() == size);
+                new_opcode = .mov_big;
+                operands[0] = operands[0].addr_of();
+                operands[1] = operands[1].addr_of();
+                operands[2] = .{ .Imm = size };
+                operands_count = 3;
             }
         },
         .push => {
-            const size = p.ops[0].grab_size_no_fail();
+            const size = operands[0].grab_size_no_fail();
             if (size > 8) {
-                p.opcode = .push_big;
-                p.ops[0] = p.ops[0].addr_of();
-                p.ops[1] = .{ .Imm = size };
-                p.ops_count = 2;
+                new_opcode = .push_big;
+                operands[0] = operands[0].addr_of();
+                operands[1] = .{ .Imm = size };
+                operands_count = 2;
             }
         },
         else => {},
     }
 
-    var instr = IRD.Instr{
-        .opcode = p.opcode,
-        .ops = undefined,
-        .ops_count = p.ops_count,
+    var instruction = IR.Instruction{
+        .opcode = new_opcode,
+        .operands = undefined,
+        .operands_count = operands_count,
     };
 
-    for (p.ops[0..p.ops_count], 0..) |op, i| {
-        instr.ops[i] = op.decode();
+    for (operands[0..operands_count], 0..) |op, i| {
+        instruction.operands[i] = op.to_operand();
     }
 
-    write_instr_at(generator, index, instr);
+    write_instruction_at(generator, index, instruction);
 }
 
-fn write_instr_at(generator: *IRGenerator, index: usize, instr: IRD.Instr) void {
-    var data = [1]u32{0} ** (1 + 6 * 2);
+fn write_instruction_at(generator: *IRGenerator, index: usize, instruction: IR.Instruction) void {
+    // opcode:         1 byte
+    // operands info:  3 bytes
+    // operands:      48 bytes = 3 * (8 + 8)
+    // total:         52 bytes
+    const DataUnit = u32;
+    var data = [1]DataUnit{0} ** ((1 + 3 + IR.Instruction.maximum_operands_count * (8 + 8)) / @sizeOf(DataUnit));
     var off: u5 = 0;
 
-    data[0] |= @as(u32, @intFromEnum(instr.opcode)) << off;
+    data[0] |= @as(DataUnit, @intFromEnum(instruction.opcode)) << off;
     off += 8;
 
     var at: u8 = 1;
-    for (instr.ops[0..instr.ops_count]) |op| {
-        data[0] |= @as(u32, @intFromEnum(op)) << off;
-        off += @bitSizeOf(IRD.Operand.Tag);
+    for (instruction.operands[0..instruction.operands_count]) |op| {
+        data[0] |= @as(DataUnit, @intFromEnum(op)) << off;
+        off += @bitSizeOf(IR.Operand.Tag);
 
         switch (op) {
             .Tmp => |tmp| {
-                const ptr: [*]const u32 = @ptrCast(&tmp);
+                const ptr: [*]const DataUnit = @ptrCast(&tmp);
                 data[at + 0] = ptr[0];
                 data[at + 1] = ptr[1];
                 at += 2;
             },
             .Mem_B => |mem| {
-                data[0] |= @as(u32, mem.size_minus_one) << off;
+                data[0] |= @as(DataUnit, mem.size_minus_one) << off;
                 off += 3;
 
-                const ptr: [*]const u32 = @ptrCast(&mem);
+                const ptr: [*]const DataUnit = @ptrCast(&mem);
                 data[at + 0] = ptr[0];
                 data[at + 1] = ptr[1];
                 at += 2;
             },
             .Mem_BO => |mem| {
-                data[0] |= @as(u32, mem.size_minus_one) << off;
+                data[0] |= @as(DataUnit, mem.size_minus_one) << off;
                 off += 3;
 
-                const ptr: [*]const u32 = @ptrCast(&mem);
+                const ptr: [*]const DataUnit = @ptrCast(&mem);
                 data[at + 0] = ptr[0];
                 data[at + 1] = ptr[1];
                 data[at + 2] = ptr[2];
@@ -1034,13 +977,13 @@ fn write_instr_at(generator: *IRGenerator, index: usize, instr: IRD.Instr) void 
                 at += 4;
             },
             .Addr_T => |tmp| {
-                const ptr: [*]const u32 = @ptrCast(&tmp);
+                const ptr: [*]const DataUnit = @ptrCast(&tmp);
                 data[at + 0] = ptr[0];
                 data[at + 1] = ptr[1];
                 at += 2;
             },
             .Addr_BO => |mem| {
-                const ptr: [*]const u32 = @ptrCast(&mem);
+                const ptr: [*]const DataUnit = @ptrCast(&mem);
                 data[at + 0] = ptr[0];
                 data[at + 1] = ptr[1];
                 data[at + 2] = ptr[2];
@@ -1048,13 +991,13 @@ fn write_instr_at(generator: *IRGenerator, index: usize, instr: IRD.Instr) void 
                 at += 4;
             },
             .Imm => |imm| {
-                const ptr: [*]const u32 = @ptrCast(&imm);
+                const ptr: [*]const DataUnit = @ptrCast(&imm);
                 data[at + 0] = ptr[0];
                 data[at + 1] = ptr[1];
                 at += 2;
             },
             .Label => |label| {
-                const ptr: [*]const u32 = @ptrCast(&label);
+                const ptr: [*]const DataUnit = @ptrCast(&label);
                 data[at + 0] = ptr[0];
                 data[at + 1] = ptr[1];
                 at += 2;
@@ -1065,25 +1008,24 @@ fn write_instr_at(generator: *IRGenerator, index: usize, instr: IRD.Instr) void 
     {
         var bytes: []const u8 = undefined;
         bytes.ptr = @ptrCast(&data[0]);
-        bytes.len = at * 4;
-        write_instr_bytes_at(generator, index, bytes);
+        bytes.len = at * @sizeOf(DataUnit);
+
+        var instructions = &generator.ir.instructions;
+
+        if (index == instructions.items.len) {
+            instructions.insertSlice(index, bytes) catch {
+                exit(1);
+            };
+        } else {
+            std.debug.assert(index + bytes.len <= generator.ir.instructions.items.len);
+            instructions.replaceRange(index, bytes.len, bytes) catch {
+                exit(1);
+            };
+        }
     }
 }
 
-fn write_instr_bytes_at(generator: *IRGenerator, index: usize, bytes: []const u8) void {
-    if (index == generator.ir.instrs.items.len) {
-        generator.ir.instrs.insertSlice(index, bytes) catch {
-            exit(1);
-        };
-    } else {
-        std.debug.assert(index + bytes.len <= generator.ir.instrs.items.len);
-        generator.ir.instrs.replaceRange(index, bytes.len, bytes) catch {
-            exit(1);
-        };
-    }
-}
-
-fn deref(generator: *IRGenerator, src: IRE.Operand, offset: u64, size: u64) IRE.Operand {
+fn deref(generator: *IRGenerator, src: IR.BigOperand, offset: u64, size: u64) IR.BigOperand {
     switch (src) {
         .Tmp => {
             return src.mem_from_tmp(offset, size);
@@ -1091,7 +1033,7 @@ fn deref(generator: *IRGenerator, src: IRE.Operand, offset: u64, size: u64) IRE.
         .Mem => |mem| {
             std.debug.assert(mem.size <= 8);
             const dst = grab_local(generator, mem.size, .Qword);
-            generate_instr2(generator, .mov, dst, src);
+            generate_instruction(generator, .mov, .{ dst, src });
 
             return dst.mem_from_tmp(offset, size);
         },
@@ -1119,13 +1061,13 @@ fn deref(generator: *IRGenerator, src: IRE.Operand, offset: u64, size: u64) IRE.
         .Label => {
             // Since labels are not yet resolved (we don't know absolute offset), we can't perform operations on it during IR generation.
             const dst = grab_local(generator, 8, .Qword);
-            generate_instr3(generator, .uadd, dst, src, .{ .Imm = offset });
+            generate_instruction(generator, .uadd, .{ dst, src, IR.BigOperand{ .Imm = offset } });
             return dst.mem_from_tmp(offset, size);
         },
     }
 }
 
-pub fn grab_local(generator: *IRGenerator, byte_size: u64, alignment: Alignment) IRE.Operand {
+pub fn grab_local(generator: *IRGenerator, byte_size: u64, alignment: Alignment) IR.BigOperand {
     const offset = nostd.align_up(@intCast(generator.next_local), alignment);
     generator.next_local = @intCast(offset + byte_size);
     generator.biggest_next_local = @max(generator.biggest_next_local, generator.next_local);
@@ -1136,11 +1078,11 @@ pub fn grab_local(generator: *IRGenerator, byte_size: u64, alignment: Alignment)
     } };
 }
 
-pub fn grab_local_from_type(generator: *IRGenerator, data: *Ast.Type.SharedData) IRE.Operand {
+pub fn grab_local_from_type(generator: *IRGenerator, data: *Ast.Type.SharedData) IR.BigOperand {
     return grab_local(generator, data.byte_size, data.alignment);
 }
 
-pub fn grab_global(generator: *IRGenerator, byte_size: u64, alignment: Alignment) IRE.Operand {
+pub fn grab_global(generator: *IRGenerator, byte_size: u64, alignment: Alignment) IR.BigOperand {
     std.debug.assert(generator.next_global == generator.ir.globals.items.len);
 
     const old_offset = generator.next_global;
@@ -1158,21 +1100,21 @@ pub fn grab_global(generator: *IRGenerator, byte_size: u64, alignment: Alignment
     } };
 }
 
-pub fn grab_global_from_type(generator: *IRGenerator, data: *Ast.Type.SharedData) IRE.Operand {
+pub fn grab_global_from_type(generator: *IRGenerator, data: *Ast.Type.SharedData) IR.BigOperand {
     return grab_global(generator, data.byte_size, data.alignment);
 }
 
-pub fn grab_label(generator: *IRGenerator) IRE.Label {
+pub fn grab_label(generator: *IRGenerator) IR.Label {
     return grab_many_labels(generator, 1);
 }
 
-pub fn grab_many_labels(generator: *IRGenerator, count: usize) IRE.Label {
+pub fn grab_many_labels(generator: *IRGenerator, count: usize) IR.Label {
     const label = generator.next_label;
     generator.next_label += count;
     return label;
 }
 
-pub fn grab_static_variable_storage(generator: *IRGenerator, variable: *Ast.Symbol.Variable) IR.Encoded.Operand {
+pub fn grab_static_variable_storage(generator: *IRGenerator, variable: *Ast.Symbol.Variable) IR.BigOperand {
     if (variable.storage) |storage| {
         return storage;
     } else {
@@ -1204,8 +1146,6 @@ const Ast = @import("Ast.zig");
 const IR = @import("IR.zig");
 const Interpreter = @import("Interpreter.zig");
 
-const IRE = IR.Encoded;
-const IRD = IR.Decoded;
 const Alignment = nostd.Alignment;
 
 pub const LabelMap = std.ArrayList(u64);
