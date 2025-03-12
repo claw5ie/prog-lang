@@ -353,7 +353,9 @@ fn check_type(t: *TypeChecker, typ: *Ast.Type) void {
     const data = typ.data;
     switch (data.stages.full_check) {
         .None => data.stages.full_check = .Going,
-        .Going, .Done => return,
+        .Going,
+        .Done,
+        => return,
     }
     defer data.stages.full_check = .Done;
 
@@ -546,7 +548,12 @@ fn check_statement(t: *TypeChecker, statement: *Ast.Statement) void {
         .Print => |expression| {
             const expression_type = check_expression_only(t, expression);
             switch (expression_type.data.as) {
-                .Struct, .Union, .Proc, .Array, .Void => {
+                .Struct,
+                .Union,
+                .Proc,
+                .Array,
+                .Void,
+                => {
                     t.c.report_fatal_error(expression.position, "can't print value of type '{}'", .{expression.typ});
                 },
                 .Enum,
@@ -554,7 +561,10 @@ fn check_statement(t: *TypeChecker, statement: *Ast.Statement) void {
                 .Integer,
                 .Bool,
                 => {},
-                .Field, .Identifier, .Type_Of => unreachable,
+                .Field,
+                .Identifier,
+                .Type_Of,
+                => unreachable,
             }
         },
         .Block => |block| {
@@ -725,7 +735,9 @@ pub fn check_expression_symbol(t: *TypeChecker, expression: *Ast.Expression, sym
         .Type => |Type| {
             return .{ .typ = Type, .tag = .Type };
         },
-        .Struct_Field, .Union_Field => |Field| {
+        .Struct_Field,
+        .Union_Field,
+        => |Field| {
             return .{ .typ = Field.typ, .tag = .Non_Value };
         },
         .Enum_Field => {
@@ -979,7 +991,9 @@ fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpre
 
                     check_type(t, typ);
                     switch (typ.data.as) {
-                        .Struct, .Union => |Struct| {
+                        .Struct,
+                        .Union,
+                        => |Struct| {
                             is_const = true;
 
                             var it = Call.args.first;
@@ -989,7 +1003,9 @@ fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpre
                                         const symbol = resolve_identifier(t, Designator.lhs, Struct.scope);
 
                                         switch (symbol.as) {
-                                            .Struct_Field, .Union_Field => |Field| {
+                                            .Struct_Field,
+                                            .Union_Field,
+                                            => |Field| {
                                                 const rhs_type = check_expression_only(t, Designator.rhs);
                                                 if (!safe_cast(t, Designator.rhs, Field.typ)) {
                                                     t.c.report_fatal_error(Designator.rhs.position, "expected '{}', but got '{}'", .{ Field.typ, rhs_type });
@@ -1227,9 +1243,13 @@ fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpre
                     expression.flags.is_static = Field.subexpression.flags.is_static;
 
                     const scope: *Ast.Scope = switch (subexpression_result.typ.data.as) {
-                        .Struct, .Union => |Struct| Struct.scope,
+                        .Struct,
+                        .Union,
+                        => |Struct| Struct.scope,
                         .Pointer => |subtype| switch (subtype.data.as) {
-                            .Struct, .Union => |Struct| Struct.scope,
+                            .Struct,
+                            .Union,
+                            => |Struct| Struct.scope,
                             else => {
                                 t.c.report_fatal_error(Field.subexpression.position, "expected pointer to struct/union, but got '{}'", .{subexpression_result.typ});
                             },
@@ -1242,7 +1262,9 @@ fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpre
                     const symbol = resolve_identifier(t, Field.field, scope);
 
                     switch (symbol.as) {
-                        .Struct_Field, .Union_Field => |Struct_Field| {
+                        .Struct_Field,
+                        .Union_Field,
+                        => |Struct_Field| {
                             break :result .{ .typ = Struct_Field.typ, .tag = .Value };
                         },
                         else => unreachable,

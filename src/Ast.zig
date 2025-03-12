@@ -245,7 +245,10 @@ pub const Type = struct {
             .Void => try writer.writeAll("void"),
             .Bool => try writer.writeAll("bool"),
             .Integer => |Int| try writer.print("{c}{}", .{ @as(u8, if (Int.is_signed) 'i' else 'u'), Int.bits }),
-            .Field, .Identifier, .Type_Of => unreachable,
+            .Field,
+            .Identifier,
+            .Type_Of,
+            => unreachable,
         }
     }
 
@@ -341,7 +344,10 @@ pub const Type = struct {
         }
 
         switch (self.data.as) {
-            .Struct, .Union, .Enum => return false,
+            .Struct,
+            .Union,
+            .Enum,
+            => return false,
             .Proc => |sProc| {
                 if (other.data.as != .Proc) {
                     return false;
@@ -403,7 +409,10 @@ pub const Type = struct {
             .Void => {
                 return other.data.as == .Void;
             },
-            .Field, .Identifier, .Type_Of => unreachable,
+            .Field,
+            .Identifier,
+            .Type_Of,
+            => unreachable,
         }
     }
 
