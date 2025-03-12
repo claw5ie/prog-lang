@@ -53,13 +53,11 @@ fn check_top_level(t: *TypeChecker) void {
                 }
             },
             else => {
-                t.c.report_error(main.position, "'main' isn't a procedure", .{});
-                exit(1);
+                t.c.report_fatal_error(main.position, "'main' isn't a procedure", .{});
             },
         }
     } else {
-        t.c.report_error(.{ .line = 1, .column = 1, .offset = 0 }, "'main' isn't defined", .{});
-        exit(1);
+        t.c.report_fatal_error(.{ .line = 1, .column = 1, .offset = 0 }, "'main' isn't defined", .{});
     }
 
     if (t.c.had_error) {
@@ -115,8 +113,7 @@ fn check_symbol_type(t: *TypeChecker, symbol: *Ast.Symbol) void {
             check_type(t, Parameter.typ);
             reject_void_type(t, Parameter.typ);
             if (Parameter.value) |value| {
-                t.c.report_error(value.position, "default values are not supported", .{});
-                exit(1);
+                t.c.report_fatal_error(value.position, "default values are not supported", .{});
             }
         },
         .Procedure => |Procedure| {
@@ -126,16 +123,14 @@ fn check_symbol_type(t: *TypeChecker, symbol: *Ast.Symbol) void {
             check_type(t, Field.typ);
             reject_void_type(t, Field.typ);
             if (Field.value) |value| {
-                t.c.report_error(value.position, "default values are not supported", .{});
-                exit(1);
+                t.c.report_fatal_error(value.position, "default values are not supported", .{});
             }
         },
         .Union_Field => |Field| {
             check_type(t, Field.typ);
             reject_void_type(t, Field.typ);
             if (Field.value) |value| {
-                t.c.report_error(value.position, "default values are not supported", .{});
-                exit(1);
+                t.c.report_fatal_error(value.position, "default values are not supported", .{});
             }
         },
         .Enum_Field => {},
@@ -149,8 +144,7 @@ fn check_symbol(t: *TypeChecker, symbol: *Ast.Symbol) void {
     switch (symbol.typechecking) {
         .None => symbol.typechecking = .Going,
         .Going => {
-            t.c.report_error(symbol.position, "found cyclic reference", .{});
-            exit(1);
+            t.c.report_fatal_error(symbol.position, "found cyclic reference", .{});
         },
         .Done => return,
     }
@@ -170,8 +164,7 @@ fn check_symbol(t: *TypeChecker, symbol: *Ast.Symbol) void {
                     const storage = _t.generator.grab_static_variable_storage(Variable);
                     compute_expression_to_operand(_t, storage, value);
                 } else {
-                    _t.c.report_error(value.position, "expression is not a constant", .{});
-                    exit(1);
+                    _t.c.report_fatal_error(value.position, "expression is not a constant", .{});
                 }
             }
         }
@@ -192,8 +185,7 @@ fn check_symbol(t: *TypeChecker, symbol: *Ast.Symbol) void {
 
                     fns.compute_variable_initializer(t, symbol);
                 } else if (Variable.attributes.is_const) {
-                    t.c.report_error(symbol.position, "constant expression needs initializer", .{});
-                    exit(1);
+                    t.c.report_fatal_error(symbol.position, "constant expression needs initializer", .{});
                 }
             } else if (Variable.value) |value| {
                 const value_type = check_expression_only(t, value);
@@ -234,8 +226,7 @@ fn unpack(t: *TypeChecker, typ: *Ast.Type) void {
     switch (old_data.stages.unpacking) {
         .None => old_data.stages.unpacking = .Going,
         .Going => {
-            t.c.report_error(typ.position, "found cyclic reference", .{});
-            exit(1);
+            t.c.report_fatal_error(typ.position, "found cyclic reference", .{});
         },
         .Done => return,
     }
@@ -244,8 +235,7 @@ fn unpack(t: *TypeChecker, typ: *Ast.Type) void {
     const fns = struct {
         pub fn unpack_symbol(_t: *TypeChecker, _typ: *Ast.Type, symbol: *Ast.Symbol) void {
             if (symbol.as != .Type) {
-                _t.c.report_error(_typ.position, "symbol '{s}' is not a type", .{symbol.key.name});
-                exit(1);
+                _t.c.report_fatal_error(_typ.position, "symbol '{s}' is not a type", .{symbol.key.name});
             }
 
             const new_typ = symbol.as.Type;
@@ -272,8 +262,7 @@ fn unpack(t: *TypeChecker, typ: *Ast.Type) void {
                 .Bool,
                 .Void,
                 => {
-                    t.c.report_error(Field.subtype.position, "expected struct, union, or enum type, but got '{}'", .{Field.subtype});
-                    exit(1);
+                    t.c.report_fatal_error(Field.subtype.position, "expected struct, union, or enum type, but got '{}'", .{Field.subtype});
                 },
                 .Field,
                 .Identifier,
@@ -297,8 +286,7 @@ fn unpack(t: *TypeChecker, typ: *Ast.Type) void {
             if (has_symbol) |symbol| {
                 fns.unpack_symbol(t, typ, symbol);
             } else {
-                t.c.report_error(typ.position, "symbol '{s}' is not defined", .{Identifier.name});
-                exit(1);
+                t.c.report_fatal_error(typ.position, "symbol '{s}' is not defined", .{Identifier.name});
             }
         },
         .Type_Of => |expression| {
@@ -326,8 +314,7 @@ fn shallow_check(t: *TypeChecker, typ: *Ast.Type) void {
     switch (data.stages.shallow_check) {
         .None => data.stages.shallow_check = .Going,
         .Going => {
-            t.c.report_error(typ.position, "found cyclic reference", .{});
-            exit(1);
+            t.c.report_fatal_error(typ.position, "found cyclic reference", .{});
         },
         .Done => return,
     }
@@ -450,8 +437,7 @@ fn check_type(t: *TypeChecker, typ: *Ast.Type) void {
                     if (enum_field.value) |value| {
                         const value_type = check_expression_only(t, value);
                         if (!safe_cast_to_integer(t, value, .Any)) {
-                            t.c.report_error(value.position, "expected integer, but got '{}'\n", .{value_type});
-                            exit(1);
+                            t.c.report_fatal_error(value.position, "expected integer, but got '{}'\n", .{value_type});
                         }
                         is_signed = is_signed or value.typ.is_signed();
                         enum_field.computed_value = compute_simple_expression(t, value);
@@ -481,8 +467,7 @@ fn check_type(t: *TypeChecker, typ: *Ast.Type) void {
 
             const bits = nostd.highest_bit_count(max_value) + @intFromBool(is_signed);
             if (bits > 64) {
-                t.c.report_error(typ.position, "enum can't be represented in <= 64 bits", .{});
-                exit(1);
+                t.c.report_fatal_error(typ.position, "enum can't be represented in <= 64 bits", .{});
             }
             const integer_type = t.ast.lookup_integer_type(.{ .bits = bits, .is_signed = is_signed });
 
@@ -521,8 +506,7 @@ fn check_type(t: *TypeChecker, typ: *Ast.Type) void {
 
             const size_type = check_expression_only(t, Array.size);
             if (!safe_cast_to_integer(t, Array.size, .Unsigned)) {
-                t.c.report_error(typ.position, "expected unsigned integer, but got '{}'", .{size_type});
-                exit(1);
+                t.c.report_fatal_error(typ.position, "expected unsigned integer, but got '{}'", .{size_type});
             }
 
             const count = compute_simple_expression(t, Array.size);
@@ -567,8 +551,7 @@ fn check_statement(t: *TypeChecker, statement: *Ast.Statement) void {
             const expression_type = check_expression_only(t, expression);
             switch (expression_type.data.as) {
                 .Struct, .Union, .Proc, .Array, .Void => {
-                    t.c.report_error(expression.position, "can't print value of type '{}'", .{expression.typ});
-                    exit(1);
+                    t.c.report_fatal_error(expression.position, "can't print value of type '{}'", .{expression.typ});
                 },
                 .Enum,
                 .Pointer,
@@ -584,8 +567,7 @@ fn check_statement(t: *TypeChecker, statement: *Ast.Statement) void {
         .If => |If| {
             const condition_type = check_expression_only(t, If.condition);
             if (!safe_cast(t, If.condition, Ast.bool_type)) {
-                t.c.report_error(If.condition.position, "expected 'bool', but got '{}'", .{condition_type});
-                exit(1);
+                t.c.report_fatal_error(If.condition.position, "expected 'bool', but got '{}'", .{condition_type});
             }
 
             reject_symbol(t, If.true_branch);
@@ -599,8 +581,7 @@ fn check_statement(t: *TypeChecker, statement: *Ast.Statement) void {
         .While, .Do_While => |While| {
             const condition_type = check_expression_only(t, While.condition);
             if (!safe_cast(t, While.condition, Ast.bool_type)) {
-                t.c.report_error(While.condition.position, "expected 'bool', but got '{}'", .{condition_type});
-                exit(1);
+                t.c.report_fatal_error(While.condition.position, "expected 'bool', but got '{}'", .{condition_type});
             }
 
             const old_is_in_loop = t.is_in_loop;
@@ -612,14 +593,12 @@ fn check_statement(t: *TypeChecker, statement: *Ast.Statement) void {
         },
         .Break => {
             if (!t.is_in_loop) {
-                t.c.report_error(statement.position, "'break' outside of loop", .{});
-                exit(1);
+                t.c.report_fatal_error(statement.position, "'break' outside of loop", .{});
             }
         },
         .Continue => {
             if (!t.is_in_loop) {
-                t.c.report_error(statement.position, "'continue' outside of loop", .{});
-                exit(1);
+                t.c.report_fatal_error(statement.position, "'continue' outside of loop", .{});
             }
         },
         .Switch => |Switch| {
@@ -627,8 +606,7 @@ fn check_statement(t: *TypeChecker, statement: *Ast.Statement) void {
             const is_comparable = condition_type.compare().is_comparable;
 
             if (!is_comparable) {
-                t.c.report_error(Switch.condition.position, "value of type '{}' isn't comparable", .{condition_type});
-                exit(1);
+                t.c.report_fatal_error(Switch.condition.position, "value of type '{}' isn't comparable", .{condition_type});
             }
 
             var it = Switch.cases.first;
@@ -669,8 +647,7 @@ fn check_statement(t: *TypeChecker, statement: *Ast.Statement) void {
 
             if (has_expression) |expression| {
                 if (return_type.equal(Ast.void_type)) {
-                    t.c.report_error(expression.position, "unexpected expression here", .{});
-                    exit(1);
+                    t.c.report_fatal_error(expression.position, "unexpected expression here", .{});
                 } else {
                     const expression_type = check_expression_only(t, expression);
 
@@ -682,8 +659,7 @@ fn check_statement(t: *TypeChecker, statement: *Ast.Statement) void {
                     }
                 }
             } else if (!return_type.equal(Ast.void_type)) {
-                t.c.report_error(statement.position, "expected expression of type '{}'", .{return_type});
-                exit(1);
+                t.c.report_fatal_error(statement.position, "expected expression of type '{}'", .{return_type});
             }
         },
         .Symbol => |symbol| {
@@ -693,18 +669,15 @@ fn check_statement(t: *TypeChecker, statement: *Ast.Statement) void {
             const lhs_type = check_expression_only(t, Assign.lhs);
 
             if (!Assign.lhs.flags.is_lvalue) {
-                t.c.report_error(Assign.lhs.position, "expression is not an lvalue", .{});
-                exit(1);
+                t.c.report_fatal_error(Assign.lhs.position, "expression is not an lvalue", .{});
             } else if (Assign.lhs.flags.is_const) {
-                t.c.report_error(Assign.lhs.position, "can't assign to constant expression", .{});
-                exit(1);
+                t.c.report_fatal_error(Assign.lhs.position, "can't assign to constant expression", .{});
             }
 
             const rhs_type = check_expression_only(t, Assign.rhs);
 
             if (!safe_cast(t, Assign.rhs, lhs_type)) {
-                t.c.report_error(statement.position, "expected '{}', but got '{}'", .{ lhs_type, rhs_type });
-                exit(1);
+                t.c.report_fatal_error(statement.position, "expected '{}', but got '{}'", .{ lhs_type, rhs_type });
             }
         },
         .Expression => |expression| {
@@ -716,8 +689,7 @@ fn check_statement(t: *TypeChecker, statement: *Ast.Statement) void {
 fn check_expression_only(t: *TypeChecker, expression: *Ast.Expression) *Ast.Type {
     const result = check_expression(t, expression);
     if (result.tag != .Value) {
-        t.c.report_error(expression.position, "expected expression", .{});
-        exit(1);
+        t.c.report_fatal_error(expression.position, "expected expression", .{});
     }
     return result.typ;
 }
@@ -856,8 +828,7 @@ fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpre
                     },
                     .Add => {
                         if (lhs_flags.is_void_pointer or rhs_flags.is_void_pointer) {
-                            t.c.report_error(Binary_Op.position, "can't add 'void' pointers", .{});
-                            exit(1);
+                            t.c.report_fatal_error(Binary_Op.position, "can't add 'void' pointers", .{});
                         } else if (lhs_flags.is_pointer and safe_cast_to_integer(t, Binary_Op.rhs, .Unsigned)) {
                             Binary_Op.rhs = make_expression_pointer_mul_integer(t, Binary_Op.rhs, lhs_type.data.as.Pointer.data);
                             break :result .{ .typ = lhs_type, .tag = .Value };
@@ -866,23 +837,20 @@ fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpre
                             break :result .{ .typ = rhs_type, .tag = .Value };
                         } else {
                             if (!safe_cast_to_two_compatible_integers(t, Binary_Op.lhs, Binary_Op.rhs)) {
-                                t.c.report_error(Binary_Op.position, "expected integer/pointer: '{}' and '{}'", .{ lhs_type, rhs_type });
-                                exit(1);
+                                t.c.report_fatal_error(Binary_Op.position, "expected integer/pointer: '{}' and '{}'", .{ lhs_type, rhs_type });
                             }
                             break :result .{ .typ = Binary_Op.lhs.typ, .tag = .Value };
                         }
                     },
                     .Sub => {
                         if (lhs_flags.is_void_pointer) {
-                            t.c.report_error(Binary_Op.position, "can't subtract 'void' pointer", .{});
-                            exit(1);
+                            t.c.report_fatal_error(Binary_Op.position, "can't subtract 'void' pointer", .{});
                         } else if (lhs_flags.is_pointer and safe_cast_to_integer(t, Binary_Op.rhs, .Unsigned)) {
                             Binary_Op.rhs = make_expression_pointer_mul_integer(t, Binary_Op.rhs, lhs_type.data.as.Pointer.data);
                             break :result .{ .typ = lhs_type, .tag = .Value };
                         } else {
                             if (!safe_cast_to_two_compatible_integers(t, Binary_Op.lhs, Binary_Op.rhs)) {
-                                t.c.report_error(Binary_Op.position, "expected integer/pointer: '{}' and '{}'", .{ lhs_type, rhs_type });
-                                exit(1);
+                                t.c.report_fatal_error(Binary_Op.position, "expected integer/pointer: '{}' and '{}'", .{ lhs_type, rhs_type });
                             }
                             break :result .{ .typ = Binary_Op.lhs.typ, .tag = .Value };
                         }
@@ -892,8 +860,7 @@ fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpre
                     .Mod,
                     => {
                         if (!safe_cast_to_two_compatible_integers(t, Binary_Op.lhs, Binary_Op.rhs)) {
-                            t.c.report_error(Binary_Op.position, "expected integer/pointer: '{}' and '{}'", .{ lhs_type, rhs_type });
-                            exit(1);
+                            t.c.report_fatal_error(Binary_Op.position, "expected integer/pointer: '{}' and '{}'", .{ lhs_type, rhs_type });
                         }
                         break :result .{ .typ = Binary_Op.lhs.typ, .tag = .Value };
                     },
@@ -907,15 +874,13 @@ fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpre
                 switch (Unary_Op.tag) {
                     .Pos => {
                         if (!safe_cast_to_integer(t, Unary_Op.subexpression, .Any)) {
-                            t.c.report_error(Unary_Op.subexpression.position, "expected integer, but got '{}'", .{subexpression_type});
-                            exit(1);
+                            t.c.report_fatal_error(Unary_Op.subexpression.position, "expected integer, but got '{}'", .{subexpression_type});
                         }
                         break :result .{ .typ = Unary_Op.subexpression.typ, .tag = .Value };
                     },
                     .Neg => {
                         if (!safe_cast_to_integer(t, Unary_Op.subexpression, .Signed)) {
-                            t.c.report_error(Unary_Op.subexpression.position, "expected integer, but got '{}'", .{subexpression_type});
-                            exit(1);
+                            t.c.report_fatal_error(Unary_Op.subexpression.position, "expected integer, but got '{}'", .{subexpression_type});
                         }
                         break :result .{ .typ = Unary_Op.subexpression.typ, .tag = .Value };
                     },
@@ -932,11 +897,9 @@ fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpre
                 const subexpression_type = check_expression_only(t, subexpression);
 
                 if (!subexpression.flags.is_lvalue) {
-                    t.c.report_error(subexpression.position, "expression is not an lvalue", .{});
-                    exit(1);
+                    t.c.report_fatal_error(subexpression.position, "expression is not an lvalue", .{});
                 } else if (subexpression.flags.is_const) {
-                    t.c.report_error(subexpression.position, "can't take raferences to constant expression", .{});
-                    exit(1);
+                    t.c.report_fatal_error(subexpression.position, "can't take raferences to constant expression", .{});
                 }
 
                 const data = t.ast.create(Ast.Type.SharedData);
@@ -983,8 +946,7 @@ fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpre
                     const can_be_dereferenced = subexpression_type.compare().can_be_dereferenced;
 
                     if (!can_be_dereferenced) {
-                        t.c.report_error(subexpression.position, "can't dereference expression of type '{}'", .{subexpression_type});
-                        exit(1);
+                        t.c.report_fatal_error(subexpression.position, "can't dereference expression of type '{}'", .{subexpression_type});
                     }
 
                     expression.flags.is_lvalue = true;
@@ -997,16 +959,14 @@ fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpre
                 const condition_type = check_expression_only(t, If.condition);
 
                 if (!safe_cast(t, If.condition, Ast.bool_type)) {
-                    t.c.report_error(If.condition.position, "expected 'bool', but got '{}'", .{condition_type});
-                    exit(1);
+                    t.c.report_fatal_error(If.condition.position, "expected 'bool', but got '{}'", .{condition_type});
                 }
 
                 const true_branch_type = check_expression_only(t, If.true_branch);
                 const false_branch_type = check_expression_only(t, If.false_branch);
 
                 if (!ranked_safe_cast(t, If.true_branch, If.false_branch)) {
-                    t.c.report_error(If.condition.position, "mismatched types: '{}' and '{}'", .{ true_branch_type, false_branch_type });
-                    exit(1);
+                    t.c.report_fatal_error(If.condition.position, "mismatched types: '{}' and '{}'", .{ true_branch_type, false_branch_type });
                 }
 
                 expression.flags.is_const = If.condition.flags.is_const and
@@ -1038,20 +998,17 @@ fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpre
                                             .Struct_Field, .Union_Field => |Field| {
                                                 const rhs_type = check_expression_only(t, Designator.rhs);
                                                 if (!safe_cast(t, Designator.rhs, Field.typ)) {
-                                                    t.c.report_error(Designator.rhs.position, "expected '{}', but got '{}'", .{ Field.typ, rhs_type });
-                                                    exit(1);
+                                                    t.c.report_fatal_error(Designator.rhs.position, "expected '{}', but got '{}'", .{ Field.typ, rhs_type });
                                                 }
                                                 is_const = is_const and Designator.rhs.flags.is_const;
                                             },
                                             else => {
-                                                t.c.report_error(typ.position, "expected a structure or union field", .{});
-                                                exit(1);
+                                                t.c.report_fatal_error(typ.position, "expected a structure or union field", .{});
                                             },
                                         }
                                     },
                                     .Expression => |subexpression| {
-                                        t.c.report_error(subexpression.position, "unexpected expression", .{});
-                                        exit(1);
+                                        t.c.report_fatal_error(subexpression.position, "unexpected expression", .{});
                                     },
                                 }
 
@@ -1060,8 +1017,7 @@ fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpre
                         },
                         .Array => |Array| {
                             if (Array.computed_size != Call.args.len) {
-                                t.c.report_error(expression.position, "expected {} values, but got {}", .{ Array.computed_size, Call.args.len });
-                                exit(1);
+                                t.c.report_fatal_error(expression.position, "expected {} values, but got {}", .{ Array.computed_size, Call.args.len });
                             }
 
                             is_const = true;
@@ -1070,14 +1026,12 @@ fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpre
                             while (it) |node| {
                                 switch (node.data.*) {
                                     .Designator => |Designator| {
-                                        t.c.report_error(Designator.lhs.position, "unexpected designator", .{});
-                                        exit(1);
+                                        t.c.report_fatal_error(Designator.lhs.position, "unexpected designator", .{});
                                     },
                                     .Expression => |arg| {
                                         const arg_type = check_expression_only(t, arg);
                                         if (!safe_cast(t, arg, Array.subtype)) {
-                                            t.c.report_error(arg.position, "expected '{}', but got '{}'", .{ Array.subtype, arg_type });
-                                            exit(1);
+                                            t.c.report_fatal_error(arg.position, "expected '{}', but got '{}'", .{ Array.subtype, arg_type });
                                         }
                                         is_const = is_const and arg.flags.is_const;
                                     },
@@ -1093,21 +1047,18 @@ fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpre
                         .Bool,
                         => {
                             if (Call.args.len != 1) {
-                                t.c.report_error(expression.position, "expected 1 argument for scalar type, but got {}", .{Call.args.len});
-                                exit(1);
+                                t.c.report_fatal_error(expression.position, "expected 1 argument for scalar type, but got {}", .{Call.args.len});
                             }
 
                             switch (Call.args.first.?.data.*) {
                                 .Designator => |Designator| {
-                                    t.c.report_error(Designator.lhs.position, "unexpected designator", .{});
-                                    exit(1);
+                                    t.c.report_fatal_error(Designator.lhs.position, "unexpected designator", .{});
                                 },
                                 .Expression => |arg| {
                                     const arg_type = check_expression_only(t, arg);
 
                                     if (!safe_cast(t, arg, typ)) {
-                                        t.c.report_error(expression.position, "expected '{}', but got '{}'", .{ typ, arg_type });
-                                        exit(1);
+                                        t.c.report_fatal_error(expression.position, "expected '{}', but got '{}'", .{ typ, arg_type });
                                     }
 
                                     is_const = arg.flags.is_const;
@@ -1115,8 +1066,7 @@ fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpre
                             }
                         },
                         .Void => {
-                            t.c.report_error(expression.position, "can't construct expression of type 'void'", .{});
-                            exit(1);
+                            t.c.report_fatal_error(expression.position, "can't construct expression of type 'void'", .{});
                         },
                         .Field,
                         .Identifier,
@@ -1136,15 +1086,13 @@ fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpre
                     const subexpression_type = subexpression_result.typ;
 
                     if (subexpression_type.data.as != .Proc) {
-                        t.c.report_error(Call.subexpression.position, "expected a procedure, but got '{}'", .{subexpression_type});
-                        exit(1);
+                        t.c.report_fatal_error(Call.subexpression.position, "expected a procedure, but got '{}'", .{subexpression_type});
                     }
 
                     const Proc = &subexpression_type.data.as.Proc;
 
                     if (Proc.params.len != Call.args.len) {
-                        t.c.report_error(Call.subexpression.position, "expected {} arguments, but got {}", .{ Proc.params.len, Call.args.len });
-                        exit(1);
+                        t.c.report_fatal_error(Call.subexpression.position, "expected {} arguments, but got {}", .{ Proc.params.len, Call.args.len });
                     }
 
                     var pit = Proc.params.first;
@@ -1158,15 +1106,13 @@ fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpre
 
                         switch (anode.data.*) {
                             .Designator => |Designator| {
-                                t.c.report_error(Designator.lhs.position, "unexpected designator", .{});
-                                exit(1);
+                                t.c.report_fatal_error(Designator.lhs.position, "unexpected designator", .{});
                             },
                             .Expression => |arg| {
                                 const arg_type = check_expression_only(t, arg);
 
                                 if (!safe_cast(t, arg, param_type)) {
-                                    t.c.report_error(arg.position, "expected '{}', but got '{}'", .{ param_type, arg_type });
-                                    exit(1);
+                                    t.c.report_fatal_error(arg.position, "expected '{}', but got '{}'", .{ param_type, arg_type });
                                 }
                             },
                         }
@@ -1209,8 +1155,7 @@ fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpre
                     const index_type = check_expression_only(t, Subscript.index);
 
                     if (!safe_cast_to_integer(t, Subscript.index, .Any)) {
-                        t.c.report_error(Subscript.subexpression.position, "expected integer, but got '{}'", .{index_type});
-                        exit(1);
+                        t.c.report_fatal_error(Subscript.subexpression.position, "expected integer, but got '{}'", .{index_type});
                     }
 
                     expression.flags.is_lvalue = Subscript.subexpression.flags.is_lvalue;
@@ -1228,8 +1173,7 @@ fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpre
                             }
                         },
                         else => {
-                            t.c.report_error(Subscript.subexpression.position, "expected array or pointer to array, but got '{}'", .{subexpression_type});
-                            exit(1);
+                            t.c.report_fatal_error(Subscript.subexpression.position, "expected array or pointer to array, but got '{}'", .{subexpression_type});
                         },
                     }
                 }
@@ -1250,8 +1194,7 @@ fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpre
                         .Bool,
                         .Void,
                         => {
-                            t.c.report_error(subexpression_result.typ.position, "expected struct, union, or enum type, but got '{}'", .{subexpression_result.typ});
-                            exit(1);
+                            t.c.report_fatal_error(subexpression_result.typ.position, "expected struct, union, or enum type, but got '{}'", .{subexpression_result.typ});
                         },
                         .Field,
                         .Identifier,
@@ -1287,13 +1230,11 @@ fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpre
                         .Pointer => |subtype| switch (subtype.data.as) {
                             .Struct, .Union => |Struct| Struct.scope,
                             else => {
-                                t.c.report_error(Field.subexpression.position, "expected pointer to struct/union, but got '{}'", .{subexpression_result.typ});
-                                exit(1);
+                                t.c.report_fatal_error(Field.subexpression.position, "expected pointer to struct/union, but got '{}'", .{subexpression_result.typ});
                             },
                         },
                         else => {
-                            t.c.report_error(Field.subexpression.position, "expected struct, union, or enum, but got '{}'", .{subexpression_result.typ});
-                            exit(1);
+                            t.c.report_fatal_error(Field.subexpression.position, "expected struct, union, or enum, but got '{}'", .{subexpression_result.typ});
                         },
                     };
 
@@ -1335,8 +1276,7 @@ fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpre
                 check_type(t, As.typ);
                 const expression_type = check_expression_only(t, As.expression);
                 if (!safe_cast(t, As.expression, As.typ)) {
-                    t.c.report_error(As.expression.position, "can't reinterpret '{}' as '{}'", .{ As.typ, expression_type });
-                    exit(1);
+                    t.c.report_fatal_error(As.expression.position, "can't reinterpret '{}' as '{}'", .{ As.typ, expression_type });
                 }
                 expression.flags.is_const = As.expression.flags.is_const;
                 break :result .{ .typ = As.typ, .tag = .Value };
@@ -1346,8 +1286,7 @@ fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpre
 
                 const expression_type = check_expression_only(t, Cast.expression);
                 if (!unsafe_cast(t, Cast.expression, Cast.typ)) {
-                    t.c.report_error(Cast.expression.position, "can't cast '{}' to '{}'", .{ expression_type, Cast.typ });
-                    exit(1);
+                    t.c.report_fatal_error(Cast.expression.position, "can't cast '{}' to '{}'", .{ expression_type, Cast.typ });
                 }
                 expression.flags.is_const = Cast.expression.flags.is_const;
                 break :result .{ .typ = Cast.typ, .tag = .Value };
@@ -1380,8 +1319,7 @@ fn check_expression(t: *TypeChecker, expression: *Ast.Expression) TypecheckExpre
 
                     break :result fns.check_expression_symbol(t, expression, symbol);
                 } else {
-                    t.c.report_error(expression.position, "symbol '{s}' is not defined", .{Identifier.name});
-                    exit(1);
+                    t.c.report_fatal_error(expression.position, "symbol '{s}' is not defined", .{Identifier.name});
                 }
             },
         }
@@ -1406,13 +1344,11 @@ fn resolve_identifier(t: *TypeChecker, expression: *Ast.Expression, scope: *Ast.
                 expression.as = .{ .Symbol = symbol };
                 return symbol;
             } else {
-                t.c.report_error(expression.position, "symbol '{s}' is not defined", .{Identifier.name});
-                exit(1);
+                t.c.report_fatal_error(expression.position, "symbol '{s}' is not defined", .{Identifier.name});
             }
         },
         else => {
-            t.c.report_error(expression.position, "expected identifier", .{});
-            exit(1);
+            t.c.report_fatal_error(expression.position, "expected identifier", .{});
         },
     }
 }
@@ -1420,15 +1356,13 @@ fn resolve_identifier(t: *TypeChecker, expression: *Ast.Expression, scope: *Ast.
 // TODO: line info is not properly reported.
 fn reject_void_type(t: *TypeChecker, typ: *Ast.Type) void {
     if (typ.equal(Ast.void_type)) {
-        t.c.report_error(typ.position, "unexpected 'void' type", .{});
-        exit(1);
+        t.c.report_fatal_error(typ.position, "unexpected 'void' type", .{});
     }
 }
 
 fn reject_symbol(t: *TypeChecker, statement: *Ast.Statement) void {
     if (statement.as == .Symbol) {
-        t.c.report_error(statement.position, "unexpected symbol definition", .{});
-        exit(1);
+        t.c.report_fatal_error(statement.position, "unexpected symbol definition", .{});
     }
 }
 
