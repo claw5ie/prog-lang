@@ -805,11 +805,11 @@ pub fn generate_instruction_at(generator: *IRGenerator, index: usize, opcode: IR
     const ArgsType = @TypeOf(args);
     const args_type_info = @typeInfo(ArgsType);
 
-    if (args_type_info != .Struct) {
+    if (args_type_info != .@"struct") {
         @compileError("expected tuple or struct argument, found " ++ @typeName(ArgsType));
     }
 
-    const fields_info = args_type_info.Struct.fields;
+    const fields_info = args_type_info.@"struct".fields;
 
     if (fields_info.len > IR.Instruction.maximum_operands_count) {
         // TODO: convert 'maximum_operands_count' to string?
